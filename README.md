@@ -28,7 +28,7 @@
 На сервере, от root:
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
 ```
 ## Управление
 
