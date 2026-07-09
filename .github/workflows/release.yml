@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build frontend
+        working-directory: awg-ui
+        run: |
+          npm install
+          npm run build
+
+      - name: Package archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir "awgcontrol-${VERSION}"
+          cp -r awg-ctrl awg-ui cli "awgcontrol-${VERSION}/"
+          tar --exclude='node_modules' -czf "awgcontrol-${VERSION}.tar.gz" "awgcontrol-${VERSION}/"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" "awgcontrol-${VERSION}.tar.gz" \
+            --title "${GITHUB_REF_NAME}" --generate-notes

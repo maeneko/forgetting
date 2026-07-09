@@ -2,7 +2,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #!/usr/bin/env bash
-# sudo bash <(curl -Ls https://amnesia.ma7neko.ru/forgeting/install.sh)
 
 set -euo pipefail
 
@@ -21,7 +20,8 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 [[ -z "${BASH_VERSION:-}" ]] && fail "Нужен bash: bash install.sh"
 
 VERSION="0.1.3.1"
-BASE_URL="https://amnesia.ma7neko.ru/forgeting"   # хост с install.sh и архивами
+GH_REPO="maeneko/forgetting"
+BASE_URL="https://github.com/${GH_REPO}/releases/download/v${VERSION}"
 PROJECT="/opt/awg-control"
 AMNEZIA_DIR="/etc/amnezia"
 AWG_DIR="$AMNEZIA_DIR/amneziawg"
@@ -84,9 +84,9 @@ fi
 
 # 3) Доступ в интернет: нужен для архива, Node и пакетов AWG. Без -f: любой
 #    HTTP-ответ = связь есть; ненулевой код только при сбое соединения/DNS.
-if ! curl -sS --connect-timeout 8 -o /dev/null "$BASE_URL/" 2>/dev/null; then
+if ! curl -sS --connect-timeout 8 -o /dev/null "https://github.com" 2>/dev/null; then
     NET_OK=0
-    NET_WHY="нет доступа к $BASE_URL — проверь интернет и DNS"
+    NET_WHY="нет доступа к github.com — проверь интернет и DNS"
 fi
 
 # Чеклист: ✓ — пройдено, ✗ — нет.
