@@ -28,7 +28,7 @@
 На сервере, от root:
 
 ```bash
-sudo bash <(curl -Ls https://amnesia.ma7neko.ru/forgeting/install.sh)
+sudo bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
 ```
 ## Управление
 
