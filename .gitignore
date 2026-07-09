@@ -1,0 +1,22 @@
+/tmp
+/out-tsc
+
+**/node_modules/
+**/dist/
+cli/cli.env
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/.pnp
+.pnp.js
+
+.DS_Store
+*.tar.gz
+
+.vscode/*
+.idea/
+
+# Все markdown, кроме README.md
+*.md
+!README.md

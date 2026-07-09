@@ -1,0 +1,72 @@
+/* Стили вкладки «API-ключи». Общая дизайн-система — в App.css. */
+
+/* Открытый API-ключ (показывается один раз при создании) */
+.apikey-value {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--on-surface);
+    background: var(--surface-container);
+    border: 1px solid var(--outline-variant);
+    border-radius: 12px;
+    padding: 12px 14px;
+    width: 100%;
+    word-break: break-all;
+    user-select: all;
+}
+
+.apikey-cards-list { display: none; flex-direction: column; gap: 12px; }
+
+.apikey-count { font-size: 12px; color: var(--neutral-text); }
+.apikey-empty {
+    font-size: 14px;
+    color: var(--neutral-text);
+    text-align: center;
+    padding: 48px 0;
+}
+.apikey-card {
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--r-card);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.apikey-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.apikey-card-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+.apikey-card-num   { font-size: 12px; color: var(--neutral-dot); flex-shrink: 0; }
+.apikey-card-label {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--on-surface);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.apikey-card-prefix {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--neutral-text);
+    word-break: break-all;
+}
+.apikey-card-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--neutral-text);
+}
+
+@media (max-width: 640px) {
+    .apikey-cards-list { display: flex; }
+}

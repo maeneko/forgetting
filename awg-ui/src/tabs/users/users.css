@@ -1,0 +1,70 @@
+/* Стили вкладки «Пользователи». Общая дизайн-система (палитра, btn, chip, field,
+   table-card, toolbar, layout) остаётся в App.css — здесь только уникальное вкладки. */
+
+.user-cards-list { display: none; flex-direction: column; gap: 12px; }
+
+.users-count { font-size: 12px; color: var(--neutral-text); }
+.empty-cards {
+    font-size: 14px;
+    color: var(--neutral-text);
+    text-align: center;
+    padding: 48px 0;
+}
+.user-card {
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--r-card);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.user-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.user-card-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+.user-card-num  { font-size: 12px; color: var(--neutral-dot); flex-shrink: 0; }
+.user-card-name {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--on-surface);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.user-card-ip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--neutral-text);
+}
+.user-card-ip-text { font-family: var(--mono); font-size: 13px; }
+
+.user-card-metrics { display: flex; gap: 8px; }
+.metric-block {
+    flex: 1;
+    background: var(--surface-container);
+    border-radius: var(--r-table);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.metric-label { font-size: 12px; color: var(--neutral-text); }
+.metric-value  { font-family: var(--mono); font-size: 18px; font-weight: 500; color: var(--on-surface); }
+
+.user-card-actions { display: flex; gap: 8px; }
+.user-card-actions .btn--outline { flex: 1; }
+
+/* На мобильной таблица скрывается (.table-card в App.css), карточки показываются. */
+@media (max-width: 640px) {
+    .user-cards-list { display: flex; }
+}
