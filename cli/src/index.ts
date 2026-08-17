@@ -287,7 +287,7 @@ async function interactiveMenu() {
 
     const printMenu = () => {
         console.clear();
-        console.log(`\n${bold(`${C.blue}── Forgetting Alpha 0.1.3.1 ──${C.reset}`)}\n`);
+        console.log(`\n${bold(`${C.blue}── Forgetting Alpha 0.1.4 ──${C.reset}`)}\n`);
 
         for (const name of ALL) {
             const running = isRunning(name);

@@ -19,7 +19,7 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 [[ $EUID -ne 0 ]]          && fail "Запусти от root: sudo bash install.sh"
 [[ -z "${BASH_VERSION:-}" ]] && fail "Нужен bash: bash install.sh"
 
-VERSION="0.1.3.1"
+VERSION="0.1.4"
 GH_REPO="maeneko/forgetting"
 BASE_URL="https://github.com/${GH_REPO}/releases/download/v${VERSION}"
 PROJECT="/opt/awg-control"
