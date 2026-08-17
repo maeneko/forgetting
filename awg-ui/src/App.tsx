@@ -214,7 +214,7 @@ export default function App() {
                         >
                             <div className="sidebar-logo">
                                 <span className="logo-name">Forgetting</span>
-                                <span className="sidebar-version">Alpha 0.1.4</span>
+                                <span className="sidebar-version">Alpha 0.1.4.1</span>
                             </div>
                             <hr className="drawer-divider" />
                             {TABS.map(t => (

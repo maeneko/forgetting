@@ -19,7 +19,7 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 [[ $EUID -ne 0 ]]          && fail "Запусти от root: sudo bash install.sh"
 [[ -z "${BASH_VERSION:-}" ]] && fail "Нужен bash: bash install.sh"
 
-VERSION="0.1.4"
+VERSION="0.1.4.1"
 GH_REPO="maeneko/forgetting"
 BASE_URL="https://github.com/${GH_REPO}/releases/download/v${VERSION}"
 PROJECT="/opt/awg-control"
@@ -469,18 +469,48 @@ kernel_lt_5_5() {
     [[ "$maj" -lt 5 || ( "$maj" -eq 5 && "$min" -lt 5 ) ]]
 }
 
-MOD_VER=$(modinfo -F version amneziawg 2>/dev/null || echo "")
+# 🛑 Версий у модуля две, и путать их нельзя:
+#   modinfo                       — что лежит на диске (после apt/DKMS);
+#   /sys/module/amneziawg/version — что реально загружено в ядро.
+# `apt --only-upgrade` пересобирает модуль, но НЕ переставляет уже загруженный.
+# Ориентироваться на modinfo — значит написать 3.1-конфиг, который старый
+# загруженный модуль отвергнет: `awg setconf` вернёт «Unable to modify
+# interface: Invalid argument», и awg-quick up упадёт. Решает перезагрузка модуля.
+disk_mod_ver()   { modinfo -F version amneziawg 2>/dev/null || echo ""; }
+loaded_mod_ver() { cat /sys/module/amneziawg/version 2>/dev/null || echo ""; }
+
+MOD_VER=$(disk_mod_ver)
 if [[ "${MOD_VER%%.*}" != "3" ]]; then
     warn "Модуль amneziawg версии '${MOD_VER:-неизвестно}' — для AmneziaWG 3.1 нужна 3.x. Пробуем обновить."
     apt-get update >/dev/null 2>&1 || true
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
         apt-get install -y --only-upgrade amneziawg amneziawg-dkms amneziawg-tools >/dev/null 2>&1 || true
-    MOD_VER=$(modinfo -F version amneziawg 2>/dev/null || echo "")
+    MOD_VER=$(disk_mod_ver)
 fi
+
+# Загруженный отстал от дискового — перезагружаем. Интерфейс держит модуль,
+# поэтому сначала опускаем его; awg1 на этом шаге ещё не нужен.
+LOADED_VER=$(loaded_mod_ver)
+if [[ -n "$LOADED_VER" && "$LOADED_VER" != "$MOD_VER" ]]; then
+    warn "В ядре загружен модуль $LOADED_VER, на диске $MOD_VER — перезагружаем модуль."
+    awg-quick down "$IFACE" 2>/dev/null || true
+    ip link delete dev "$IFACE" 2>/dev/null || true
+    if modprobe -r amneziawg 2>/dev/null && modprobe amneziawg 2>/dev/null; then
+        LOADED_VER=$(loaded_mod_ver)
+        ok "Модуль перезагружен: в ядре теперь $LOADED_VER"
+    else
+        warn "Не удалось перезагрузить модуль (занят?). Нужна перезагрузка сервера."
+    fi
+fi
+
+# Дальше решает ТОЛЬКО загруженная версия — именно она обслуживает интерфейс.
+[[ -n "$LOADED_VER" ]] && MOD_VER="$LOADED_VER"
 
 if [[ "${MOD_VER%%.*}" != "3" ]]; then
     AWG3="n"
-    warn "Модуль остался на версии '${MOD_VER:-неизвестно}' — ставим сервер на AmneziaWG 2.0."
+    warn "В ядре модуль версии '${MOD_VER:-неизвестно}' — ставим сервер на AmneziaWG 2.0."
+    [[ "$(disk_mod_ver)" == 3.* ]] && \
+        warn "На диске уже 3.x — после перезагрузки сервера можно переустановить и получить 3.1."
 elif kernel_lt_5_5; then
     AWG3="n"
     warn "Ядро $KERNEL старше 5.5 — header protection не соберётся (upstream issue #210)."
@@ -637,7 +667,41 @@ if awg show "$IFACE" &>/dev/null; then
     awg-quick down "$IFACE" 2>/dev/null || true
 fi
 
-awg-quick up "$IFACE" || fail "awg-quick up $IFACE завершился с ошибкой"
+# Подъём интерфейса — единственная настоящая проверка, что ядро приняло
+# 3.1-параметры. Модуль на отказ отвечает лишь «Invalid argument», причину
+# печатает только в dmesg и только при включённом dynamic debug. Поэтому:
+# упали → включаем debug, пробуем ещё раз, показываем причину, и если и это не
+# помогло — снимаем 3.x-ключи и поднимаемся на 2.0, а не валим установку.
+AWG3_KEY_RE='^(HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts|RandomTrailers|DisableCookies) *='
+
+if ! awg-quick up "$IFACE"; then
+    ip link delete dev "$IFACE" 2>/dev/null || true
+
+    if [[ "$AWG3" != "y" ]]; then
+        fail "awg-quick up $IFACE завершился с ошибкой"
+    fi
+
+    warn "Ядро отвергло конфиг AmneziaWG 3.1. Выясняем причину."
+    echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control 2>/dev/null || true
+
+    if awg-quick up "$IFACE"; then
+        ok "Со второй попытки интерфейс поднялся"
+    else
+        ip link delete dev "$IFACE" 2>/dev/null || true
+        echo "  ── dmesg (последние 15 строк) ─────────────────"
+        dmesg 2>/dev/null | grep -i amneziawg | tail -n 15 | sed 's/^/    /' || true
+        echo "  ───────────────────────────────────────────────"
+
+        cp "$AWG_CONF" "${AWG_CONF}.awg31"
+        sed -i -E "/$AWG3_KEY_RE/d" "$AWG_CONF"
+        AWG3="n"; NEW_GEN="2.0"
+        warn "Откатываемся на AmneziaWG 2.0. Конфиг 3.1 сохранён: ${AWG_CONF}.awg31"
+
+        awg-quick up "$IFACE" \
+            || fail "awg-quick up $IFACE не работает даже на 2.0 — смотри dmesg выше"
+        ok "Интерфейс поднят на AmneziaWG 2.0"
+    fi
+fi
 
 # awg-quick не всегда применяет приватный ключ из [Interface]/PostUp
 # (наблюдалось: awg show public-key = none сразу после up). Если ключ не
@@ -653,6 +717,23 @@ if [[ "$RUNNING_PUB" == "$PUB_KEY" ]]; then
     ok "Интерфейс $IFACE запущен, ключ применён"
 else
     fail "Ключ на $IFACE не совпал: ${RUNNING_PUB:-none} ≠ $PUB_KEY"
+fi
+
+# UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
+# цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT
+# дело не доходит и трафик клиентов наружу режется: в dmesg сыплется
+# «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
+# Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
+if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    echo "  → UFW активен, открываем маршрут и порты"
+    ufw route allow in on "$IFACE" out on "$NET_IFACE" >/dev/null 2>&1 \
+        || warn "ufw route allow не сработал — трафик клиентов может резаться"
+    ufw allow "${AWG_PORT}/udp" >/dev/null 2>&1 || warn "не удалось открыть ${AWG_PORT}/udp"
+    ufw allow "${UI_PORT}/tcp"  >/dev/null 2>&1 || warn "не удалось открыть ${UI_PORT}/tcp"
+    ufw reload >/dev/null 2>&1 || true
+    ok "UFW: форвардинг $IFACE → $NET_IFACE, порты ${AWG_PORT}/udp и ${UI_PORT}/tcp"
+else
+    echo "  → UFW не активен, правила фаервола не трогаем"
 fi
 
 step "6/7  npm install"
