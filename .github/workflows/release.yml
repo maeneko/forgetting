@@ -37,4 +37,4 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release create "${GITHUB_REF_NAME}" "awgcontrol-${VERSION}.tar.gz" \
-            --title "${GITHUB_REF_NAME}" --generate-notes
+            --title "${GITHUB_REF_NAME}" --generate-notes --prerelease
