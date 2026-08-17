@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Ivan Vasilev
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 // Автообнаружение вкладок. Каждая вкладка — самодостаточная папка tabs/<name>/:
 //   index.tsx      — компонент + логика
 //   <name>.css     — стили вкладки (импортит сам компонент)

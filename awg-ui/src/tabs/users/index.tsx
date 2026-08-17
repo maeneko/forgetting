@@ -1,8 +1,11 @@
+// Copyright (c) 2026 Ivan Vasilev
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useRef, useCallback } from 'react';
 import QRCode from 'qrcode';
 import {
     apiFetch, vpnKeyToConf, downloadFile, copyText, bytes, timeAgo,
-    type User, type PageProps,
+    type User, type PageProps, type AwgGen,
 } from '../../lib/shared';
 import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe } from '../../components/icons';
 import './users.css';
@@ -13,7 +16,11 @@ export default function UsersPage({ token, showMsg }: PageProps) {
     const [users, setUsers]     = useState<User[]>([]);
     const [newName, setNewName] = useState('');
     const [qrModal, setQrModal] = useState<{ name: string; dataUrl: string; vpnKey: string } | null>(null);
+    // Поколение, на котором сейчас работает интерфейс. Ключи, выданные на другом
+    // поколении, уже не подключатся — их надо перевыпустить.
+    const [serverGen, setServerGen] = useState<AwgGen>('2');
     const statsRef              = useRef<ReturnType<typeof setInterval> | null>(null);
+    const stale                 = users.filter(u => u.key_gen !== serverGen);
 
     const loadStats = useCallback(async (tok: string) => {
         try {
@@ -27,13 +34,33 @@ export default function UsersPage({ token, showMsg }: PageProps) {
 
     const loadUsers = useCallback(async (tok: string) => {
         try {
-            const data = await apiFetch('GET', '/api/users', tok);
+            const [data, health] = await Promise.all([
+                apiFetch('GET', '/api/users', tok),
+                apiFetch('GET', '/health', tok),
+            ]);
             setUsers(data.users ?? []);
+            setServerGen(health.gen ?? '2');
             await loadStats(tok);
         } catch {
             showMsg('Ошибка загрузки');
         }
     }, [loadStats, showMsg]);
+
+    // Пересобирает vpn:// ключи всех пользователей на текущих параметрах интерфейса.
+    // IP и ключевая пара сохраняются, но клиентам нужно заново импортировать ключ.
+    const reissueKeys = useCallback(async () => {
+        if (!confirm(
+            `Перевыпустить ключи (${stale.length} шт.) на поколении ${serverGen}?\n\n` +
+            'Старые ключи перестанут работать — всем придётся импортировать ключ заново.',
+        )) return;
+        try {
+            const r = await apiFetch('POST', '/api/users/reissue', token);
+            showMsg(`Перевыпущено: ${r.reissued} из ${r.total}`);
+            await loadUsers(token);
+        } catch {
+            showMsg('Не удалось перевыпустить ключи');
+        }
+    }, [stale.length, serverGen, token, loadUsers, showMsg]);
 
     const createUser = useCallback(async () => {
         if (!newName) return;
@@ -93,6 +120,11 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                     <button className="btn btn--tonal" onClick={() => loadUsers(token)}>
                         <IcoRefresh /> Обновить
                     </button>
+                    {stale.length > 0 && (
+                        <button className="btn btn--danger" onClick={reissueKeys}>
+                            <IcoRefresh /> Перевыпустить ключи ({stale.length})
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -125,7 +157,20 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                                 : 'никогда'}
                                     </span>
                                 </td>
-                                <td>{u.name}</td>
+                                <td>
+                                    {u.name}
+                                    {u.key_gen !== serverGen && (
+                                        <span
+                                            className="tip-wrap user-gen"
+                                            data-tip={`Ключ выдан на AWG ${u.key_gen}, сервер работает на ${serverGen}`}
+                                        >
+                                            <span className="chip chip--error">
+                                                <span className="chip-dot" />
+                                                AWG {u.key_gen}
+                                            </span>
+                                        </span>
+                                    )}
+                                </td>
                                 <td className="td-mono">{u.ip}</td>
                                 <td>{bytes(u.rx)}</td>
                                 <td>{bytes(u.tx)}</td>
@@ -159,6 +204,12 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                             <div className="user-card-title">
                                 <span className="user-card-num">#{i + 1}</span>
                                 <span className="user-card-name">{u.name}</span>
+                                {u.key_gen !== serverGen && (
+                                    <span className="chip chip--error">
+                                        <span className="chip-dot" />
+                                        AWG {u.key_gen}
+                                    </span>
+                                )}
                             </div>
                             <span className={`chip chip--${u.online ? 'online' : 'offline'}`}>
                                 <span className="chip-dot" />

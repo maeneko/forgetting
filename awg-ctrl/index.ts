@@ -64,6 +64,21 @@ db.exec(`
 
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ip ON users (ip)");
 
+// Миграции users: better-sqlite3 синхронный, ALTER TABLE идемпотентным не бывает,
+// поэтому смотрим фактический список колонок.
+//   key_gen      — поколение протокола, на параметрах которого выдан vpn_key
+//                  ('2' для всего, что заведено до появления 3.1)
+//   vpn_key_prev — предыдущий блоб, чтобы перевыпуск можно было откатить
+{
+    const cols = new Set(
+        (db.prepare("PRAGMA table_info(users)").all() as { name: string }[]).map(c => c.name),
+    );
+    if (!cols.has("key_gen"))
+        db.exec("ALTER TABLE users ADD COLUMN key_gen TEXT NOT NULL DEFAULT '2'");
+    if (!cols.has("vpn_key_prev"))
+        db.exec("ALTER TABLE users ADD COLUMN vpn_key_prev TEXT NOT NULL DEFAULT ''");
+}
+
 db.exec(`
     CREATE TABLE IF NOT EXISTS config (
                                           key   TEXT PRIMARY KEY,
@@ -106,12 +121,29 @@ function initConfig() {
     return { serverIp, serverPort: Number(serverPort), serverName };
 }
 
-interface AwgParams {
+// Ключи, появившиеся в AmneziaWG 3.0/3.1. Пустая строка = ключ не задан, тогда
+// интерфейс работает в режиме 2.0 и его нет ни в conf, ни в vpn:// ключе.
+// Порядок массива = порядок строк в клиентском .conf (см. buildClientConf).
+const AWG3_KEYS = [
+    "HeaderProtectionKey",
+    "ContentPaddingAddition",
+    "RekeyAfterTime",
+    "RekeyTimeout",
+    "RejectAfterTime",
+    "KeepaliveTimeout",
+    "MaxHandshakeAttempts",
+    "RandomTrailers",
+    "DisableCookies",
+] as const;
+
+type Awg3Key = (typeof AWG3_KEYS)[number];
+
+type AwgParams = {
     Jc: number; Jmin: number; Jmax: number;
     S1: number; S2: number; S3: number; S4: number;
     H1: string; H2: string; H3: string; H4: string;
     I1: string; I2: string; I3: string; I4: string; I5: string;
-}
+} & Record<Awg3Key, string>;
 
 const DEFAULT_AWG_PARAMS: AwgParams = {
     Jc: 6, Jmin: 10, Jmax: 50,
@@ -122,6 +154,11 @@ const DEFAULT_AWG_PARAMS: AwgParams = {
     H4: "2143656228-2147444225",
     I1: "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>",
     I2: "", I3: "", I4: "", I5: "",
+    // 3.x по умолчанию выключен: без conf-а сервер остаётся на 2.0.
+    HeaderProtectionKey: "", ContentPaddingAddition: "",
+    RekeyAfterTime: "", RekeyTimeout: "", RejectAfterTime: "",
+    KeepaliveTimeout: "", MaxHandshakeAttempts: "",
+    RandomTrailers: "", DisableCookies: "",
 };
 
 function readAwgParams(): AwgParams {
@@ -134,7 +171,9 @@ function readAwgParams(): AwgParams {
     const iface = readFileSync(confFile, "utf8").split(/^\[Peer\]/m)[0];
 
     const numKeys: (keyof AwgParams)[] = ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4"];
-    const strKeys: (keyof AwgParams)[] = ["H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5"];
+    const strKeys: (keyof AwgParams)[] = [
+        "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5", ...AWG3_KEYS,
+    ];
 
     for (const k of numKeys) {
         const m = iface.match(new RegExp(`^\\s*${k}\\s*=\\s*(\\d+)`, "m"));
@@ -144,11 +183,26 @@ function readAwgParams(): AwgParams {
         const m = iface.match(new RegExp(`^\\s*${k}\\s*=\\s*(.*)$`, "m"));
         if (m) (params[k] as string) = m[1].trim();
     }
-    logger.info("awg params loaded from conf", { Jc: params.Jc, H1: params.H1 });
+    logger.info("awg params loaded from conf", {
+        Jc: params.Jc, H1: params.H1, gen: genOf(params),
+    });
     return params;
 }
 
+// Поколение протокола выводим из самих параметров, отдельного флага нет: conf
+// остаётся единственным источником правды. Header protection — та фича, которая
+// ломает совместимость с 2.0, поэтому именно она и определяет поколение.
+function genOf(p: AwgParams): "2" | "3.1" {
+    return p.HeaderProtectionKey ? "3.1" : "2";
+}
+
+// PersistentKeepalive в 3.1 задаётся диапазоном (дефолт клиента AmneziaVPN);
+// в 2.0 это одно число. Уходит и в серверные [Peer], и в клиентский конфиг.
+const KEEPALIVE_BY_GEN: Record<"2" | "3.1", string> = { "2": "25", "3.1": "25-35" };
+
 const runtimeConfig = initConfig();
+const AWG_PARAMS = readAwgParams();
+const AWG_GEN    = genOf(AWG_PARAMS);
 const CONFIG = {
     interface:  "awg1",
     confDir:    "/etc/amnezia/amneziawg",
@@ -159,23 +213,32 @@ const CONFIG = {
     dns1:       "1.1.1.1",
     dns2:       "1.0.0.1",
     mtu:        1376,
-    keepalive:  25,
-    awgParams:  readAwgParams(),
+    keepalive:  KEEPALIVE_BY_GEN[AWG_GEN],
+    awgParams:  AWG_PARAMS,
+    gen:        AWG_GEN,
 };
 
 interface UserRow {
-    name:    string;
-    ip:      string;
-    pub_key: string;
-    vpn_key: string;
-    psk_key: string;
+    name:         string;
+    ip:           string;
+    pub_key:      string;
+    vpn_key:      string;
+    psk_key:      string;
+    key_gen:      string;
+    vpn_key_prev: string;
 }
 
 const stmts = {
     get:    db.prepare<[string], UserRow>("SELECT * FROM users WHERE name = ?"),
-    insert: db.prepare<[string, string, string, string, string]>("INSERT INTO users (name, ip, pub_key, vpn_key, psk_key) VALUES (?, ?, ?, ?, ?)"),
+    all:    db.prepare<[], UserRow>("SELECT * FROM users"),
+    insert: db.prepare<[string, string, string, string, string, string]>("INSERT INTO users (name, ip, pub_key, vpn_key, psk_key, key_gen) VALUES (?, ?, ?, ?, ?, ?)"),
     delete: db.prepare<[string]>("DELETE FROM users WHERE name = ?"),
     ips:    db.prepare<[], { ip: string }>("SELECT ip FROM users"),
+    // Перевыпуск: старый блоб уезжает в vpn_key_prev, pub_key/psk_key могут
+    // смениться, если исходный ключ не удалось разобрать.
+    reissue: db.prepare<[string, string, string, string, string]>(
+        "UPDATE users SET vpn_key_prev = vpn_key, vpn_key = ?, pub_key = ?, psk_key = ?, key_gen = ? WHERE name = ?",
+    ),
 };
 
 function run(cmd: string): string {
@@ -207,7 +270,10 @@ function nextIp(): string {
     throw new Error("Подсеть заполнена");
 }
 
-// Официальный формат .conf: PrivateKey → AWG params (Jc,S,H,I) → Address → DNS
+// Официальный формат .conf: PrivateKey → AWG params (Jc,S,H,I) → 3.x-ключи →
+// Address → DNS. Порядок 3.x-блока взят из client/server_scripts/awg/template.conf
+// клиента AmneziaVPN; пустые ключи не выводятся вовсе — тогда конфиг остаётся
+// ровно тем же 2.0-конфигом, что и до появления поддержки 3.1.
 // ВНИМАНИЕ: пустые I2–I5 должны выводиться как «I2 = » с ОДНИМ хвостовым пробелом
 // (так в рабочих ключах Amnezia). Пробел даётся через ${" "}, чтобы его не срезали
 // ни IDE (strip trailing whitespace), ни инструменты правки. Не «чистить»!
@@ -217,6 +283,7 @@ function buildClientConf(
     serverPub: string,
 ): string {
     const p = CONFIG.awgParams;
+    const awg3 = AWG3_KEYS.filter(k => p[k]).map(k => `${k} = ${p[k]}\n`).join("");
     return `[Interface]
 PrivateKey = ${keys.privateKey}
 Jc = ${p.Jc}
@@ -235,7 +302,7 @@ I2 =${" "}
 I3 =${" "}
 I4 =${" "}
 I5 =${" "}
-Address = ${ip}/32
+${awg3}Address = ${ip}/32
 DNS = ${CONFIG.dns1}, ${CONFIG.dns2}
 
 [Peer]
@@ -255,12 +322,29 @@ function encodeVpnKey(
     const p = CONFIG.awgParams;
     const clientConf = buildClientConf(keys, ip, serverPub);
 
-    const lastConfigObj = {
+    // Ключи в объектах идут в том же ASCII-алфавитном порядке, в каком их
+    // сериализует QJsonObject клиента AmneziaVPN. Незаданные 3.x-ключи
+    // выбрасываются в dropEmptyAwg3 — на 2.0 объекты остаются прежними байт-в-байт.
+    const dropEmptyAwg3 = <T extends Record<string, unknown>>(o: T): T => {
+        for (const k of AWG3_KEYS) if (!p[k]) delete o[k];
+        return o;
+    };
+
+    const lastConfigObj = dropEmptyAwg3({
+        ContentPaddingAddition: p.ContentPaddingAddition,
+        DisableCookies:         p.DisableCookies,
         H1: p.H1, H2: p.H2, H3: p.H3, H4: p.H4,
+        HeaderProtectionKey:    p.HeaderProtectionKey,
         I1: p.I1, I2: "", I3: "", I4: "", I5: "",
         Jc:   String(p.Jc),
         Jmax: String(p.Jmax),
         Jmin: String(p.Jmin),
+        KeepaliveTimeout:       p.KeepaliveTimeout,
+        MaxHandshakeAttempts:   p.MaxHandshakeAttempts,
+        RandomTrailers:         p.RandomTrailers,
+        RejectAfterTime:        p.RejectAfterTime,
+        RekeyAfterTime:         p.RekeyAfterTime,
+        RekeyTimeout:           p.RekeyTimeout,
         S1: String(p.S1), S2: String(p.S2), S3: String(p.S3), S4: String(p.S4),
         allowed_ips:           ["0.0.0.0/0", "::/0"],
         clientId:              keys.publicKey,
@@ -274,25 +358,34 @@ function encodeVpnKey(
         port:                  CONFIG.serverPort,
         psk_key:               keys.presharedKey,
         server_pub_key:        serverPub,
-    };
+    });
 
     const json = JSON.stringify({
         containers: [{
             container: "amnezia-awg2",
-            awg: {
+            awg: dropEmptyAwg3({
+                ContentPaddingAddition: p.ContentPaddingAddition,
+                DisableCookies:         p.DisableCookies,
                 H1: p.H1, H2: p.H2, H3: p.H3, H4: p.H4,
+                HeaderProtectionKey:    p.HeaderProtectionKey,
                 I1: p.I1, I2: "", I3: "", I4: "", I5: "",
                 Jc:   String(p.Jc),
                 Jmax: String(p.Jmax),
                 Jmin: String(p.Jmin),
+                KeepaliveTimeout:       p.KeepaliveTimeout,
+                MaxHandshakeAttempts:   p.MaxHandshakeAttempts,
+                RandomTrailers:         p.RandomTrailers,
+                RejectAfterTime:        p.RejectAfterTime,
+                RekeyAfterTime:         p.RekeyAfterTime,
+                RekeyTimeout:           p.RekeyTimeout,
                 S1: String(p.S1), S2: String(p.S2),
                 S3: String(p.S3), S4: String(p.S4),
                 last_config:      JSON.stringify(lastConfigObj, null, 2),
                 port:             String(CONFIG.serverPort),
-                protocol_version: "2",
+                protocol_version: CONFIG.gen,
                 subnet_address:   `${CONFIG.subnet}.0.0`,
                 transport_proto:  "udp",
-            },
+            }),
         }],
         defaultContainer: "amnezia-awg2",
         description:      CONFIG.serverName,
@@ -309,6 +402,77 @@ function encodeVpnKey(
     return "vpn://" + Buffer.concat([header, compressed])
         .toString("base64url")
         .replace(/=+$/, "");
+}
+
+// Обратная к encodeVpnKey: vpn:// → base64url → снять 4-байтовый BE-заголовок
+// длины → inflate → JSON. Приватный ключ клиента больше нигде не хранится, поэтому
+// это единственный способ перевыпустить ключ, не меняя личность пира.
+function decodeVpnKey(vpnKey: string): any | null {
+    try {
+        const buf = Buffer.from(vpnKey.replace(/^vpn:\/\//, ""), "base64url");
+        if (buf.length <= 4) return null;
+        return JSON.parse(zlib.inflateSync(buf.subarray(4)).toString("utf8"));
+    } catch {
+        return null;
+    }
+}
+
+function clientPrivKeyFrom(vpnKey: string): string | null {
+    const lastConfig = decodeVpnKey(vpnKey)?.containers?.[0]?.awg?.last_config;
+    if (typeof lastConfig !== "string") return null;
+    try {
+        const priv = JSON.parse(lastConfig).client_priv_key;
+        return typeof priv === "string" && priv ? priv : null;
+    } catch {
+        return null;
+    }
+}
+
+interface ReissueResult { total: number; reissued: number; regenerated: string[]; backup: string }
+
+// Перевыпуск всех vpn:// ключей на текущих параметрах интерфейса. Нужен после
+// смены поколения (2.0 → 3.1): старые ключи собраны на старых параметрах и
+// перестают работать. IP, pub_key и psk_key сохраняются — на проводе ничего не
+// меняется, клиенту достаточно заново импортировать ключ.
+function reissueAll(): ReissueResult {
+    const users     = stmts.all.all();
+    const serverPub = getServerPublicKey();
+    const backup    = `${dbPath}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    db.prepare("VACUUM INTO ?").run(backup);
+    logger.info("reissue: db backed up", { backup, users: users.length });
+
+    const regenerated: string[] = [];
+    let reissued = 0;
+
+    for (const u of users) {
+        const priv = clientPrivKeyFrom(u.vpn_key);
+        let keys: ReturnType<typeof generateKeys>;
+
+        if (priv) {
+            keys = { privateKey: priv, publicKey: u.pub_key, presharedKey: u.psk_key };
+        } else {
+            // Блоб не разобрался — личность пира восстановить неоткуда, выдаём новую.
+            logger.warn("reissue: vpn_key не декодируется, генерируем новую пару", { name: u.name });
+            keys = generateKeys();
+            spawnSync("awg", ["set", CONFIG.interface, "peer", u.pub_key, "remove"]);
+            const r = setPeer(keys.publicKey, keys.presharedKey, u.ip);
+            if (r.status !== 0) {
+                logger.error("reissue: awg set failed", { name: u.name, stderr: r.stderr?.toString() });
+                continue;
+            }
+            regenerated.push(u.name);
+        }
+
+        stmts.reissue.run(
+            encodeVpnKey(keys, u.ip, serverPub),
+            keys.publicKey, keys.presharedKey, CONFIG.gen, u.name,
+        );
+        reissued++;
+    }
+
+    syncPeers();
+    logger.info("reissue: done", { total: users.length, reissued, regenerated: regenerated.length });
+    return { total: users.length, reissued, regenerated, backup };
 }
 
 function getPeersData(): Record<string, { online: boolean; lastHandshake: number; rx: number; tx: number }> {
@@ -430,36 +594,47 @@ function startInterface() {
     return getInterfaceStatus();
 }
 
+// PSK уходит во временный файл, а не в аргументы: иначе он виден в /proc/<pid>/cmdline.
+function setPeer(pubKey: string, psk: string, ip: string) {
+    const tmpPsk = `/tmp/awg_psk_${Date.now()}.tmp`;
+    writeFileSync(tmpPsk, psk, { mode: 0o600 });
+    try {
+        return spawnSync("awg", [
+            "set", CONFIG.interface, "peer", pubKey,
+            "preshared-key", tmpPsk,
+            "allowed-ips", `${ip}/32`,
+            "persistent-keepalive", CONFIG.keepalive,
+        ]);
+    } finally {
+        try { fs.unlinkSync(tmpPsk); } catch {}
+    }
+}
+
 function addUser(username: string): UserRow {
     const keys      = generateKeys();
     const serverPub = getServerPublicKey();
 
     const ip = db.transaction(() => {
         const ip = nextIp();
-        stmts.insert.run(username, ip, keys.publicKey, "", keys.presharedKey);
+        stmts.insert.run(username, ip, keys.publicKey, "", keys.presharedKey, CONFIG.gen);
         return ip;
     })();
 
     const vpn_key = encodeVpnKey(keys, ip, serverPub);
     db.prepare("UPDATE users SET vpn_key = ? WHERE name = ?").run(vpn_key, username);
 
-    const tmpPsk = `/tmp/awg_psk_${Date.now()}.tmp`;
-    writeFileSync(tmpPsk, keys.presharedKey);
-    const r = spawnSync("awg", [
-        "set", CONFIG.interface, "peer", keys.publicKey,
-        "preshared-key", tmpPsk,
-        "allowed-ips", `${ip}/32`,
-        "persistent-keepalive", String(CONFIG.keepalive),
-    ]);
-    try { fs.unlinkSync(tmpPsk); } catch {}
+    const r = setPeer(keys.publicKey, keys.presharedKey, ip);
     if (r.status !== 0) {
         stmts.delete.run(username);
         throw new Error(`awg set failed: ${r.stderr?.toString()}`);
     }
 
     rebuildConf();
-    logger.info("user created", { name: username, ip });
-    return { name: username, ip, pub_key: keys.publicKey, vpn_key, psk_key: keys.presharedKey };
+    logger.info("user created", { name: username, ip, gen: CONFIG.gen });
+    return {
+        name: username, ip, pub_key: keys.publicKey, vpn_key,
+        psk_key: keys.presharedKey, key_gen: CONFIG.gen, vpn_key_prev: "",
+    };
 }
 
 function removeUser(username: string) {
@@ -521,6 +696,7 @@ app.get("/health", (_req, res) => {
         status: up ? "ok" : "degraded",
         server: CONFIG.serverName,
         ip:     CONFIG.serverIp,
+        gen:    CONFIG.gen,
         awg:    { status: up ? "ok" : "down", peers },
     });
 });
@@ -534,7 +710,7 @@ app.post("/api/users", auth, validateName, handler((req, res) => {
 }));
 
 app.get("/api/users", auth, handler((_req, res) => {
-    const users = db.prepare("SELECT name, ip, pub_key, vpn_key FROM users WHERE vpn_key != ''").all() as UserRow[];
+    const users = db.prepare("SELECT name, ip, pub_key, vpn_key, key_gen FROM users WHERE vpn_key != ''").all() as UserRow[];
     const peers = getPeersData();
     res.json({
         users: users.map(u => ({
@@ -546,18 +722,25 @@ app.get("/api/users", auth, handler((_req, res) => {
 }));
 
 app.get("/api/users/stats", auth, handler((_req, res) => {
-    const users = db.prepare("SELECT name, ip, pub_key FROM users WHERE vpn_key != ''").all() as UserRow[];
+    const users = db.prepare("SELECT name, ip, pub_key, key_gen FROM users WHERE vpn_key != ''").all() as UserRow[];
     const peers = getPeersData();
     res.json({
         users: users.map(u => ({
             name:          u.name,
             ip:            u.ip,
+            key_gen:       u.key_gen,
             online:        peers[u.pub_key]?.online        ?? false,
             lastHandshake: peers[u.pub_key]?.lastHandshake ?? 0,
             rx:            peers[u.pub_key]?.rx            ?? 0,
             tx:            peers[u.pub_key]?.tx            ?? 0,
         })),
     });
+}));
+
+// ⚠️ Должен быть объявлен ДО «/api/users/:name», иначе тот перехватит «reissue»
+// как имя пользователя.
+app.post("/api/users/reissue", auth, handler((_req, res) => {
+    res.json(reissueAll());
 }));
 
 app.post("/api/users/:name", auth, validateName, handler((req, res) => {

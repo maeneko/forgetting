@@ -1,10 +1,16 @@
+// Copyright (c) 2026 Ivan Vasilev
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 // Общие типы, константы и утилиты для всех вкладок панели.
 import axios from 'axios';
+// Поколение протокола AmneziaWG, на параметрах которого выдан vpn:// ключ.
+export type AwgGen = '2' | '3.1';
 export interface User {
     name:          string;
     ip:            string;
     pub_key:       string;
     vpn_key:       string;
+    key_gen:       AwgGen;
     online:        boolean;
     lastHandshake: number;
     rx?:           number;
@@ -14,6 +20,7 @@ export interface ServerInfo {
     name:  string;
     ip:    string;
     peers: number;
+    gen:   AwgGen;
 }
 export interface ApiKey {
     id:         number;

@@ -210,6 +210,10 @@ async function ctrl(method: string, urlPath: string, body?: unknown) {
     });
 }
 
+// Внешний контракт: наружу отдаём только name/ip/gen/vpn_key — psk_key и pub_key
+// остаются внутри. gen — поколение AmneziaWG, на параметрах которого выдан ключ.
+interface ExtUser { name: string; ip: string; vpn_key: string; key_gen: string }
+
 const ext = express.Router();
 ext.use(requireApiKey);
 
@@ -217,8 +221,8 @@ ext.post("/users", async (req: Request, res: Response) => {
     const { name } = (req.body ?? {}) as { name?: string };
     const r = await ctrl("POST", "/api/users", { name });
     if (r.status >= 400) { res.status(r.status).json(r.data); return; }
-    const u = r.data as { name: string; ip: string; vpn_key: string };
-    res.status(201).json({ name: u.name, ip: u.ip, vpn_key: u.vpn_key });
+    const u = r.data as ExtUser;
+    res.status(201).json({ name: u.name, ip: u.ip, gen: u.key_gen, vpn_key: u.vpn_key });
 });
 
 ext.get("/users", async (_req: Request, res: Response) => {
@@ -229,8 +233,8 @@ ext.get("/users", async (_req: Request, res: Response) => {
 ext.get("/users/:name", async (req: Request, res: Response) => {
     const r = await ctrl("POST", `/api/users/${encodeURIComponent(req.params.name)}`);
     if (r.status >= 400) { res.status(r.status).json(r.data); return; }
-    const u = r.data as { name: string; ip: string; vpn_key: string };
-    res.json({ name: u.name, ip: u.ip, vpn_key: u.vpn_key });
+    const u = r.data as ExtUser;
+    res.json({ name: u.name, ip: u.ip, gen: u.key_gen, vpn_key: u.vpn_key });
 });
 
 ext.delete("/users/:name", async (req: Request, res: Response) => {

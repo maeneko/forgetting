@@ -1,3 +1,8 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
 /* Стили вкладки «Пользователи». Общая дизайн-система (палитра, btn, chip, field,
    table-card, toolbar, layout) остаётся в App.css — здесь только уникальное вкладки. */
 
@@ -64,7 +69,12 @@
 .user-card-actions { display: flex; gap: 8px; }
 .user-card-actions .btn--outline { flex: 1; }
 
+/* Метка устаревшего ключа рядом с именем: ключ выдан на другом поколении AWG. */
+.user-gen { margin-left: 8px; vertical-align: middle; }
+
 /* На мобильной таблица скрывается (.table-card в App.css), карточки показываются. */
 @media (max-width: 640px) {
     .user-cards-list { display: flex; }
+    /* .tip-wrap на мобильной растягивается на всю ширину — метке это не нужно. */
+    .user-gen { width: auto; }
 }

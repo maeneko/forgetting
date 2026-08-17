@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Ivan Vasilev
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 // Иконки интерфейса (inline SVG, currentColor). Добавляя вкладку — добавь сюда
 // её иконку и зарегистрируй имя в ICONS (его указывают в tabs/<name>/metadata.json).
 

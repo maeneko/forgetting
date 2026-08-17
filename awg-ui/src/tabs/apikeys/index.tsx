@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Ivan Vasilev
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useCallback } from 'react';
 import { apiFetch, copyText, timeAgo, type ApiKey, type PageProps } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy } from '../../components/icons';

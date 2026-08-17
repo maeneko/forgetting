@@ -352,6 +352,8 @@ body {
 .chip--online  .chip-dot { background: var(--success-dot); }
 .chip--offline { background: var(--neutral-bg); color: var(--neutral-text); }
 .chip--offline .chip-dot { background: var(--neutral-dot); }
+.chip--error   { background: var(--error-bg); color: var(--error-text); }
+.chip--error   .chip-dot { background: var(--error-dot); }
 
 .main {
     flex: 1;

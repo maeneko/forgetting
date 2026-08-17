@@ -36,7 +36,7 @@ export default function App() {
     // вкладок (юзеры, ключи) грузят сами вкладки.
     const startSession = useCallback(async (tok: string) => {
         const { data: h } = await axios.get('/health', { headers: { Authorization: `Bearer ${tok}` } });
-        setServerInfo({ name: h.server || 'VPN', ip: h.ip || '', peers: h.awg?.peers ?? 0 });
+        setServerInfo({ name: h.server || 'VPN', ip: h.ip || '', peers: h.awg?.peers ?? 0, gen: h.gen || '2' });
         setStatusText('online:' + (h.server || 'ok') + ' · peers: ' + (h.awg?.peers ?? '?'));
     }, []);
 

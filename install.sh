@@ -118,6 +118,10 @@ echo
 #   Ограничения, которые обязан соблюсти генератор:
 #     - Jc: 3–10 (больше — лишний трафик); Jmin < Jmax, оба < MTU
 #     - S1, S2: < ~150, в части версий S1 != S2
+#     - S1–S4: при заданном HeaderProtectionKey (AmneziaWG 3.x) НИ ОДНО из них
+#       не может быть меньше 12 (HEADER_PROTECTION_NONCE_SIZE). Модуль на
+#       нарушение отвечает только «Invalid argument», причина видна лишь при
+#       `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`
 #     - H1–H4: уникальны между собой, НЕ равны 1/2/3/4 (зарезервированные
 #       типы сообщений WireGuard), большие uint32 без пересечений
 #     - I1–I5 НЕ трогать: сейчас уходят в vpn:// ключ пустыми плейсхолдерами
@@ -447,6 +451,48 @@ else
     ok "AWG установлен, модуль amneziawg собран и загружается"
 fi
 
+# Поколение протокола: 3.1 требует модуль 3.x и ядро ≥ 5.5.
+#   - модуль: PPA с 30.07.2026 отдаёт 3.x; на старых установках он может быть 2.0,
+#     поэтому сначала пробуем обновиться.
+#   - ядро: header protection использует библиотечный chacha-API
+#     (chacha_init/chacha20_crypt), которого нет до 5.5 — модуль там не соберётся
+#     (upstream issue #210). Проблема с nla_put_uint на ядрах < 6.7 уже исправлена.
+# Если 3.1 недоступен — не падаем, а пишем 2.0-конфиг: awg-ctrl определяет
+# поколение по наличию HeaderProtectionKey в конфиге, так что всё продолжит
+# работать ровно как раньше.
+AWG3="y"
+
+kernel_lt_5_5() {
+    local maj min
+    maj=${KERNEL%%.*}
+    min=${KERNEL#*.}; min=${min%%.*}
+    [[ "$maj" -lt 5 || ( "$maj" -eq 5 && "$min" -lt 5 ) ]]
+}
+
+MOD_VER=$(modinfo -F version amneziawg 2>/dev/null || echo "")
+if [[ "${MOD_VER%%.*}" != "3" ]]; then
+    warn "Модуль amneziawg версии '${MOD_VER:-неизвестно}' — для AmneziaWG 3.1 нужна 3.x. Пробуем обновить."
+    apt-get update >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+        apt-get install -y --only-upgrade amneziawg amneziawg-dkms amneziawg-tools >/dev/null 2>&1 || true
+    MOD_VER=$(modinfo -F version amneziawg 2>/dev/null || echo "")
+fi
+
+if [[ "${MOD_VER%%.*}" != "3" ]]; then
+    AWG3="n"
+    warn "Модуль остался на версии '${MOD_VER:-неизвестно}' — ставим сервер на AmneziaWG 2.0."
+elif kernel_lt_5_5; then
+    AWG3="n"
+    warn "Ядро $KERNEL старше 5.5 — header protection не соберётся (upstream issue #210)."
+    warn "Ставим сервер на AmneziaWG 2.0."
+fi
+
+if [[ "$AWG3" == "y" ]]; then
+    ok "AmneziaWG 3.1 доступен (модуль $MOD_VER, ядро $KERNEL)"
+else
+    warn "Сервер будет работать на AmneziaWG 2.0. Обнови ядро/модуль и переустанови, чтобы перейти на 3.1."
+fi
+
 step "2/7  Node.js"
 
 if command -v node &>/dev/null; then
@@ -518,6 +564,38 @@ grep -qxF 'net.ipv6.conf.all.forwarding=1' /etc/sysctl.conf \
 sysctl -qp
 ok "IP forwarding включён"
 
+# Параметры AmneziaWG 3.1. Значения-диапазоны взяты из дефолтов клиента
+# AmneziaVPN (protocolConstants.h), чтобы сервер и клиент не расходились.
+# RandomTrailers/DisableCookies (фичи 3.1 от 12.08.2026) пока не включаем.
+#   🛑 HeaderProtectionKey фиксируется на весь срок жизни сервера наравне с
+#   J/S/H: он обязан совпадать на обоих концах, и его смена делает невалидными
+#   все ранее выданные vpn:// ключи. При KEEP_DATA берём существующий.
+# Поколение предыдущей установки — нужно, чтобы предупредить о перевыпуске
+# ключей при KEEP_DATA. Считать обязательно ДО перезаписи конфига.
+PREV_GEN="none"
+if [[ -f "$AWG_CONF" ]]; then
+    if grep -q '^HeaderProtectionKey *=' "$AWG_CONF"; then PREV_GEN="3.1"; else PREV_GEN="2.0"; fi
+fi
+
+AWG3_LINES=""
+if [[ "$AWG3" == "y" ]]; then
+    HEADER_PROTECTION_KEY=""
+    if [[ "$KEEP_DATA" == "y" && -f "$AWG_CONF" ]]; then
+        # sed, а не awk -F'=': base64-ключ сам содержит '=' в паддинге.
+        HEADER_PROTECTION_KEY=$(sed -n 's/^HeaderProtectionKey *= *//p' "$AWG_CONF" | head -1)
+        [[ -n "$HEADER_PROTECTION_KEY" ]] && ok "HeaderProtectionKey взят из существующего конфига"
+    fi
+    [[ -z "$HEADER_PROTECTION_KEY" ]] && HEADER_PROTECTION_KEY=$(awg genpsk)
+
+    AWG3_LINES="HeaderProtectionKey = ${HEADER_PROTECTION_KEY}
+ContentPaddingAddition = 10-100
+RekeyAfterTime = 100-120
+RekeyTimeout = 3-7
+RejectAfterTime = 150-180
+KeepaliveTimeout = 5-15
+MaxHandshakeAttempts = 15-20"
+fi
+
 cat > "$AWG_CONF" <<CONF
 [Interface]
 Address = ${SUBNET}.0.1/16
@@ -539,8 +617,18 @@ H3 = ${H3}
 H4 = ${H4}
 CONF
 
+[[ -n "$AWG3_LINES" ]] && printf '%s\n' "$AWG3_LINES" >> "$AWG_CONF"
+
 chmod 600 "$AWG_CONF"
-ok "$AWG_CONF"
+NEW_GEN=$([[ "$AWG3" == "y" ]] && echo 3.1 || echo 2.0)
+ok "$AWG_CONF (AmneziaWG $NEW_GEN)"
+
+if [[ "$KEEP_DATA" == "y" && "$PREV_GEN" != "none" && "$PREV_GEN" != "$NEW_GEN" ]]; then
+    warn "Поколение протокола изменилось: $PREV_GEN → $NEW_GEN."
+    warn "Пользователи сохранены, но их vpn:// ключи собраны на старых параметрах"
+    warn "и работать перестанут. После запуска открой панель и нажми"
+    warn "«Перевыпустить ключи», затем раздай пользователям новые ключи."
+fi
 
 step "5/7  Запуск AWG"
 
