@@ -406,6 +406,13 @@ body {
     color: var(--neutral-text);
     line-height: 1.2;
 }
+.server-gen-wrap { align-self: flex-start; margin-top: 2px; }
+.server-gen-chip {
+    align-self: flex-start;
+    margin-top: 2px;
+    font-size: 11px;
+    padding: 2px 8px;
+}
 .server-card-peers {
     font-size: 12px;
     color: var(--neutral-text);

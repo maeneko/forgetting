@@ -21,7 +21,11 @@ export interface ServerInfo {
     ip:    string;
     peers: number;
     gen:   AwgGen;
+    mod:   string;   // версия загруженного модуля amneziawg, из /health awg.module
+    tools: string;   // версия awg-tools, из /health awg.tools
 }
+// На проводе (users.key_gen, /health gen) поколение — '2', человеку показываем '2.0'.
+export const genLabel = (g: AwgGen): string => (g === '3.1' ? 'AWG 3.1' : 'AWG 2.0');
 export interface ApiKey {
     id:         number;
     label:      string;

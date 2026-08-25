@@ -196,13 +196,36 @@ function genOf(p: AwgParams): "2" | "3.1" {
     return p.HeaderProtectionKey ? "3.1" : "2";
 }
 
+// Версия модуля/tools для /health — показывает оператору, что реально работает
+// в ядре сейчас (см. install.sh: apt может обновить пакет, пока в ядре живёт
+// старый загруженный модуль, коммит 6fdacd7). Загруженная версия важнее версии
+// на диске ровно по той же причине. Вызывается на старте и при restartAwg() —
+// это единственные моменты, когда модуль может реально смениться в течение
+// жизни процесса; из обработчика /health не вызывается — этот роут без
+// авторизации, спавнить подпроцессы на каждый его опрос нельзя.
+function readAwgVersions(): { module: string; tools: string } {
+    let module = "";
+    try {
+        module = readFileSync("/sys/module/amneziawg/version", "utf8").trim();
+    } catch {
+        try { module = run("modinfo -F version amneziawg"); } catch { /* модуль не загружен */ }
+    }
+    let tools = "";
+    try {
+        const out = run("awg --version");
+        tools = out.split(/\s+/).find(t => /^v?\d/.test(t)) ?? "";
+    } catch { /* awg-tools не найден */ }
+    return { module, tools };
+}
+
 // PersistentKeepalive в 3.1 задаётся диапазоном (дефолт клиента AmneziaVPN);
 // в 2.0 это одно число. Уходит и в серверные [Peer], и в клиентский конфиг.
 const KEEPALIVE_BY_GEN: Record<"2" | "3.1", string> = { "2": "25", "3.1": "25-35" };
 
 const runtimeConfig = initConfig();
-const AWG_PARAMS = readAwgParams();
-const AWG_GEN    = genOf(AWG_PARAMS);
+const AWG_PARAMS    = readAwgParams();
+const AWG_GEN       = genOf(AWG_PARAMS);
+const AWG_VERSIONS  = readAwgVersions();
 const CONFIG = {
     interface:  "awg1",
     confDir:    "/etc/amnezia/amneziawg",
@@ -216,6 +239,10 @@ const CONFIG = {
     keepalive:  KEEPALIVE_BY_GEN[AWG_GEN],
     awgParams:  AWG_PARAMS,
     gen:        AWG_GEN,
+    // Мутируются в restartAwg() — единственном месте, где модуль может
+    // реально смениться в течение жизни процесса.
+    awgModule:  AWG_VERSIONS.module,
+    awgTools:   AWG_VERSIONS.tools,
 };
 
 interface UserRow {
@@ -582,7 +609,10 @@ function restartAwg() {
     const up = spawnSync("awg-quick", ["up", CONFIG.interface]);
     if (up.status !== 0) throw new Error(`awg-quick up failed: ${up.stderr?.toString()}`);
     syncPeers();
-    logger.info("AWG restart: done");
+    const versions = readAwgVersions();
+    CONFIG.awgModule = versions.module;
+    CONFIG.awgTools  = versions.tools;
+    logger.info("AWG restart: done", versions);
 }
 
 function startInterface() {
@@ -697,7 +727,7 @@ app.get("/health", (_req, res) => {
         server: CONFIG.serverName,
         ip:     CONFIG.serverIp,
         gen:    CONFIG.gen,
-        awg:    { status: up ? "ok" : "down", peers },
+        awg:    { status: up ? "ok" : "down", peers, module: CONFIG.awgModule, tools: CONFIG.awgTools },
     });
 });
 

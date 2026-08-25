@@ -196,7 +196,27 @@ async function restart(name: SvcName) {
     await start(name);
 }
 
-function status() {
+// GET /health и разбор JSON-тела. Любая ошибка (не запущен, таймаут, не JSON)
+// молча даёт null — health-строка в status() тогда просто не печатается.
+interface HealthBody {
+    gen?: string;
+    awg?: { module?: string; tools?: string };
+}
+function fetchHealth(url: string, timeoutMs = 1000): Promise<HealthBody | null> {
+    return new Promise(resolve => {
+        const req = http.get(url, res => {
+            let body = "";
+            res.on("data", (c: Buffer) => { body += c; });
+            res.on("end", () => {
+                try { resolve(JSON.parse(body) as HealthBody); } catch { resolve(null); }
+            });
+        });
+        req.on("error", () => resolve(null));
+        req.setTimeout(timeoutMs, () => { req.destroy(); resolve(null); });
+    });
+}
+
+async function status() {
     console.log("");
     for (const name of ALL) {
         const running = isRunning(name);
@@ -204,6 +224,13 @@ function status() {
         const dot     = running ? green("●") : grey("○");
         const info    = running ? green("running") + `  pid ${pid}` : grey("stopped");
         console.log(`  ${dot} ${SERVICES[name].label.padEnd(12)} ${info}`);
+    }
+    if (isRunning("awgctrl")) {
+        const h = await fetchHealth(`http://127.0.0.1:${SERVICES.awgctrl.env.PORT}/health`);
+        if (h?.gen) {
+            const gen = h.gen === "3.1" ? "3.1" : "2.0";
+            console.log(`  ${dim(`AmneziaWG ${gen} · модуль ${h.awg?.module || "?"} · tools ${h.awg?.tools || "?"}`)}`);
+        }
     }
     console.log("");
 }
@@ -321,7 +348,7 @@ async function interactiveMenu() {
             case "1": await startAll();             break;
             case "2": await stopAll();              break;
             case "3": await restartAll();           break;
-            case "4": status();                     break;
+            case "4": await status();               break;
             case "5": await setCredentials("user");  break;
             case "6": await setCredentials("pass");  break;
             case "0": rl.close(); process.exit(0);
@@ -350,7 +377,7 @@ async function main() {
         case "start":       await startAll();                                  break;
         case "stop":        await stopAll();                                   break;
         case "restart":     await restartAll();                                break;
-        case "status":      status();                                          break;
+        case "status":      await status();                                    break;
         case "credentials":
             if (sub === "user") await setCredentials("user");
             else if (sub === "pass") await setCredentials("pass");

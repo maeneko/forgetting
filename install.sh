@@ -134,6 +134,22 @@ H2="2122053282-2133204808"
 H3="2133604274-2140756116"
 H4="2143656228-2147444225"
 
+# Поколение протокола и закрепление версии пакета — управляются переменными
+# окружения, задаются ДО запуска: `AWG_GEN=2.0 bash install.sh`.
+#   AWG_GEN=auto (по умолчанию) — как раньше: 3.1, если модуль 3.x и ядро ≥ 5.5,
+#     иначе 2.0, без лишних вопросов.
+#   AWG_GEN=2.0  — не трогать модуль (ни апгрейд, ни перезагрузка), сразу 2.0.
+#   AWG_GEN=3.1  — требовать 3.1: если условия не выполняются, install.sh падает
+#     с диагностикой вместо тихого отката (апстрим ещё нестабилен, см. issues
+#     #215/#216/#217 в amneziawg-linux-kernel-module — тихий откат на 2.0 здесь
+#     нежелателен, если оператор явно просил 3.1).
+AWG_GEN="${AWG_GEN:-auto}"
+[[ "$AWG_GEN" =~ ^(auto|2\.0|3\.1)$ ]] || fail "AWG_GEN должен быть auto, 2.0 или 3.1 (задано: $AWG_GEN)"
+# AWG_PIN=y (по умолчанию) — после успешной установки держит amneziawg{,-dkms,-tools}
+# через `apt-mark hold`: unattended-upgrades не должен подменять модуль под живым
+# сервером (issue #215 — именно так словили регрессию между dkms-сборками).
+AWG_PIN="${AWG_PIN:-y}"
+
 NET_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
 [[ -z "$NET_IFACE" ]] && fail "Не могу определить сетевой интерфейс"
 
@@ -457,10 +473,11 @@ fi
 #   - ядро: header protection использует библиотечный chacha-API
 #     (chacha_init/chacha20_crypt), которого нет до 5.5 — модуль там не соберётся
 #     (upstream issue #210). Проблема с nla_put_uint на ядрах < 6.7 уже исправлена.
-# Если 3.1 недоступен — не падаем, а пишем 2.0-конфиг: awg-ctrl определяет
-# поколение по наличию HeaderProtectionKey в конфиге, так что всё продолжит
-# работать ровно как раньше.
-AWG3="y"
+# Если 3.1 недоступен и AWG_GEN=auto — не падаем, а пишем 2.0-конфиг: awg-ctrl
+# определяет поколение по наличию HeaderProtectionKey в конфиге, так что всё
+# продолжит работать ровно как раньше. При AWG_GEN=3.1 недоступность — fail
+# (см. AWG_GEN выше): апстрим модуля ещё нестабилен, тихий откат при явном
+# запросе 3.1 может незаметно подсунуть более слабую обфускацию.
 
 kernel_lt_5_5() {
     local maj min
@@ -479,42 +496,59 @@ kernel_lt_5_5() {
 disk_mod_ver()   { modinfo -F version amneziawg 2>/dev/null || echo ""; }
 loaded_mod_ver() { cat /sys/module/amneziawg/version 2>/dev/null || echo ""; }
 
-MOD_VER=$(disk_mod_ver)
-if [[ "${MOD_VER%%.*}" != "3" ]]; then
-    warn "Модуль amneziawg версии '${MOD_VER:-неизвестно}' — для AmneziaWG 3.1 нужна 3.x. Пробуем обновить."
-    apt-get update >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-        apt-get install -y --only-upgrade amneziawg amneziawg-dkms amneziawg-tools >/dev/null 2>&1 || true
+if [[ "$AWG_GEN" == "2.0" ]]; then
+    AWG3="n"
     MOD_VER=$(disk_mod_ver)
-fi
+    ok "Поколение задано вручную (AWG_GEN=2.0) — модуль не трогаем, ставим 2.0."
+else
+    AWG3="y"
 
-# Загруженный отстал от дискового — перезагружаем. Интерфейс держит модуль,
-# поэтому сначала опускаем его; awg1 на этом шаге ещё не нужен.
-LOADED_VER=$(loaded_mod_ver)
-if [[ -n "$LOADED_VER" && "$LOADED_VER" != "$MOD_VER" ]]; then
-    warn "В ядре загружен модуль $LOADED_VER, на диске $MOD_VER — перезагружаем модуль."
-    awg-quick down "$IFACE" 2>/dev/null || true
-    ip link delete dev "$IFACE" 2>/dev/null || true
-    if modprobe -r amneziawg 2>/dev/null && modprobe amneziawg 2>/dev/null; then
-        LOADED_VER=$(loaded_mod_ver)
-        ok "Модуль перезагружен: в ядре теперь $LOADED_VER"
-    else
-        warn "Не удалось перезагрузить модуль (занят?). Нужна перезагрузка сервера."
+    MOD_VER=$(disk_mod_ver)
+    if [[ "${MOD_VER%%.*}" != "3" ]]; then
+        warn "Модуль amneziawg версии '${MOD_VER:-неизвестно}' — для AmneziaWG 3.1 нужна 3.x. Пробуем обновить."
+        # Прошлая установка могла закрепить пакет (apt-mark hold, см. ниже) —
+        # снимаем, иначе --only-upgrade молча не тронет held-версию.
+        apt-mark unhold amneziawg amneziawg-dkms amneziawg-tools >/dev/null 2>&1 || true
+        apt-get update >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            apt-get install -y --only-upgrade amneziawg amneziawg-dkms amneziawg-tools >/dev/null 2>&1 || true
+        MOD_VER=$(disk_mod_ver)
     fi
-fi
 
-# Дальше решает ТОЛЬКО загруженная версия — именно она обслуживает интерфейс.
-[[ -n "$LOADED_VER" ]] && MOD_VER="$LOADED_VER"
+    # Загруженный отстал от дискового — перезагружаем. Интерфейс держит модуль,
+    # поэтому сначала опускаем его; awg1 на этом шаге ещё не нужен.
+    LOADED_VER=$(loaded_mod_ver)
+    if [[ -n "$LOADED_VER" && "$LOADED_VER" != "$MOD_VER" ]]; then
+        warn "В ядре загружен модуль $LOADED_VER, на диске $MOD_VER — перезагружаем модуль."
+        awg-quick down "$IFACE" 2>/dev/null || true
+        ip link delete dev "$IFACE" 2>/dev/null || true
+        if modprobe -r amneziawg 2>/dev/null && modprobe amneziawg 2>/dev/null; then
+            LOADED_VER=$(loaded_mod_ver)
+            ok "Модуль перезагружен: в ядре теперь $LOADED_VER"
+        else
+            warn "Не удалось перезагрузить модуль (занят?). Нужна перезагрузка сервера."
+        fi
+    fi
 
-if [[ "${MOD_VER%%.*}" != "3" ]]; then
-    AWG3="n"
-    warn "В ядре модуль версии '${MOD_VER:-неизвестно}' — ставим сервер на AmneziaWG 2.0."
-    [[ "$(disk_mod_ver)" == 3.* ]] && \
-        warn "На диске уже 3.x — после перезагрузки сервера можно переустановить и получить 3.1."
-elif kernel_lt_5_5; then
-    AWG3="n"
-    warn "Ядро $KERNEL старше 5.5 — header protection не соберётся (upstream issue #210)."
-    warn "Ставим сервер на AmneziaWG 2.0."
+    # Дальше решает ТОЛЬКО загруженная версия — именно она обслуживает интерфейс.
+    [[ -n "$LOADED_VER" ]] && MOD_VER="$LOADED_VER"
+
+    if [[ "${MOD_VER%%.*}" != "3" ]]; then
+        AWG3="n"
+        if [[ "$AWG_GEN" == "3.1" ]]; then
+            fail "AWG_GEN=3.1 запрошен явно, но в ядре модуль версии '${MOD_VER:-неизвестно}' (на диске $(disk_mod_ver)) — нужна 3.x."
+        fi
+        warn "В ядре модуль версии '${MOD_VER:-неизвестно}' — ставим сервер на AmneziaWG 2.0."
+        [[ "$(disk_mod_ver)" == 3.* ]] && \
+            warn "На диске уже 3.x — после перезагрузки сервера можно переустановить и получить 3.1."
+    elif kernel_lt_5_5; then
+        AWG3="n"
+        if [[ "$AWG_GEN" == "3.1" ]]; then
+            fail "AWG_GEN=3.1 запрошен явно, но ядро $KERNEL старше 5.5 — header protection не соберётся (upstream issue #210)."
+        fi
+        warn "Ядро $KERNEL старше 5.5 — header protection не соберётся (upstream issue #210)."
+        warn "Ставим сервер на AmneziaWG 2.0."
+    fi
 fi
 
 if [[ "$AWG3" == "y" ]]; then
@@ -696,6 +730,8 @@ if ! awg-quick up "$IFACE"; then
         sed -i -E "/$AWG3_KEY_RE/d" "$AWG_CONF"
         AWG3="n"; NEW_GEN="2.0"
         warn "Откатываемся на AmneziaWG 2.0. Конфиг 3.1 сохранён: ${AWG_CONF}.awg31"
+        [[ "$AWG_GEN" == "3.1" ]] && \
+            warn "Запрошено AWG_GEN=3.1, но интерфейс поднялся на 2.0 — см. ${AWG_CONF}.awg31 и dmesg выше."
 
         awg-quick up "$IFACE" \
             || fail "awg-quick up $IFACE не работает даже на 2.0 — смотри dmesg выше"
@@ -718,6 +754,20 @@ if [[ "$RUNNING_PUB" == "$PUB_KEY" ]]; then
 else
     fail "Ключ на $IFACE не совпал: ${RUNNING_PUB:-none} ≠ $PUB_KEY"
 fi
+
+TOOLS_VER=$(awg --version 2>/dev/null | awk '{print $2; exit}')
+
+# Закрепляем версию пакета, чтобы unattended-upgrades не подменил модуль под
+# живым сервером (issue #215: между двумя dkms-сборками словили регрессию —
+# хендшейк проходит, данные не идут). Unhold перед апгрейдом уже сделан выше;
+# hold ставим только теперь, когда версия проверена и интерфейс реально поднялся.
+if [[ "$AWG_PIN" == "y" ]]; then
+    apt-mark hold amneziawg amneziawg-dkms amneziawg-tools >/dev/null 2>&1 || true
+    ok "Версия пакета закреплена (apt-mark hold) — снять: apt-mark unhold amneziawg amneziawg-dkms amneziawg-tools"
+fi
+
+GEN_LABEL=$([[ "$AWG3" == "y" ]] && echo "3.1" || echo "2.0")
+ok "AmneziaWG $GEN_LABEL · модуль ${MOD_VER:-?} · tools ${TOOLS_VER:-?}$([[ "$AWG_PIN" == "y" ]] && echo " · версия закреплена")"
 
 # UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
 # цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT

@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import QRCode from 'qrcode';
 import {
-    apiFetch, vpnKeyToConf, downloadFile, copyText, bytes, timeAgo,
+    apiFetch, vpnKeyToConf, downloadFile, copyText, bytes, timeAgo, genLabel,
     type User, type PageProps, type AwgGen,
 } from '../../lib/shared';
 import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe } from '../../components/icons';
@@ -50,7 +50,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
     // IP и ключевая пара сохраняются, но клиентам нужно заново импортировать ключ.
     const reissueKeys = useCallback(async () => {
         if (!confirm(
-            `Перевыпустить ключи (${stale.length} шт.) на поколении ${serverGen}?\n\n` +
+            `Перевыпустить ключи (${stale.length} шт.) на поколении ${genLabel(serverGen)}?\n\n` +
             'Старые ключи перестанут работать — всем придётся импортировать ключ заново.',
         )) return;
         try {
@@ -162,11 +162,11 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                     {u.key_gen !== serverGen && (
                                         <span
                                             className="tip-wrap user-gen"
-                                            data-tip={`Ключ выдан на AWG ${u.key_gen}, сервер работает на ${serverGen}`}
+                                            data-tip={`Ключ выдан на ${genLabel(u.key_gen)}, сервер работает на ${genLabel(serverGen)}`}
                                         >
                                             <span className="chip chip--error">
                                                 <span className="chip-dot" />
-                                                AWG {u.key_gen}
+                                                {genLabel(u.key_gen)}
                                             </span>
                                         </span>
                                     )}
@@ -207,7 +207,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                 {u.key_gen !== serverGen && (
                                     <span className="chip chip--error">
                                         <span className="chip-dot" />
-                                        AWG {u.key_gen}
+                                        {genLabel(u.key_gen)}
                                     </span>
                                 )}
                             </div>

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { type ServerInfo } from '../lib/shared';
+import { type ServerInfo, genLabel } from '../lib/shared';
 import { IcoPlus, IcoRefresh } from './icons';
 
 // Сервер-бар: карточка активного сервера + «Добавить сервер» + (на мобильной)
@@ -38,6 +38,16 @@ export default function ServerBar({
                     <div className="server-card-info">
                         <span className="server-card-name">{serverInfo.name}</span>
                         <span className="server-card-ip">{serverInfo.ip}</span>
+                        {(serverInfo.mod || serverInfo.tools) ? (
+                            <span
+                                className="tip-wrap server-gen-wrap"
+                                data-tip={`модуль ${serverInfo.mod || '?'} · tools ${serverInfo.tools || '?'}`}
+                            >
+                                <span className="chip chip--offline server-gen-chip">{genLabel(serverInfo.gen)}</span>
+                            </span>
+                        ) : (
+                            <span className="chip chip--offline server-gen-chip">{genLabel(serverInfo.gen)}</span>
+                        )}
                     </div>
                     <span className="server-card-peers">{serverInfo.peers} peers</span>
                 </div>
