@@ -246,7 +246,6 @@ export default function App() {
                                     serverOnline={isOnline}
                                     onRestartAwg={restartAwg}
                                     restarting={restarting}
-                                    showAddServer={chrome.addServer !== false}
                                     showRestart={showRestart}
                                 />
                             )}

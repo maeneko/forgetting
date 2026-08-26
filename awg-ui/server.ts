@@ -6,7 +6,7 @@ import path     from "path";
 import fs       from "fs";
 import crypto   from "crypto";
 import axios    from "axios";
-import Database from "better-sqlite3";
+import { ma7 } from "./ma7";
 
 const app  = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -36,43 +36,6 @@ function mintInternalToken(): string {
 }
 
 const revoked = new Set<string>();
-
-interface ApiKeyRow {
-    id: number; label: string; key_hash: string; prefix: string;
-    server_id: number; created_at: number; last_used: number | null;
-}
-
-const UI_DB_FILE = process.env.UI_DB_FILE || path.join(__dirname, "ui.db");
-const uidb = new Database(UI_DB_FILE);
-uidb.pragma("journal_mode = WAL");
-uidb.exec(`
-    CREATE TABLE IF NOT EXISTS api_keys (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        label      TEXT    NOT NULL,
-        key_hash   TEXT    NOT NULL UNIQUE,
-        prefix     TEXT    NOT NULL,
-        server_id  INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        last_used  INTEGER
-    )
-`);
-
-const keyStmts = {
-    list:   uidb.prepare("SELECT id, label, prefix, server_id, created_at, last_used FROM api_keys ORDER BY id"),
-    insert: uidb.prepare("INSERT INTO api_keys (label, key_hash, prefix, server_id, created_at) VALUES (?, ?, ?, ?, ?)"),
-    delete: uidb.prepare<[number]>("DELETE FROM api_keys WHERE id = ?"),
-    byHash: uidb.prepare<[string]>("SELECT * FROM api_keys WHERE key_hash = ?"),
-    touch:  uidb.prepare<[number, number]>("UPDATE api_keys SET last_used = ? WHERE id = ?"),
-};
-
-function hashKey(key: string): string {
-    return crypto.createHash("sha256").update(key).digest("hex");
-}
-
-function genApiKey(): { key: string; hash: string; prefix: string } {
-    const key = "awgk_" + crypto.randomBytes(24).toString("base64url");
-    return { key, hash: hashKey(key), prefix: key.slice(0, 13) + "…" };
-}
 
 function tokenSig(token: string): string { return token.split(".")[2] ?? token; }
 
@@ -146,29 +109,6 @@ app.post("/logout", requireAuth, (req: Request, res: Response) => {
     res.json({ ok: true });
 });
 
-app.get("/ui/apikeys", requireAuth, (_req: Request, res: Response) => {
-    res.json({ keys: keyStmts.list.all() });
-});
-
-app.post("/ui/apikeys", requireAuth, (req: Request, res: Response) => {
-    const { label, server_id } = req.body as { label?: string; server_id?: number };
-    if (!label || !/^[\w \-]{1,40}$/.test(label)) {
-        res.status(400).json({ error: "Метка: буквы, цифры, пробел, _ и -, до 40 символов" }); return;
-    }
-    // TODO multi-server: server_id пока всегда 0 (текущий сервер). Когда появится
-    // список серверов — валидировать его против реального реестра серверов.
-    const { key, hash, prefix } = genApiKey();
-    const info = keyStmts.insert.run(label, hash, prefix, Number(server_id) || 0, Math.floor(Date.now() / 1000));
-    res.status(201).json({ id: info.lastInsertRowid, label, prefix, key });
-});
-
-app.delete("/ui/apikeys/:id", requireAuth, (req: Request, res: Response) => {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id)) { res.status(400).json({ error: "Неверный id" }); return; }
-    keyStmts.delete.run(id);
-    res.json({ success: true, id });
-});
-
 async function proxy(req: Request, res: Response) {
     try {
         const r = await axios({
@@ -184,22 +124,6 @@ async function proxy(req: Request, res: Response) {
     }
 }
 
-// TODO multi-server: ключ привязан к server_id (пока всегда 0 = текущий
-// сервер). Когда серверов станет несколько — маршрутизировать ctrl() на нужный
-// awg-ctrl по (req as ExtRequest).apiKey.server_id.
-
-interface ExtRequest extends Request { apiKey?: ApiKeyRow; }
-
-function requireApiKey(req: Request, res: Response, next: NextFunction) {
-    const key = (req.headers["x-api-key"] as string) ?? "";
-    if (!key.startsWith("awgk_")) { res.status(401).json({ error: "API key required" }); return; }
-    const row = keyStmts.byHash.get(hashKey(key)) as ApiKeyRow | undefined;
-    if (!row) { res.status(401).json({ error: "Invalid API key" }); return; }
-    keyStmts.touch.run(Math.floor(Date.now() / 1000), row.id);
-    (req as ExtRequest).apiKey = row;
-    next();
-}
-
 async function ctrl(method: string, urlPath: string, body?: unknown) {
     return axios({
         method,
@@ -210,39 +134,37 @@ async function ctrl(method: string, urlPath: string, body?: unknown) {
     });
 }
 
-// Внешний контракт: наружу отдаём только name/ip/gen/vpn_key — psk_key и pub_key
-// остаются внутри. gen — поколение AmneziaWG, на параметрах которого выдан ключ.
-interface ExtUser { name: string; ip: string; vpn_key: string; key_gen: string }
+// ── Интеграция с MA7 (вкладка «Профиль») ───────────────────────────────────
+// Сервер персональный — панель показывает баланс своего единственного
+// владельца, не список абонентов. Логин владельца (MA7_LOGIN) — часть
+// конфигурации сервера, задаётся один раз при установке (cli.env), а НЕ
+// вводится через UI: бот-токен MA7_JWT_SECRET умеет искать любого абонента
+// MA7, и если бы логин можно было менять прямо в панели, любой, кто знает
+// пароль от панели, мог бы подсматривать баланс чужих абонентов — панель
+// защищена одним общим UI_USER/UI_PASS, отдельного «клиентского» входа нет.
+const MA7_LOGIN = process.env.MA7_LOGIN ?? "";
 
-const ext = express.Router();
-ext.use(requireApiKey);
-
-ext.post("/users", async (req: Request, res: Response) => {
-    const { name } = (req.body ?? {}) as { name?: string };
-    const r = await ctrl("POST", "/api/users", { name });
-    if (r.status >= 400) { res.status(r.status).json(r.data); return; }
-    const u = r.data as ExtUser;
-    res.status(201).json({ name: u.name, ip: u.ip, gen: u.key_gen, vpn_key: u.vpn_key });
+app.get("/ui/ma7/profile", requireAuth, async (_req: Request, res: Response) => {
+    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(MA7_LOGIN)) {
+        res.status(500).json({ error: "MA7_LOGIN не задан — укажи его в cli.env" }); return;
+    }
+    try {
+        const r = await ma7.get("/api/admin/users", { params: { q: MA7_LOGIN, limit: 1 } });
+        if (r.status >= 400) {
+            const msg = r.status === 401 ? "MA7: неверный MA7_JWT_SECRET"
+                : r.status === 403 ? "MA7: не та роль в токене"
+                : (r.data as { error?: string })?.error ?? "Ошибка MA7";
+            res.status(r.status === 401 || r.status === 403 ? 502 : r.status).json({ error: msg });
+            return;
+        }
+        const user = (r.data.users as { login: string; balance: number }[] ?? [])
+            .find(u => u.login === MA7_LOGIN);
+        if (!user) { res.status(404).json({ error: "MA7_LOGIN не найден в MA7" }); return; }
+        res.json({ login: user.login, balance: user.balance });
+    } catch {
+        res.status(502).json({ error: "MA7 недоступен" });
+    }
 });
-
-ext.get("/users", async (_req: Request, res: Response) => {
-    const r = await ctrl("GET", "/api/users/stats");
-    res.status(r.status).json(r.data);
-});
-
-ext.get("/users/:name", async (req: Request, res: Response) => {
-    const r = await ctrl("POST", `/api/users/${encodeURIComponent(req.params.name)}`);
-    if (r.status >= 400) { res.status(r.status).json(r.data); return; }
-    const u = r.data as ExtUser;
-    res.json({ name: u.name, ip: u.ip, gen: u.key_gen, vpn_key: u.vpn_key });
-});
-
-ext.delete("/users/:name", async (req: Request, res: Response) => {
-    const r = await ctrl("DELETE", `/api/users/${encodeURIComponent(req.params.name)}`);
-    res.status(r.status).json(r.data);
-});
-
-app.use("/api/v1", ext);
 
 app.use(["/api", "/health", "/awg"], requireAuth, proxy);
 

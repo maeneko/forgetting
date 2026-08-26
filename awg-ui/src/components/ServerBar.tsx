@@ -2,22 +2,19 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { type ServerInfo, genLabel } from '../lib/shared';
-import { IcoPlus, IcoRefresh } from './icons';
+import { IcoRefresh } from './icons';
 
-// Сервер-бар: карточка активного сервера + «Добавить сервер» + (на мобильной)
-// перезапуск AWG под ними. Общий для вкладок — показывает (и в будущем выбирает)
-// сервер, к которому относится содержимое вкладки (пиры / API-ключи).
-//   TODO multi-server: сейчас сервер один и всегда активен. Когда серверов
-//   станет несколько — карточки станут кликабельными, активная = выбранная.
+// Сервер-бар: карточка активного сервера + (на мобильной) перезапуск AWG под
+// ней. Общий для вкладок — показывает сервер, к которому относится содержимое
+// вкладки (пиры / абоненты).
 export default function ServerBar({
     serverInfo, serverOnline, onRestartAwg, restarting,
-    showAddServer = true, showRestart = true,
+    showRestart = true,
 }: {
     serverInfo: ServerInfo | null;
     serverOnline: boolean;
     onRestartAwg: () => void;
     restarting: boolean;
-    showAddServer?: boolean;
     showRestart?: boolean;
 }) {
     return (
@@ -51,13 +48,6 @@ export default function ServerBar({
                     </div>
                     <span className="server-card-peers">{serverInfo.peers} peers</span>
                 </div>
-            )}
-            {showAddServer && (
-                <span className="tip-wrap" data-tip="Недоступно в альфа-версии">
-                    <button className="server-add" disabled>
-                        <IcoPlus /> Добавить сервер
-                    </button>
-                </span>
             )}
             {/* Перезапуск AWG — только на мобильной (на десктопе кнопка в углу). */}
             {showRestart && (

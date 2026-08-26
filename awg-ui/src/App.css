@@ -473,22 +473,6 @@ body {
 }
 .tip-wrap:hover::after { opacity: 1; }
 
-.server-add {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 44px;
-    padding: 0 16px;
-    border-radius: var(--r-pill);
-    border: 1.5px dashed var(--outline);
-    background: transparent;
-    font-family: var(--font);
-    font-size: 13px;
-    color: var(--neutral-dot);
-    cursor: not-allowed;
-    white-space: nowrap;
-}
-
 .toolbar {
     display: flex;
     align-items: center;
@@ -673,11 +657,9 @@ tbody td:last-child  { padding-right: 20px; }
     .server-toggle       { display: flex; }
     .server-online-chip  { display: none; }
 
-    /* Кнопка «Добавить сервер» — полная ширина */
-    .tip-wrap    { width: 100%; }
-    .server-add  { width: 100%; justify-content: center; }
+    .tip-wrap { width: 100%; }
 
-    /* На мобильной: угловую кнопку прячем, перезапуск — под «Добавить сервер» */
+    /* На мобильной: угловую кнопку прячем, показываем перезапуск в сервер-баре */
     .awg-restart        { display: none; }
     .awg-restart-mobile { display: inline-flex; width: 100%; justify-content: center; }
 

@@ -18,7 +18,6 @@ import { ICONS } from '../components/icons';
 // Видимость общего хрома (сервер-бар) для вкладки. Любой флаг по умолчанию true.
 export interface TabChrome {
     serverBar?: boolean;
-    addServer?: boolean;
     restart?:   boolean;
 }
 

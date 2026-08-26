@@ -29,7 +29,6 @@ PRIV_KEY_FILE="$AMNEZIA_DIR/server_private.key"
 PUB_KEY_FILE="$AWG_DIR/server_public.key"
 AWG_CONF="$AWG_DIR/awg1.conf"
 DB_FILE="$AWG_DIR/users.db"
-UI_DB_FILE="$AWG_DIR/ui.db"   # своя БД awg-ui (API-ключи); вне PROJECT — переживает переустановку
 # Внутренняя авторизация awg-ui → awg-ctrl (Ed25519): приватный → awg-ui, публичный → awg-ctrl.
 INTERNAL_AUTH_PRIV="$AWG_DIR/internal_auth_private.key"
 INTERNAL_AUTH_PUB="$AWG_DIR/internal_auth_public.key"
@@ -192,15 +191,29 @@ start_logging() {
 download_extract() {
     local url="$BASE_URL/awgcontrol-${VERSION}.tar.gz"
     local tmp="/tmp/awgcontrol-${VERSION}.tar.gz"
-    echo "  → версия: ${VERSION}"
-    curl -fsSL --connect-timeout 15 "$url" -o "$tmp" \
-        || fail "Не удалось скачать архив: $url"
-    ok "Архив скачан: $(du -sh "$tmp" | cut -f1)"
+    local keep_tarball=0
+
+    # AWG_LOCAL_TARBALL — поставить сборку, которой ещё нет в релизах GitHub
+    # (или встать без сети). Архив должен быть той же формы, что делает CI:
+    # awg-ctrl/ + awg-ui/ (с готовым dist/) + cli/, без node_modules.
+    if [[ -n "${AWG_LOCAL_TARBALL:-}" ]]; then
+        [[ -f "$AWG_LOCAL_TARBALL" ]] \
+            || fail "AWG_LOCAL_TARBALL указан, но файл не найден: $AWG_LOCAL_TARBALL"
+        tmp="$AWG_LOCAL_TARBALL"
+        keep_tarball=1          # чужой файл — после распаковки не удаляем
+        echo "  → локальный архив: $tmp"
+        ok "Архив взят локально: $(du -sh "$tmp" | cut -f1)"
+    else
+        echo "  → версия: ${VERSION}"
+        curl -fsSL --connect-timeout 15 "$url" -o "$tmp" \
+            || fail "Не удалось скачать архив: $url"
+        ok "Архив скачан: $(du -sh "$tmp" | cut -f1)"
+    fi
 
     mkdir -p "$PROJECT"
     tar -xzf "$tmp" -C "$PROJECT" --strip-components=1 \
         || fail "Не удалось распаковать архив"
-    rm -f "$tmp"
+    [[ "$keep_tarball" == 1 ]] || rm -f "$tmp"
     ok "Распакован → $PROJECT"
 
     local f
@@ -344,8 +357,26 @@ AWGCTRL_PORT=$(( (RANDOM % 22768) + 32768 ))
 read -rp "  UI port (Enter — случайный): " UI_PORT
 UI_PORT="${UI_PORT:-$(( (RANDOM % 22768) + 32768 ))}"
 
-read -rp "  UI логин [admin]: " UI_USER
-UI_USER="${UI_USER:-admin}"
+# Интеграция с API MA7 (см. README.md, раздел «Интеграция с MA7») — этот
+# сервер персональный, панель показывает баланс своего единственного
+# владельца. Спрашивается ДО логина панели: логин MA7 по умолчанию становится
+# и логином панели (см. ниже). Пустые значения допустимы — вкладку «Профиль»
+# можно настроить позже вручную в cli.env.
+echo
+echo -e "${BLD}Интеграция с MA7 (Enter — оставить пустым и настроить позже):${NC}"
+read -rp   "  MA7 API base URL [https://amnesia.ma7neko.ru]: " MA7_API_BASE_URL
+MA7_API_BASE_URL="${MA7_API_BASE_URL:-https://amnesia.ma7neko.ru}"
+read -rsp  "  MA7 JWT_SECRET (мастер-ключ MA7, см. предупреждение в README): " MA7_JWT_SECRET; echo
+read -rp   "  Логин заказчика в MA7 (ma7_xxxxxx, владелец этого сервера): " MA7_LOGIN
+
+echo
+# Логин панели по умолчанию = логин заказчика в MA7: сервер персональный, и
+# заказчик входит тем же именем, что знает по MA7. Если MA7_LOGIN не задан —
+# откатываемся на admin. UI_USER и MA7_LOGIN остаются разными переменными:
+# первая решает, кого пускать в панель, вторая — чей баланс показывать.
+UI_USER_DEFAULT="${MA7_LOGIN:-admin}"
+read -rp "  UI логин [$UI_USER_DEFAULT]: " UI_USER
+UI_USER="${UI_USER:-$UI_USER_DEFAULT}"
 
 SUGGESTED_PASS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12 2>/dev/null || openssl rand -hex 6)
 read -rsp "  UI пароль [$SUGGESTED_PASS]: " UI_PASS; echo
@@ -434,9 +465,18 @@ else
     fi
     ok "Заголовки ядра на месте: /lib/modules/$KERNEL/build"
 
-    echo "  → add-apt-repository ppa:amnezia/ppa"
-    add-apt-repository -y ppa:amnezia/ppa \
-        || fail "Не удалось добавить PPA ppa:amnezia/ppa"
+    # Если репозиторий amnezia уже настроен (например, ключ и источник заведены
+    # руками — add-apt-repository ходит за ключом в Launchpad, а тот периодически
+    # отвечает GPGKeyTemporarilyNotFoundError), второй раз его добавлять не нужно.
+    # Проверяем именно файлы источников, а не `apt-cache policy`: сразу после
+    # apt-get install кэш apt бывает в переходном состоянии и отдаёт пустоту.
+    if grep -rqs 'amnezia/ppa' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        ok "Репозиторий amnezia уже настроен — add-apt-repository пропущен"
+    else
+        echo "  → add-apt-repository ppa:amnezia/ppa"
+        add-apt-repository -y ppa:amnezia/ppa \
+            || fail "Не удалось добавить PPA ppa:amnezia/ppa"
+    fi
 
     echo "  → apt-get update (после PPA)"
     apt-get update \
@@ -592,15 +632,6 @@ else
         mv "$DB_FILE" "$DB_BAK"
         warn "Старая база пользователей сохранена: $DB_BAK"
     fi
-    # ui.db (API-ключи awg-ui) — тоже в бэкап, чтобы awg-ui создал чистую БД.
-    if [[ -f "$UI_DB_FILE" ]]; then
-        UI_DB_BAK="${UI_DB_FILE}.bak-$(date +%Y%m%d-%H%M%S)"
-        mv "$UI_DB_FILE" "$UI_DB_BAK"
-        # WAL-сайдкары удаляем — к новой БД они неприменимы.
-        rm -f "${UI_DB_FILE}-wal" "${UI_DB_FILE}-shm"
-        warn "Старая база API-ключей сохранена: $UI_DB_BAK"
-    fi
-
     PRIV_KEY=$(umask 077 && awg genkey)
     PUB_KEY=$(printf '%s' "$PRIV_KEY" | awg pubkey)
 
@@ -820,6 +851,11 @@ UI_PORT=${UI_PORT}
 UI_USER=${UI_USER}
 UI_PASS=${UI_PASS}
 JWT_SECRET=${JWT_SECRET}
+
+# ── интеграция с MA7 (секрет чужого сервиса, не путать с JWT_SECRET выше) ──
+MA7_API_BASE_URL=${MA7_API_BASE_URL}
+MA7_JWT_SECRET=${MA7_JWT_SECRET}
+MA7_LOGIN=${MA7_LOGIN}
 ENV
 
 chmod 600 "$PROJECT/cli/cli.env"
