@@ -1,0 +1,89 @@
+# Публикация релиза в Gitea. Зеркало .github/workflows/release.yml: собирает тот
+# же архив, но заливает его через API Gitea — gh CLI в раннере нет.
+#
+# Gitea читает workflow из .gitea/workflows; когда этот каталог есть, файлы из
+# .github/workflows она не запускает, так что GitHub-версия остаётся только для
+# GitHub.
+#
+# Что нужно на стороне сервера, иначе workflow просто не запустится:
+#   1. Репозиторий НЕ должен быть pull-зеркалом — в зеркале Actions не
+#      запускаются, а релизы через API не создаются (сейчас
+#      maeneko/forgetting — зеркало GitHub, has_actions: false).
+#   2. В настройках репозитория включены Actions.
+#   3. Зарегистрирован act_runner с меткой ubuntu-latest (иначе поправь runs-on
+#      под свою метку — Gitea принимает только `runs-on: метка`).
+#   4. Токен: по умолчанию берётся встроенный secrets.GITEA_TOKEN. Если ему не
+#      хватает прав, заведи секрет RELEASE_TOKEN с PAT (имя не может начинаться
+#      с GITEA_/GITHUB_ — эти префиксы зарезервированы).
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build frontend
+        working-directory: awg-ui
+        run: |
+          npm install
+          npm run build
+
+      - name: Package archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir "awgcontrol-${VERSION}"
+          cp -r awg-ctrl awg-ui cli .env "awgcontrol-${VERSION}/"
+          tar --exclude='node_modules' -czf "awgcontrol-${VERSION}.tar.gz" "awgcontrol-${VERSION}/"
+
+      # Токен выбираем в bash, а не выражением ${{ a || b }}: так поведение не
+      # зависит от версии движка выражений в Gitea.
+      - name: Publish release
+        env:
+          GITEA_TOKEN:   ${{ secrets.GITEA_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN="${RELEASE_TOKEN:-$GITEA_TOKEN}"
+          [ -n "$TOKEN" ] || { echo "нет токена: ни RELEASE_TOKEN, ни GITEA_TOKEN"; exit 1; }
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="awgcontrol-${VERSION}.tar.gz"
+          API="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
+
+          # id релиза — первое поле в JSON Gitea, поэтому берём ПЕРВОЕ вхождение
+          # "id" (дальше идут id автора и ассетов; жадный sed схватил бы их).
+          # jq в раннере может не быть, поэтому grep. Если релиз на этот тег уже
+          # есть (повторный запуск), создание вернёт ошибку — берём его по тегу.
+          # `|| true` обязателен: без совпадения grep вернёт 1, а с pipefail
+          # это уронило бы шаг там, где пустой ответ — штатная ветка.
+          release_id() { grep -oE '"id"[[:space:]]*:[[:space:]]*[0-9]+' | head -n1 | grep -oE '[0-9]+$' || true; }
+
+          id=$(curl -sS -X POST "$API/releases" \
+                 -H "Authorization: token $TOKEN" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"prerelease\":true}" \
+               | release_id)
+
+          if [ -z "$id" ]; then
+            echo "релиз ${GITHUB_REF_NAME} уже существует — дополняем его"
+            id=$(curl -sS -H "Authorization: token $TOKEN" \
+                   "$API/releases/tags/${GITHUB_REF_NAME}" | release_id)
+          fi
+          [ -n "$id" ] || { echo "не удалось получить id релиза"; exit 1; }
+
+          curl -sS --fail -X POST "$API/releases/${id}/assets?name=${ARCHIVE}" \
+            -H "Authorization: token $TOKEN" \
+            -F "attachment=@${ARCHIVE};type=application/gzip" > /dev/null
+
+          echo "опубликовано: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"

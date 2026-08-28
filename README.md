@@ -58,6 +58,11 @@ AWG_GEN=auto bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branc
 так что подходит любой из них. Если архив не найден в основном источнике,
 установщик предупреждает и берёт его из запасного.
 
+Архив собирается по тегу `v*`: на GitHub — `.github/workflows/release.yml`, в
+Gitea — `.gitea/workflows/release.yml` (сборка та же, публикация через API
+Gitea). Для запуска в Gitea репозиторий не должен быть pull-зеркалом, Actions
+включены, а runner зарегистрирован с меткой `ubuntu-latest`.
+
 ```bash
 REPO_BASE=https://git.example.org/me/vpn BRAND="My VPN" \
   bash <(curl -Ls https://git.example.org/me/vpn/raw/branch/main/install.sh)
