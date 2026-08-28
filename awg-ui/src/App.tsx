@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import './App.css';
-import { TOKEN_KEY, THEME_KEY, apiFetch, type ServerInfo } from './lib/shared';
+import { TOKEN_KEY, THEME_KEY, BRAND_FALLBACK, apiFetch, type ServerInfo, type Brand } from './lib/shared';
 import { IcoMenu, IcoLogout, IcoSun, IcoMoon, IcoRefresh } from './components/icons';
 import ServerBar from './components/ServerBar';
 import { TABS } from './tabs';
@@ -22,6 +22,7 @@ export default function App() {
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [activeTab, setActiveTab]   = useState(TABS[0].id);
     const [restarting, setRestarting] = useState(false);
+    const [brand, setBrand]           = useState<Brand>({ brand: BRAND_FALLBACK, version: '' });
     const [theme, setTheme]           = useState<'light' | 'dark'>(() =>
         localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light');
     const touchStartX                 = useRef(0);
@@ -110,6 +111,17 @@ export default function App() {
         }
     }, [startSession]);
 
+    // Имя продукта и версия — с сервера, до логина (роут без авторизации).
+    // Если не ответил, остаётся фолбэк из констант.
+    useEffect(() => {
+        axios.get('/ui/brand')
+            .then(({ data }) => setBrand({
+                brand:   data.brand || BRAND_FALLBACK,
+                version: data.version || '',
+            }))
+            .catch(() => { /* остаётся фолбэк */ });
+    }, []);
+
     // Применять и сохранять тему
     useEffect(() => {
         document.documentElement.setAttribute('data-theme', theme);
@@ -163,7 +175,7 @@ export default function App() {
             {!token ? (
                 <div className="login-screen">
                     <div className="login-card">
-                        <span className="logo-name">Forgetting</span>
+                        <span className="logo-name">{brand.brand}</span>
                         <p className="login-sub">Войдите, чтобы продолжить</p>
                         <input
                             className="field"
@@ -216,8 +228,10 @@ export default function App() {
                             onTouchEnd={handleTouchEnd}
                         >
                             <div className="sidebar-logo">
-                                <span className="logo-name">Forgetting</span>
-                                <span className="sidebar-version">Alpha 0.1.4.2</span>
+                                <span className="logo-name">{brand.brand}</span>
+                                <span className="sidebar-version">
+                                    {brand.version ? `Alpha ${brand.version}` : 'Alpha'}
+                                </span>
                             </div>
                             <hr className="drawer-divider" />
                             {TABS.map(t => (

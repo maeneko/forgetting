@@ -16,6 +16,17 @@ const UI_PASS    = process.env.UI_PASS    ?? "";
 const JWT_SECRET = process.env.JWT_SECRET ?? crypto.randomBytes(32).toString("hex");
 const CTRL       = `http://127.0.0.1:${process.env.AWGCTRL_PORT ?? "3005"}`;
 
+// Название продукта и версия для панели. BRAND приходит из cli.env (пишет
+// install.sh), версия — из package.json: в semver она в форме 0.1.4+2, в
+// баннерах и релизах — через точку.
+const BRAND   = process.env.BRAND || "Forgetting";
+const VERSION = ((): string => {
+    try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
+        return String(pkg.version ?? "").replace("+", ".");
+    } catch { return ""; }
+})();
+
 const INTERNAL_AUTH_KEY_FILE = process.env.INTERNAL_AUTH_KEY_FILE
     ?? path.join(__dirname, "internal_auth_private.key");
 let internalAuthKey: crypto.KeyObject | null = null;
@@ -107,6 +118,12 @@ app.post("/logout", requireAuth, (req: Request, res: Response) => {
     const token = (req.headers["authorization"] as string).slice(7);
     revoked.add(tokenSig(token));
     res.json({ ok: true });
+});
+
+// Единственный роут без авторизации: вордмарк нужен уже на экране логина,
+// до выдачи JWT. Наружу уходит только имя продукта и версия.
+app.get("/ui/brand", (_req: Request, res: Response) => {
+    res.json({ brand: BRAND, version: VERSION });
 });
 
 async function proxy(req: Request, res: Response) {

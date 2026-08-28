@@ -20,8 +20,20 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 [[ -z "${BASH_VERSION:-}" ]] && fail "Нужен bash: bash install.sh"
 
 VERSION="0.1.4.2"
-GH_REPO="maeneko/forgetting"
-BASE_URL="https://github.com/${GH_REPO}/releases/download/v${VERSION}"
+
+# Откуда брать архив и как называется продукт — задаётся окружением, в коде
+# ничего не зашито. У Gitea и GitHub путь релиза одинаковый
+# (<repo>/releases/download/v<VERSION>/<file>), поэтому одна схема покрывает оба.
+#   REPO_BASE     — основной источник (своё зеркало);
+#   REPO_FALLBACK — запасной, если в основном релиза ещё нет;
+#   ARCHIVE_URL   — полный URL архива, перекрывает оба варианта;
+#   BRAND         — имя продукта в баннерах, systemd-юните и панели.
+BRAND="${BRAND:-Forgetting}"
+REPO_BASE="${REPO_BASE:-https://git.ma7neko.ru/maeneko/forgetting}"
+REPO_FALLBACK="${REPO_FALLBACK:-https://github.com/maeneko/forgetting}"
+ARCHIVE_NAME="awgcontrol-${VERSION}.tar.gz"
+ARCHIVE_URL="${ARCHIVE_URL:-}"
+url_host() { sed -E 's#^https?://([^/]+).*#\1#' <<< "$1"; }
 PROJECT="/opt/awg-control"
 AMNEZIA_DIR="/etc/amnezia"
 AWG_DIR="$AMNEZIA_DIR/amneziawg"
@@ -42,7 +54,7 @@ MTU="1376"
 TSX="$PROJECT/cli/node_modules/.bin/tsx"
 CLI="$PROJECT/cli/src/index.ts"
 
-echo -e "${BLD}Forgetting Alpha ${VERSION}${NC}"
+echo -e "${BLD}${BRAND} Alpha ${VERSION}${NC}"
 echo
 
 # Запускается ДО вопросов и любого деструктива (rm -rf): на несовместимой
@@ -83,10 +95,17 @@ fi
 
 # 3) Доступ в интернет: нужен для архива, Node и пакетов AWG. Без -f: любой
 #    HTTP-ответ = связь есть; ненулевой код только при сбое соединения/DNS.
-if ! curl -sS --connect-timeout 8 -o /dev/null "https://github.com" 2>/dev/null; then
-    NET_OK=0
-    NET_WHY="нет доступа к github.com — проверь интернет и DNS"
-fi
+#    Проверяем хосты, с которых реально качаем: хватает любого из двух —
+#    download_extract() умеет откатываться на запасной.
+NET_HOSTS=("$(url_host "$REPO_BASE")")
+[[ -n "$ARCHIVE_URL" ]] && NET_HOSTS=("$(url_host "$ARCHIVE_URL")")
+[[ -z "$ARCHIVE_URL" && "$(url_host "$REPO_FALLBACK")" != "${NET_HOSTS[0]}" ]] \
+    && NET_HOSTS+=("$(url_host "$REPO_FALLBACK")")
+NET_OK=0
+for h in "${NET_HOSTS[@]}"; do
+    if curl -sS --connect-timeout 8 -o /dev/null "https://$h" 2>/dev/null; then NET_OK=1; break; fi
+done
+[[ "$NET_OK" == 0 ]] && NET_WHY="нет доступа к ${NET_HOSTS[*]} — проверь интернет и DNS"
 
 # Чеклист: ✓ — пройдено, ✗ — нет.
 mark() { [[ "$1" == 1 ]] && echo -e "  ${GRN}✓${NC}  $2" || echo -e "  ${RED}✗${NC}  $2"; }
@@ -190,13 +209,12 @@ start_logging() {
 # Скачать архив версии VERSION, распаковать в PROJECT и проверить, что ключевые
 # файлы на месте.
 download_extract() {
-    local url="$BASE_URL/awgcontrol-${VERSION}.tar.gz"
-    local tmp="/tmp/awgcontrol-${VERSION}.tar.gz"
+    local tmp="/tmp/${ARCHIVE_NAME}"
     local keep_tarball=0
 
-    # AWG_LOCAL_TARBALL — поставить сборку, которой ещё нет в релизах GitHub
-    # (или встать без сети). Архив должен быть той же формы, что делает CI:
-    # awg-ctrl/ + awg-ui/ (с готовым dist/) + cli/, без node_modules.
+    # AWG_LOCAL_TARBALL — поставить сборку, которой ещё нет в релизах (или
+    # встать без сети). Архив должен быть той же формы, что делает CI:
+    # awg-ctrl/ + awg-ui/ (с готовым dist/) + cli/ + .env, без node_modules.
     if [[ -n "${AWG_LOCAL_TARBALL:-}" ]]; then
         [[ -f "$AWG_LOCAL_TARBALL" ]] \
             || fail "AWG_LOCAL_TARBALL указан, но файл не найден: $AWG_LOCAL_TARBALL"
@@ -205,10 +223,25 @@ download_extract() {
         echo "  → локальный архив: $tmp"
         ok "Архив взят локально: $(du -sh "$tmp" | cut -f1)"
     else
+        local urls=()
+        if [[ -n "$ARCHIVE_URL" ]]; then
+            urls=("$ARCHIVE_URL")
+        else
+            urls=("$REPO_BASE/releases/download/v${VERSION}/${ARCHIVE_NAME}")
+            [[ "$REPO_FALLBACK" != "$REPO_BASE" ]] \
+                && urls+=("$REPO_FALLBACK/releases/download/v${VERSION}/${ARCHIVE_NAME}")
+        fi
+
         echo "  → версия: ${VERSION}"
-        curl -fsSL --connect-timeout 15 "$url" -o "$tmp" \
-            || fail "Не удалось скачать архив: $url"
-        ok "Архив скачан: $(du -sh "$tmp" | cut -f1)"
+        local url got=""
+        for url in "${urls[@]}"; do
+            if curl -fsSL --connect-timeout 15 "$url" -o "$tmp"; then got="$url"; break; fi
+            warn "Архив недоступен на $(url_host "$url") — пробуем следующий источник"
+        done
+        [[ -n "$got" ]] || fail "Не удалось скачать архив ни с одного источника:
+$(printf '    %s\n' "${urls[@]}")
+    Укажи свой: ARCHIVE_URL=https://…/${ARCHIVE_NAME} bash install.sh"
+        ok "Архив скачан с $(url_host "$got"): $(du -sh "$tmp" | cut -f1)"
     fi
 
     mkdir -p "$PROJECT"
@@ -262,7 +295,7 @@ setup_service() {
     node_dir=$(dirname "$(command -v node 2>/dev/null || echo /usr/bin/node)")
     cat > "$SERVICE_UNIT" <<UNIT
 [Unit]
-Description=AWG Control — awg-ctrl + awg-ui (Forgetting)
+Description=AWG Control — awg-ctrl + awg-ui (${BRAND})
 After=network-online.target
 Wants=network-online.target
 
@@ -852,6 +885,7 @@ INTERNAL_AUTH_KEY_FILE=${INTERNAL_AUTH_PRIV}
 INTERNAL_AUTH_PUB_FILE=${INTERNAL_AUTH_PUB}
 
 # ── ui (Ring 4) ───────────────────────────────────────────────────────────
+BRAND=${BRAND}
 UI_PORT=${UI_PORT}
 UI_USER=${UI_USER}
 UI_PASS=${UI_PASS}

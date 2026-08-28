@@ -28,6 +28,15 @@ if (existsSync(envFile)) {
     }
 }
 
+// Название продукта — из окружения (BRAND пишет install.sh в cli.env), версия —
+// из package.json: при переименовании форка или бампе версии строки в коде
+// править не нужно. В package.json версия в semver-форме (0.1.4+2), в релизах
+// и баннерах — через точку.
+const BRAND   = process.env.BRAND || "Forgetting";
+const VERSION = (JSON.parse(
+    readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
+).version as string).replace("+", ".");
+
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 const C = {
@@ -71,6 +80,8 @@ const SERVICES = {
             // Приватный ключ внутренней авторизации (awg-ui подписывает им токены к awg-ctrl).
             INTERNAL_AUTH_KEY_FILE: process.env.INTERNAL_AUTH_KEY_FILE
                 ?? "/etc/amnezia/amneziawg/internal_auth_private.key",
+            // Бренд нужен панели для вордмарка (GET /ui/brand).
+            BRAND:        BRAND,
             UI_USER:      process.env.UI_USER         ?? "admin",
             UI_PASS:      process.env.UI_PASS         ?? "",
             JWT_SECRET:   process.env.JWT_SECRET      ?? "",
@@ -319,7 +330,7 @@ async function interactiveMenu() {
 
     const printMenu = () => {
         console.clear();
-        console.log(`\n${bold(`${C.blue}── Forgetting Alpha 0.1.4.2 ──${C.reset}`)}\n`);
+        console.log(`\n${bold(`${C.blue}── ${BRAND} Alpha ${VERSION} ──${C.reset}`)}\n`);
 
         for (const name of ALL) {
             const running = isRunning(name);
