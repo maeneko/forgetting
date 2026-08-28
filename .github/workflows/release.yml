@@ -28,7 +28,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir "awgcontrol-${VERSION}"
-          cp -r awg-ctrl awg-ui cli "awgcontrol-${VERSION}/"
+          cp -r awg-ctrl awg-ui cli .env "awgcontrol-${VERSION}/"
           tar --exclude='node_modules' -czf "awgcontrol-${VERSION}.tar.gz" "awgcontrol-${VERSION}/"
 
       - name: Publish release

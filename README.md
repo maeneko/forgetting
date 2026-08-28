@@ -52,7 +52,7 @@ AWG_GEN=auto bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branc
 | `REPO_BASE` | `https://git.ma7neko.ru/maeneko/forgetting` | основной источник архива релиза |
 | `REPO_FALLBACK` | `https://github.com/maeneko/forgetting` | запасной, если в основном релиза ещё нет |
 | `ARCHIVE_URL` | — | полный URL архива, перекрывает оба варианта |
-| `BRAND` | `Forgetting` | имя продукта в баннерах, systemd-юните и панели |
+| `BRAND` | из `.env` | имя продукта в баннерах, systemd-юните и панели |
 
 Путь релиза у Gitea и GitHub одинаковый (`<repo>/releases/download/v<версия>/awgcontrol-<версия>.tar.gz`),
 так что подходит любой из них. Если архив не найден в основном источнике,
@@ -62,6 +62,18 @@ AWG_GEN=auto bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branc
 REPO_BASE=https://git.example.org/me/vpn BRAND="My VPN" \
   bash <(curl -Ls https://git.example.org/me/vpn/raw/branch/main/install.sh)
 ```
+
+Имя панели, канал и версия лежат в `.env` в корне проекта (едет в архиве
+релиза, на сервере — `/opt/awg-control/.env`):
+
+```env
+BRAND=Forgetting
+CHANNEL=Beta
+VERSION=0.2.0
+```
+
+Оттуда их читают CLI (баннер меню) и панель (вордмарк, `GET /ui/brand`).
+`BRAND=` при установке перекрывает значение из файла.
 
 Сама панель и её API к домену не привязаны: работают по адресу того сервера,
 куда установлены, внешних сервисов не требуют.

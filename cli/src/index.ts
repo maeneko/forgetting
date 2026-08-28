@@ -15,27 +15,30 @@ const LOGS = path.join(ROOT, "logs");
 
 if (!existsSync(LOGS)) mkdirSync(LOGS, { recursive: true });
 
-const envFile = path.join(__dirname, "..", "cli.env");
-if (existsSync(envFile)) {
-    for (const line of readFileSync(envFile, "utf8").split("\n")) {
+// Уже заданное окружение не перетираем (??=), поэтому порядок = приоритет:
+// реальное окружение → cli.env (машинные настройки, пишет install.sh) →
+// .env в корне проекта (имя панели и версия, едет в архиве релиза).
+function loadEnvFile(file: string) {
+    if (!existsSync(file)) return;
+    for (const line of readFileSync(file, "utf8").split("\n")) {
         const t = line.trim();
         if (!t || t.startsWith("#")) continue;
         const idx = t.indexOf("=");
         if (idx === -1) continue;
-        const k = t.slice(0, idx).trim();
-        const v = t.slice(idx + 1).trim();
-        process.env[k] ??= v;
+        process.env[t.slice(0, idx).trim()] ??= t.slice(idx + 1).trim();
     }
 }
 
-// Название продукта — из окружения (BRAND пишет install.sh в cli.env), версия —
-// из package.json: при переименовании форка или бампе версии строки в коде
-// править не нужно. В package.json версия в semver-форме (0.1.4+2), в релизах
-// и баннерах — через точку.
-const BRAND   = process.env.BRAND || "Forgetting";
-const VERSION = (JSON.parse(
-    readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
-).version as string).replace("+", ".");
+const envFile = path.join(__dirname, "..", "cli.env");   // машинные настройки
+loadEnvFile(envFile);
+loadEnvFile(path.join(ROOT, ".env"));                    // имя панели и версия
+
+// Имя панели, канал и версия — из .env (или из cli.env, если оператор задал
+// своё имя при установке). В коде только запасные значения на случай, когда
+// .env не доехал.
+const BRAND   = process.env.BRAND   || "Forgetting";
+const CHANNEL = process.env.CHANNEL || "Beta";
+const VERSION = process.env.VERSION || "";
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -80,8 +83,10 @@ const SERVICES = {
             // Приватный ключ внутренней авторизации (awg-ui подписывает им токены к awg-ctrl).
             INTERNAL_AUTH_KEY_FILE: process.env.INTERNAL_AUTH_KEY_FILE
                 ?? "/etc/amnezia/amneziawg/internal_auth_private.key",
-            // Бренд нужен панели для вордмарка (GET /ui/brand).
+            // Панель показывает их в вордмарке (GET /ui/brand).
             BRAND:        BRAND,
+            CHANNEL:      CHANNEL,
+            VERSION:      VERSION,
             UI_USER:      process.env.UI_USER         ?? "admin",
             UI_PASS:      process.env.UI_PASS         ?? "",
             JWT_SECRET:   process.env.JWT_SECRET      ?? "",
@@ -330,7 +335,7 @@ async function interactiveMenu() {
 
     const printMenu = () => {
         console.clear();
-        console.log(`\n${bold(`${C.blue}── ${BRAND} Alpha ${VERSION} ──${C.reset}`)}\n`);
+        console.log(`\n${bold(`${C.blue}── ${[BRAND, CHANNEL, VERSION].filter(Boolean).join(" ")} ──${C.reset}`)}\n`);
 
         for (const name of ALL) {
             const running = isRunning(name);

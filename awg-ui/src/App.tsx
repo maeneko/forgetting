@@ -22,7 +22,7 @@ export default function App() {
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [activeTab, setActiveTab]   = useState(TABS[0].id);
     const [restarting, setRestarting] = useState(false);
-    const [brand, setBrand]           = useState<Brand>({ brand: BRAND_FALLBACK, version: '' });
+    const [brand, setBrand]           = useState<Brand>({ brand: BRAND_FALLBACK, channel: '', version: '' });
     const [theme, setTheme]           = useState<'light' | 'dark'>(() =>
         localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light');
     const touchStartX                 = useRef(0);
@@ -117,6 +117,7 @@ export default function App() {
         axios.get('/ui/brand')
             .then(({ data }) => setBrand({
                 brand:   data.brand || BRAND_FALLBACK,
+                channel: data.channel || '',
                 version: data.version || '',
             }))
             .catch(() => { /* остаётся фолбэк */ });
@@ -230,7 +231,7 @@ export default function App() {
                             <div className="sidebar-logo">
                                 <span className="logo-name">{brand.brand}</span>
                                 <span className="sidebar-version">
-                                    {brand.version ? `Alpha ${brand.version}` : 'Alpha'}
+                                    {[brand.channel, brand.version].filter(Boolean).join(' ')}
                                 </span>
                             </div>
                             <hr className="drawer-divider" />

@@ -31,11 +31,11 @@ export interface PageProps {
     token:   string;
     showMsg: (text: string) => void;
 }
-// Название продукта и версия приходят с сервера (GET /ui/brand, значения из
-// BRAND в cli.env и package.json) — форк переименовывается в одном месте, в
-// установщике. Эти константы — фолбэк на время загрузки и при недоступности.
+// Имя панели, канал и версия приходят с сервера (GET /ui/brand; значения — из
+// .env в корне проекта) — переименование и бамп версии живут в одном файле.
+// Эта константа — фолбэк на время загрузки и при недоступности роута.
 export const BRAND_FALLBACK = 'Forgetting';
-export interface Brand { brand: string; version: string }
+export interface Brand { brand: string; channel: string; version: string }
 
 export const TOKEN_KEY = 'awg_token';
 export const THEME_KEY = 'awg_theme';

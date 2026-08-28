@@ -19,7 +19,11 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 [[ $EUID -ne 0 ]]          && fail "Запусти от root: sudo bash install.sh"
 [[ -z "${BASH_VERSION:-}" ]] && fail "Нужен bash: bash install.sh"
 
-VERSION="0.1.4.2"
+# ⚠️ Дублирует .env из репозитория: установщик собирает URL релиза и печатает
+# баннер ДО того, как архив с .env скачан, поэтому взять их оттуда не может.
+# При бампе версии правь оба места.
+VERSION="0.2.0"
+CHANNEL="${CHANNEL:-Beta}"
 
 # Откуда брать архив и как называется продукт — задаётся окружением, в коде
 # ничего не зашито. У Gitea и GitHub путь релиза одинаковый
@@ -27,7 +31,10 @@ VERSION="0.1.4.2"
 #   REPO_BASE     — основной источник (своё зеркало);
 #   REPO_FALLBACK — запасной, если в основном релиза ещё нет;
 #   ARCHIVE_URL   — полный URL архива, перекрывает оба варианта;
-#   BRAND         — имя продукта в баннерах, systemd-юните и панели.
+#   BRAND         — имя продукта в баннерах, systemd-юните и панели; по
+#                   умолчанию берётся из .env в архиве, здесь только запасное
+#                   значение для баннера самого установщика.
+BRAND_OVERRIDE="${BRAND:-}"
 BRAND="${BRAND:-Forgetting}"
 REPO_BASE="${REPO_BASE:-https://git.ma7neko.ru/maeneko/forgetting}"
 REPO_FALLBACK="${REPO_FALLBACK:-https://github.com/maeneko/forgetting}"
@@ -54,7 +61,7 @@ MTU="1376"
 TSX="$PROJECT/cli/node_modules/.bin/tsx"
 CLI="$PROJECT/cli/src/index.ts"
 
-echo -e "${BLD}${BRAND} Alpha ${VERSION}${NC}"
+echo -e "${BLD}${BRAND} ${CHANNEL} ${VERSION}${NC}"
 echo
 
 # Запускается ДО вопросов и любого деструктива (rm -rf): на несовместимой
@@ -885,7 +892,6 @@ INTERNAL_AUTH_KEY_FILE=${INTERNAL_AUTH_PRIV}
 INTERNAL_AUTH_PUB_FILE=${INTERNAL_AUTH_PUB}
 
 # ── ui (Ring 4) ───────────────────────────────────────────────────────────
-BRAND=${BRAND}
 UI_PORT=${UI_PORT}
 UI_USER=${UI_USER}
 UI_PASS=${UI_PASS}
@@ -896,6 +902,11 @@ MA7_API_BASE_URL=${MA7_API_BASE_URL}
 MA7_JWT_SECRET=${MA7_JWT_SECRET}
 MA7_LOGIN=${MA7_LOGIN}
 ENV
+
+# Имя продукта попадает в cli.env, только если оператор задал его явно
+# (BRAND=… перед запуском). Иначе оно берётся из .env, приехавшего в архиве, —
+# чтобы источник правды оставался один.
+[[ -n "$BRAND_OVERRIDE" ]] && echo "BRAND=${BRAND_OVERRIDE}" >> "$PROJECT/cli/cli.env"
 
 chmod 600 "$PROJECT/cli/cli.env"
 ok "$PROJECT/cli/cli.env"
