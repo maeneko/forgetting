@@ -19,6 +19,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
     // Поколение, на котором сейчас работает интерфейс. Ключи, выданные на другом
     // поколении, уже не подключатся — их надо перевыпустить.
     const [serverGen, setServerGen] = useState<AwgGen>('2');
+    const [upgrading, setUpgrading]  = useState(false);
     const statsRef              = useRef<ReturnType<typeof setInterval> | null>(null);
     const stale                 = users.filter(u => u.key_gen !== serverGen);
 
@@ -61,6 +62,28 @@ export default function UsersPage({ token, showMsg }: PageProps) {
             showMsg('Не удалось перевыпустить ключи');
         }
     }, [stale.length, serverGen, token, loadUsers, showMsg]);
+
+    // Перевод сервера с 2.0 на 3.1 без переустановки: awg-ctrl дописывает
+    // 3.x-параметры в awg1.conf, перезапускает интерфейс (с откатом, если ядро
+    // их не примет) и сразу перевыпускает ключи — старые собраны на
+    // 2.0-параметрах и работать не будут.
+    const upgradeGen = useCallback(async () => {
+        if (!confirm(
+            'Перевести сервер на AmneziaWG 3.1?\n\n' +
+            'Интерфейс будет перезапущен, а все vpn:// ключи перевыпущены — ' +
+            'клиентам придётся импортировать ключ заново.',
+        )) return;
+        setUpgrading(true);
+        try {
+            const r = await apiFetch('POST', '/awg/upgrade', token);
+            showMsg(`Сервер переведён на ${genLabel(r.gen)}, перевыпущено ключей: ${r.reissue?.reissued ?? 0}`);
+            await loadUsers(token);
+        } catch (e: any) {
+            showMsg(e?.response?.data?.error ?? 'Не удалось перейти на 3.1');
+        } finally {
+            setUpgrading(false);
+        }
+    }, [token, loadUsers, showMsg]);
 
     const createUser = useCallback(async () => {
         if (!newName) return;
@@ -120,6 +143,11 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                     <button className="btn btn--tonal" onClick={() => loadUsers(token)}>
                         <IcoRefresh /> Обновить
                     </button>
+                    {serverGen !== '3.1' && (
+                        <button className="btn btn--danger" onClick={upgradeGen} disabled={upgrading}>
+                            <IcoRefresh /> {upgrading ? 'Переход…' : 'Перейти на AWG 3.1'}
+                        </button>
+                    )}
                     {stale.length > 0 && (
                         <button className="btn btn--danger" onClick={reissueKeys}>
                             <IcoRefresh /> Перевыпустить ключи ({stale.length})

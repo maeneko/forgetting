@@ -3,6 +3,7 @@
 // LICENSE file in the root directory of this source tree.
 import fs, { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path  from "path";
+import os   from "os";
 import crypto from "crypto";
 import { execSync, spawnSync } from "child_process";
 import * as zlib from "zlib";
@@ -221,6 +222,26 @@ function readAwgVersions(): { module: string; tools: string } {
 // PersistentKeepalive в 3.1 задаётся диапазоном (дефолт клиента AmneziaVPN);
 // в 2.0 это одно число. Уходит и в серверные [Peer], и в клиентский конфиг.
 const KEEPALIVE_BY_GEN: Record<"2" | "3.1", string> = { "2": "25", "3.1": "25-35" };
+
+// Значения 3.1-параметров для перевода уже работающего 2.0-сервера (POST
+// /awg/upgrade) — те же, что пишет install.sh (дефолты клиента AmneziaVPN,
+// protocolConstants.h), в порядке AWG3_KEYS. RandomTrailers/DisableCookies не
+// включаем — как и инсталлятор. HeaderProtectionKey сюда не входит: он
+// генерируется на месте (awg genpsk) и фиксируется на весь срок жизни сервера.
+const AWG31_DEFAULTS: Record<string, string> = {
+    ContentPaddingAddition: "10-100",
+    RekeyAfterTime:         "100-120",
+    RekeyTimeout:           "3-7",
+    RejectAfterTime:        "150-180",
+    KeepaliveTimeout:       "5-15",
+    MaxHandshakeAttempts:   "15-20",
+};
+
+// При заданном HeaderProtectionKey ни один из S1–S4 не может быть меньше 12
+// (HEADER_PROTECTION_NONCE_SIZE). Модуль на нарушение отвечает только
+// «Invalid argument»; причина видна лишь при
+// `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`.
+const MIN_S_FOR_HEADER_PROTECTION = 12;
 
 const runtimeConfig = initConfig();
 const AWG_PARAMS    = readAwgParams();
@@ -601,6 +622,17 @@ function ensureInterfaceUp() {
     if (!up) throw new Error(`Interface ${CONFIG.interface} is not up. Run: awg-quick up ${CONFIG.interface}`);
 }
 
+// Параметры обфускации и поколение живут в awg1.conf, а не в процессе:
+// перечитываем их после любой правки конфига. Иначе awg-ctrl продолжит
+// собирать vpn:// ключи на старых параметрах — например, на 2.0 уже после
+// перехода интерфейса на 3.1.
+function reloadAwgParams(): "2" | "3.1" {
+    CONFIG.awgParams = readAwgParams();
+    CONFIG.gen       = genOf(CONFIG.awgParams);
+    CONFIG.keepalive = KEEPALIVE_BY_GEN[CONFIG.gen];
+    return CONFIG.gen;
+}
+
 function restartAwg() {
     logger.info("AWG restart: down");
     const down = spawnSync("awg-quick", ["down", CONFIG.interface]);
@@ -608,11 +640,126 @@ function restartAwg() {
     logger.info("AWG restart: up");
     const up = spawnSync("awg-quick", ["up", CONFIG.interface]);
     if (up.status !== 0) throw new Error(`awg-quick up failed: ${up.stderr?.toString()}`);
+    // Конфиг мог измениться, пока интерфейс лежал (переход на 3.1, ручная
+    // правка awg1.conf) — перечитываем ДО syncPeers: keepalive из CONFIG уходит
+    // в [Peer]-блоки, которые rebuildConf() пересобирает прямо сейчас.
+    const gen = reloadAwgParams();
     syncPeers();
     const versions = readAwgVersions();
     CONFIG.awgModule = versions.module;
     CONFIG.awgTools  = versions.tools;
-    logger.info("AWG restart: done", versions);
+    logger.info("AWG restart: done", { ...versions, gen });
+}
+
+// ─────────────────────────── переход 2.0 → 3.1 ───────────────────────────
+// 3.1 — основное поколение (install.sh ставит его по умолчанию). Сервера,
+// установленные раньше, переводятся отсюда, без переустановки: панель дёргает
+// POST /awg/upgrade.
+
+// Header protection использует библиотечный chacha-API (chacha_init/
+// chacha20_crypt), которого нет до ядра 5.5 — там модуль 3.x просто не
+// соберётся (upstream issue #210).
+function kernelSupportsHeaderProtection(): boolean {
+    const [maj, min] = os.release().split(".").map(n => Number.parseInt(n, 10));
+    if (!Number.isFinite(maj) || !Number.isFinite(min)) return false;
+    return maj > 5 || (maj === 5 && min >= 5);
+}
+
+// Пред-проверка перед тем, как трогать конфиг: решает ЗАГРУЖЕННЫЙ модуль
+// (readAwgVersions читает /sys/module/amneziawg/version), а не тот, что лежит
+// на диске после apt — обслуживает интерфейс именно загруженный.
+function checkGen31Support(): string | null {
+    const { module } = readAwgVersions();
+    if (!module.startsWith("3."))
+        return `В ядре загружен модуль amneziawg ${module || "неизвестной версии"} — для 3.1 нужна 3.x. `
+             + "Обнови пакет (apt) и перезагрузи сервер, затем повтори переход.";
+    if (!kernelSupportsHeaderProtection())
+        return `Ядро ${os.release()} старше 5.5 — header protection в нём не работает (upstream issue #210).`;
+    return null;
+}
+
+const AWG3_KEY_LINE = new RegExp(`^\\s*(${AWG3_KEYS.join("|")})\\s*=`);
+
+// Готовит текст awg1.conf для 3.1: выкидывает старые 3.x-строки (конфиг могли
+// править руками), поднимает S1–S4 до допустимых при header protection и
+// дописывает 3.x-блок в конец [Interface]. [Peer]-блоки не трогаются —
+// личности пиров переход не меняет.
+function confWithGen31(conf: string, headerKey: string): { conf: string; bumpedS: string[] } {
+    const peerAt = conf.search(/^\[Peer\]/m);
+    let   rest   = peerAt >= 0 ? conf.slice(peerAt) : "";
+    const head   = (peerAt >= 0 ? conf.slice(0, peerAt) : conf)
+        .split("\n")
+        .filter(l => !AWG3_KEY_LINE.test(l));
+
+    // Пустые строки и «# имя» в хвосте [Interface] относятся уже к первому
+    // [Peer] (их пишет rebuildConf) — отделяем, чтобы 3.x-строки встали внутрь
+    // [Interface], а не между комментарием и его пиром.
+    const tail: string[] = [];
+    while (head.length && (head[head.length - 1].trim() === "" || head[head.length - 1].trim().startsWith("#")))
+        tail.unshift(head.pop()!);
+    rest = tail.join("\n").trim() ? `${tail.join("\n").trim()}\n${rest}` : rest;
+
+    let iface = head.join("\n");
+
+    // S ниже 12 (или вовсе отсутствующий) ядро с header protection не примет.
+    // Правка безопасна ровно потому, что следом идёт перевыпуск ключей: обе
+    // стороны получают новые значения одновременно.
+    const bumpedS: string[] = [];
+    for (const k of ["S1", "S2", "S3", "S4"] as const) {
+        const re  = new RegExp(`^\\s*${k}\\s*=\\s*(\\d+)\\s*$`, "m");
+        const cur = Number(iface.match(re)?.[1]);
+        if (Number.isFinite(cur) && cur >= MIN_S_FOR_HEADER_PROTECTION) continue;
+        const val = Math.max(DEFAULT_AWG_PARAMS[k], MIN_S_FOR_HEADER_PROTECTION);
+        iface = re.test(iface)
+            ? iface.replace(re, `${k} = ${val}`)
+            : `${iface.trimEnd()}\n${k} = ${val}`;
+        bumpedS.push(`${k}: ${Number.isFinite(cur) ? cur : "нет"} → ${val}`);
+    }
+
+    const awg3 = [
+        `HeaderProtectionKey = ${headerKey}`,
+        ...Object.entries(AWG31_DEFAULTS).map(([k, v]) => `${k} = ${v}`),
+    ].join("\n");
+
+    return { conf: `${iface.trimEnd()}\n${awg3}\n${rest ? `\n${rest}` : ""}`, bumpedS };
+}
+
+interface UpgradeResult { gen: "2" | "3.1"; backup: string; bumpedS: string[]; reissue: ReissueResult }
+
+// Перевод интерфейса на 3.1. Единственная настоящая проверка, что ядро приняло
+// параметры, — подъём интерфейса, поэтому шаги такие: бэкап конфига → запись
+// 3.1 → restartAwg() (он же перечитает параметры) → перевыпуск ключей. Если
+// ядро отказало, возвращаем прежний конфиг и поднимаем интерфейс обратно:
+// операция либо применяется целиком, либо не оставляет следов.
+function upgradeToGen31(): UpgradeResult {
+    const confFile = path.join(CONFIG.confDir, `${CONFIG.interface}.conf`);
+    const before   = readFileSync(confFile, "utf8");
+    const backup   = `${confFile}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    writeFileSync(backup, before, { mode: 0o600 });
+
+    const { conf, bumpedS } = confWithGen31(before, run("awg genpsk"));
+    writeFileSync(confFile, conf, { mode: 0o600 });
+    logger.info("upgrade: conf rewritten for 3.1", { backup, bumpedS });
+
+    try {
+        restartAwg();
+        if (CONFIG.gen !== "3.1") throw new Error("интерфейс поднялся, но конфиг всё ещё 2.0");
+    } catch (e) {
+        logger.error("upgrade: kernel rejected 3.1, rolling back", { error: e });
+        writeFileSync(confFile, before, { mode: 0o600 });
+        try { restartAwg(); } catch (e2) { logger.error("upgrade: rollback restart failed", { error: e2 }); }
+        throw new Error(
+            `Ядро не приняло конфиг 3.1 — вернули прежний (копия: ${backup}). `
+            + 'Причина видна в dmesg после `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`.',
+        );
+    }
+
+    // Ключи, выданные на 2.0-параметрах, после смены поколения не подключатся,
+    // поэтому перевыпускаем сразу — сервер не должен оставаться в состоянии
+    // «3.1 поднят, у всех нерабочие ключи». Личности пиров сохраняются.
+    const reissue = reissueAll();
+    logger.info("upgrade: done", { gen: CONFIG.gen, reissued: reissue.reissued, bumpedS });
+    return { gen: CONFIG.gen, backup, bumpedS, reissue };
 }
 
 function startInterface() {
@@ -787,6 +934,22 @@ app.delete("/api/users/:name", auth, validateName, handler((req, res) => {
 app.post("/awg/restart", auth, handler((_req, res) => {
     restartAwg();
     res.json({ success: true });
+}));
+
+// Перевод сервера с 2.0 на 3.1 — включая перевыпуск всех vpn:// ключей.
+// Ошибку отдаём текстом: панель показывает её оператору, а причины отказа
+// (старый модуль, старое ядро, отказ ядра на подъёме) требуют разных действий.
+app.post("/awg/upgrade", auth, handler((_req, res) => {
+    if (CONFIG.gen === "3.1") {
+        res.status(409).json({ error: "Сервер уже работает на AmneziaWG 3.1" }); return;
+    }
+    const blocker = checkGen31Support();
+    if (blocker) { res.status(409).json({ error: blocker }); return; }
+    try {
+        res.json(upgradeToGen31());
+    } catch (e) {
+        res.status(500).json({ error: e instanceof Error ? e.message : "Не удалось перейти на 3.1" });
+    }
 }));
 
 app.get("/awg/status", auth, handler((_req, res) => {

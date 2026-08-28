@@ -28,8 +28,20 @@
 На сервере, от root:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
+bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branch/main/install.sh)
 ```
+
+Установщик по умолчанию ставит сервер на AmneziaWG 3.1. Если модуль в ядре
+старше 3.x или ядро старше 5.5, установка остановится с диагностикой — поставить
+на 2.0 можно так:
+
+```bash
+AWG_GEN=auto bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branch/main/install.sh)
+```
+
+Перевести такой сервер на 3.1 позже можно кнопкой «Перейти на AWG 3.1» в панели —
+переустановка не нужна, пользователи сохраняются, ключи перевыпускаются
+автоматически.
 ## Управление
 
 ```bash
