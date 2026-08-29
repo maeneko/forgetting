@@ -398,26 +398,8 @@ AWGCTRL_PORT=$(( (RANDOM % 22768) + 32768 ))
 read -rp "  UI port (Enter — случайный): " UI_PORT
 UI_PORT="${UI_PORT:-$(( (RANDOM % 22768) + 32768 ))}"
 
-# Интеграция с API MA7 (см. README.md, раздел «Интеграция с MA7») — этот
-# сервер персональный, панель показывает баланс своего единственного
-# владельца. Спрашивается ДО логина панели: логин MA7 по умолчанию становится
-# и логином панели (см. ниже). Пустые значения допустимы — вкладку «Профиль»
-# можно настроить позже вручную в cli.env.
-echo
-echo -e "${BLD}Интеграция с MA7 (Enter — оставить пустым и настроить позже):${NC}"
-read -rp   "  MA7 API base URL [https://amnesia.ma7neko.ru]: " MA7_API_BASE_URL
-MA7_API_BASE_URL="${MA7_API_BASE_URL:-https://amnesia.ma7neko.ru}"
-read -rsp  "  MA7 JWT_SECRET (мастер-ключ MA7, см. предупреждение в README): " MA7_JWT_SECRET; echo
-read -rp   "  Логин заказчика в MA7 (ma7_xxxxxx, владелец этого сервера): " MA7_LOGIN
-
-echo
-# Логин панели по умолчанию = логин заказчика в MA7: сервер персональный, и
-# заказчик входит тем же именем, что знает по MA7. Если MA7_LOGIN не задан —
-# откатываемся на admin. UI_USER и MA7_LOGIN остаются разными переменными:
-# первая решает, кого пускать в панель, вторая — чей баланс показывать.
-UI_USER_DEFAULT="${MA7_LOGIN:-admin}"
-read -rp "  UI логин [$UI_USER_DEFAULT]: " UI_USER
-UI_USER="${UI_USER:-$UI_USER_DEFAULT}"
+read -rp "  UI логин [admin]: " UI_USER
+UI_USER="${UI_USER:-admin}"
 
 SUGGESTED_PASS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12 2>/dev/null || openssl rand -hex 6)
 read -rsp "  UI пароль [$SUGGESTED_PASS]: " UI_PASS; echo
@@ -896,11 +878,6 @@ UI_PORT=${UI_PORT}
 UI_USER=${UI_USER}
 UI_PASS=${UI_PASS}
 JWT_SECRET=${JWT_SECRET}
-
-# ── интеграция с MA7 (секрет чужого сервиса, не путать с JWT_SECRET выше) ──
-MA7_API_BASE_URL=${MA7_API_BASE_URL}
-MA7_JWT_SECRET=${MA7_JWT_SECRET}
-MA7_LOGIN=${MA7_LOGIN}
 ENV
 
 # Имя продукта попадает в cli.env, только если оператор задал его явно

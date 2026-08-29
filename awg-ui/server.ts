@@ -6,7 +6,6 @@ import path     from "path";
 import fs       from "fs";
 import crypto   from "crypto";
 import axios    from "axios";
-import { ma7 } from "./ma7";
 
 const app  = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -153,38 +152,6 @@ async function ctrl(method: string, urlPath: string, body?: unknown) {
         validateStatus: () => true,
     });
 }
-
-// ── Интеграция с MA7 (вкладка «Профиль») ───────────────────────────────────
-// Сервер персональный — панель показывает баланс своего единственного
-// владельца, не список абонентов. Логин владельца (MA7_LOGIN) — часть
-// конфигурации сервера, задаётся один раз при установке (cli.env), а НЕ
-// вводится через UI: бот-токен MA7_JWT_SECRET умеет искать любого абонента
-// MA7, и если бы логин можно было менять прямо в панели, любой, кто знает
-// пароль от панели, мог бы подсматривать баланс чужих абонентов — панель
-// защищена одним общим UI_USER/UI_PASS, отдельного «клиентского» входа нет.
-const MA7_LOGIN = process.env.MA7_LOGIN ?? "";
-
-app.get("/ui/ma7/profile", requireAuth, async (_req: Request, res: Response) => {
-    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(MA7_LOGIN)) {
-        res.status(500).json({ error: "MA7_LOGIN не задан — укажи его в cli.env" }); return;
-    }
-    try {
-        const r = await ma7.get("/api/admin/users", { params: { q: MA7_LOGIN, limit: 1 } });
-        if (r.status >= 400) {
-            const msg = r.status === 401 ? "MA7: неверный MA7_JWT_SECRET"
-                : r.status === 403 ? "MA7: не та роль в токене"
-                : (r.data as { error?: string })?.error ?? "Ошибка MA7";
-            res.status(r.status === 401 || r.status === 403 ? 502 : r.status).json({ error: msg });
-            return;
-        }
-        const user = (r.data.users as { login: string; balance: number }[] ?? [])
-            .find(u => u.login === MA7_LOGIN);
-        if (!user) { res.status(404).json({ error: "MA7_LOGIN не найден в MA7" }); return; }
-        res.json({ login: user.login, balance: user.balance });
-    } catch {
-        res.status(502).json({ error: "MA7 недоступен" });
-    }
-});
 
 app.use(["/api", "/health", "/awg"], requireAuth, proxy);
 

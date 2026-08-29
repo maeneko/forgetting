@@ -90,13 +90,6 @@ const SERVICES = {
             UI_USER:      process.env.UI_USER         ?? "admin",
             UI_PASS:      process.env.UI_PASS         ?? "",
             JWT_SECRET:   process.env.JWT_SECRET      ?? "",
-            // Интеграция с API MA7 (см. awg-ui/ma7.ts) — секрет чужого сервиса,
-            // не совпадает с UI_* / JWT_SECRET этой панели. MA7_LOGIN — логин
-            // владельца этого персонального сервера в MA7 ('ma7_xxxxxx'):
-            // задаётся один раз при установке, в панели не редактируется.
-            MA7_API_BASE_URL: process.env.MA7_API_BASE_URL ?? "",
-            MA7_JWT_SECRET:   process.env.MA7_JWT_SECRET   ?? "",
-            MA7_LOGIN:        process.env.MA7_LOGIN        ?? "",
         },
         pidFile: "/tmp/awg-ui.pid",
         logFile: path.join(LOGS, "awg-ui.log"),
