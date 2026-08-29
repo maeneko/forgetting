@@ -1,0 +1,45 @@
+# Проверка на каждый пуш и PR. Ловит то, из-за чего main однажды уехал
+# нерабочим: файл, на который есть import, не попал в коммит (tsc по awg-ui
+# видит это как «Cannot find module»), плюс битый синтаксис установщика.
+# Релиз собирается отдельно (release.yml, только на теги v*).
+
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Installer syntax
+        run: bash -n install.sh
+
+      - name: awg-ctrl types
+        working-directory: awg-ctrl
+        run: |
+          npm install
+          npx tsc --noEmit -p tsconfig.json
+
+      # tsconfig awg-ui включает server.ts — именно этот шаг и поймал бы
+      # пропавший ./ma7.
+      - name: awg-ui types and build
+        working-directory: awg-ui
+        run: |
+          npm install
+          npx tsc --noEmit -p tsconfig.json
+          npm run build
+
+      - name: cli types
+        working-directory: cli
+        run: |
+          npm install
+          npx tsc --noEmit -p tsconfig.json
