@@ -43,45 +43,81 @@ AWG_GEN=auto bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branc
 переустановка не нужна, пользователи сохраняются, ключи перевыпускаются
 автоматически.
 
-### Свой источник и своё имя
+Источник архива и имя панели не зашиты в код — задаются переменными
+`REPO_BASE`, `REPO_FALLBACK`, `ARCHIVE_URL`, `BRAND` перед запуском установщика
+(подробности — в комментариях `install.sh` и в `.env`).
 
-В коде не зашиты ни репозиторий, ни бренд — всё задаётся окружением до запуска:
+## API
 
-| Переменная | По умолчанию | Зачем |
-|---|---|---|
-| `REPO_BASE` | `https://git.ma7neko.ru/maeneko/forgetting` | основной источник архива релиза |
-| `REPO_FALLBACK` | `https://github.com/maeneko/forgetting` | запасной, если в основном релиза ещё нет |
-| `ARCHIVE_URL` | — | полный URL архива, перекрывает оба варианта |
-| `BRAND` | из `.env` | имя продукта в баннерах, systemd-юните и панели |
+Отдельного публичного API с ключами нет: наружу смотрит только панель, и всё,
+что она умеет, доступно по HTTP. Схема одна — логин отдаёт JWT на 24 часа,
+дальше с ним дёргаются те же роуты, что и из браузера. Базовый URL — адрес
+сервера и порт, выбранный при установке.
 
-Путь релиза у Gitea и GitHub одинаковый (`<repo>/releases/download/v<версия>/awgcontrol-<версия>.tar.gz`),
-так что подходит любой из них. Если архив не найден в основном источнике,
-установщик предупреждает и берёт его из запасного.
+> [!WARNING]
+> Панель отдаёт приватные поля пиров (`vpn_key`, `psk_key`) — это не публичный
+> контракт. Не выставляй её порт в интернет без TLS и ограничения по адресам.
 
-Архив собирается по тегу `v*`: на GitHub — `.github/workflows/release.yml`, в
-Gitea — `.gitea/workflows/release.yml` (сборка та же, публикация через API
-Gitea). Для запуска в Gitea репозиторий не должен быть pull-зеркалом, Actions
-включены, а runner зарегистрирован с меткой `ubuntu-latest`.
+### Авторизация
 
 ```bash
-REPO_BASE=https://git.example.org/me/vpn BRAND="My VPN" \
-  bash <(curl -Ls https://git.example.org/me/vpn/raw/branch/main/install.sh)
+TOKEN=$(curl -s -X POST http://HOST:PORT/login \
+  -H "Content-Type: application/json" \
+  -d '{"user":"admin","pass":"***"}' | jq -r .token)
 ```
 
-Имя панели, канал и версия лежат в `.env` в корне проекта (едет в архиве
-релиза, на сервере — `/opt/awg-control/.env`):
+| Метод | Ответ и ошибки |
+|---|---|
+| `POST /login` | `{ "token": "<JWT>" }`, срок 24 часа. `401` — неверная пара; `429` — больше 5 неудачных попыток с одного IP за 15 минут |
+| `POST /logout` | `{ "ok": true }`, токен отзывается немедленно |
 
-```env
-BRAND=Forgetting
-CHANNEL=Beta
-VERSION=0.2.0
+Дальше в каждый запрос: `Authorization: Bearer $TOKEN`.
+
+### Состояние
+
+| Метод | Ответ |
+|---|---|
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.2.0" }` — **без авторизации**, панель берёт отсюда вордмарк на экране логина |
+| `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
+| `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
+
+`gen` — поколение AmneziaWG, на параметрах которого сейчас работает интерфейс:
+`"2"` или `"3.1"`. Оно выводится из `awg1.conf`, а не хранится отдельно.
+
+### Пользователи
+
+| Метод | Что делает |
+|---|---|
+| `POST /api/users` | Создаёт пира. Тело `{ "name": "alice" }`, имя — `a–z A–Z 0–9 _ -`, до 32 символов. `201` с `{ name, ip, pub_key, psk_key, vpn_key, key_gen, vpn_key_prev }`; `400` — имя не прошло валидацию, `409` — уже есть |
+| `GET /api/users` | Список: `{ users: [{ name, ip, pub_key, vpn_key, key_gen, online, lastHandshake }] }` |
+| `GET /api/users/stats` | То же без ключей, но со счётчиками: `{ users: [{ name, ip, key_gen, online, lastHandshake, rx, tx }] }` |
+| `POST /api/users/:name` | Возвращает пользователя целиком, включая `vpn_key`. Метод именно `POST`, чтобы ключ не оседал в логах и истории как параметр `GET`. `404` — не найден |
+| `DELETE /api/users/:name` | `{ "success": true, "name": "alice" }` |
+| `POST /api/users/reissue` | Пересобирает `vpn://` всем на текущих параметрах: `{ total, reissued, regenerated: [], backup }`. IP и ключевая пара сохраняются, клиентам нужно заново импортировать ключ; `backup` — путь к снимку базы, снятому перед проходом |
+
+```bash
+curl -s -X POST http://HOST:PORT/api/users \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"alice"}' | jq -r .vpn_key
 ```
 
-Оттуда их читают CLI (баннер меню) и панель (вордмарк, `GET /ui/brand`).
-`BRAND=` при установке перекрывает значение из файла.
+Имея `vpn_key`, конфиг `.conf` можно получить локально: убрать префикс `vpn://`,
+base64url-декодировать, отбросить первые 4 байта (длина), распаковать
+`zlib inflate` → JSON; текст конфига лежит в `last_config.config`.
 
-Сама панель и её API к домену не привязаны: работают по адресу того сервера,
-куда установлены, внешних сервисов не требуют.
+### Интерфейс AWG
+
+| Метод | Что делает |
+|---|---|
+| `POST /awg/start` | Поднимает интерфейс, если он лежит; возвращает его статус |
+| `POST /awg/restart` | `awg-quick down/up` + ресинк пиров, `{ "success": true }`. Соединения клиентов кратковременно рвутся |
+| `POST /awg/upgrade` | Переводит сервер с 2.0 на 3.1: правит `awg1.conf`, перезапускает интерфейс и перевыпускает все ключи. `{ gen, backup, bumpedS: [], reissue: { total, reissued, … } }` |
+
+`POST /awg/upgrade` отвечает `409`, если сервер уже на 3.1, модуль в ядре не
+3.x или ядро старше 5.5, и `500` с текстом причины, если ядро не приняло
+3.1-конфиг — в этом случае прежний конфиг возвращается из копии, а интерфейс
+поднимается обратно на 2.0.
+
 ## Управление
 
 ```bash
