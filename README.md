@@ -115,7 +115,7 @@ TOKEN=$(curl -s -X POST http://HOST:PORT/login \
 
 | Метод | Ответ |
 |---|---|
-| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.2.0" }` — **без авторизации**, панель берёт отсюда вордмарк на экране логина |
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.2.1" }` — **без авторизации**, панель берёт отсюда вордмарк на экране логина |
 | `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
 | `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
 
