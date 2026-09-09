@@ -48,6 +48,7 @@ PRIV_KEY_FILE="$AMNEZIA_DIR/server_private.key"
 PUB_KEY_FILE="$AWG_DIR/server_public.key"
 AWG_CONF="$AWG_DIR/awg1.conf"
 DB_FILE="$AWG_DIR/users.db"
+UI_DB_FILE="$AWG_DIR/ui.db"   # своя БД awg-ui (API-ключи); вне PROJECT — переживает переустановку
 # Внутренняя авторизация awg-ui → awg-ctrl (Ed25519): приватный → awg-ui, публичный → awg-ctrl.
 INTERNAL_AUTH_PRIV="$AWG_DIR/internal_auth_private.key"
 INTERNAL_AUTH_PUB="$AWG_DIR/internal_auth_public.key"
@@ -658,6 +659,15 @@ else
         mv "$DB_FILE" "$DB_BAK"
         warn "Старая база пользователей сохранена: $DB_BAK"
     fi
+    # ui.db (API-ключи awg-ui) — тоже в бэкап, чтобы awg-ui создал чистую БД.
+    if [[ -f "$UI_DB_FILE" ]]; then
+        UI_DB_BAK="${UI_DB_FILE}.bak-$(date +%Y%m%d-%H%M%S)"
+        mv "$UI_DB_FILE" "$UI_DB_BAK"
+        # WAL-сайдкары удаляем — к новой БД они неприменимы.
+        rm -f "${UI_DB_FILE}-wal" "${UI_DB_FILE}-shm"
+        warn "Старая база API-ключей сохранена: $UI_DB_BAK"
+    fi
+
     PRIV_KEY=$(umask 077 && awg genkey)
     PUB_KEY=$(printf '%s' "$PRIV_KEY" | awg pubkey)
 

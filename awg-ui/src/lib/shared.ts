@@ -26,6 +26,16 @@ export interface ServerInfo {
 }
 // На проводе (users.key_gen, /health gen) поколение — '2', человеку показываем '2.0'.
 export const genLabel = (g: AwgGen): string => (g === '3.1' ? 'AWG 3.1' : 'AWG 2.0');
+// Ключ внешнего API в списке вкладки: открытого значения тут нет — только
+// префикс, сервер хранит лишь хэш.
+export interface ApiKey {
+    id:         number;
+    label:      string;
+    prefix:     string;
+    server_id:  number;
+    created_at: number;
+    last_used:  number | null;
+}
 
 export interface PageProps {
     token:   string;

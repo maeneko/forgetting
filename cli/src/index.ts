@@ -90,6 +90,9 @@ const SERVICES = {
             UI_USER:      process.env.UI_USER         ?? "admin",
             UI_PASS:      process.env.UI_PASS         ?? "",
             JWT_SECRET:   process.env.JWT_SECRET      ?? "",
+            // ui.db (ключи внешнего API) в каталоге данных AWG (вне PROJECT) —
+            // переживает переустановку.
+            UI_DB_FILE:   process.env.UI_DB_FILE      ?? "/etc/amnezia/amneziawg/ui.db",
         },
         pidFile: "/tmp/awg-ui.pid",
         logFile: path.join(LOGS, "awg-ui.log"),
