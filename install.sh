@@ -72,13 +72,51 @@ echo -e "${BLD}Проверка совместимости:${NC}"
 
 KERNEL=$(uname -r)
 VIRT=$(systemd-detect-virt 2>/dev/null || echo "unknown")
-echo "    Ядро: $KERNEL · виртуализация: $VIRT · $(lsb_release -ds 2>/dev/null || echo unknown)"
 
-# Считаем все три пункта, НЕ падая на первом, — чтобы показать полный чеклист
+# Семейство дистрибутива решает, как ставить AmneziaWG:
+#   ubuntu — add-apt-repository ppa:amnezia/ppa, заголовки linux-headers-generic;
+#   debian — ни software-properties-common (в Debian 13 его нет), ни
+#            linux-headers-generic там не существует: PPA подключаем вручную
+#            (ключ + signed-by), заголовки — только под текущее ядро.
+# Производные (Mint, Pop!_OS, Kali…) определяются через ID_LIKE.
+OS_ID=""; OS_LIKE=""; OS_CODENAME=""; OS_NAME=""
+if [[ -r /etc/os-release ]]; then
+    OS_ID=$(. /etc/os-release; echo "${ID:-}")
+    OS_LIKE=$(. /etc/os-release; echo "${ID_LIKE:-}")
+    OS_CODENAME=$(. /etc/os-release; echo "${VERSION_CODENAME:-}")
+    OS_NAME=$(. /etc/os-release; echo "${PRETTY_NAME:-}")
+fi
+if [[ "$OS_ID" == "ubuntu" || " $OS_LIKE " == *" ubuntu "* ]]; then
+    OS_FAMILY="ubuntu"
+elif [[ "$OS_ID" == "debian" || " $OS_LIKE " == *" debian "* ]]; then
+    OS_FAMILY="debian"
+else
+    OS_FAMILY=""
+fi
+# Вариант ядра без версии: 6.12.85+deb13-cloud-amd64 → cloud-amd64,
+# 6.1.0-18-cloud-amd64 → cloud-amd64. Нужен для мета-пакетов Debian
+# (linux-image-<вариант> / linux-headers-<вариант>).
+KFLAVOUR=$(sed -E 's/^[0-9][^-]*-([0-9]+-)?//' <<< "$KERNEL")
+# Что советовать, если заголовков под текущее ядро нет.
+if [[ "$OS_FAMILY" == "debian" ]]; then
+    HDR_FIX="apt-get update && apt-get install -y linux-image-$KFLAVOUR linux-headers-$KFLAVOUR && reboot"
+else
+    HDR_FIX="apt-get install -y linux-generic && reboot"
+fi
+
+echo "    Ядро: $KERNEL · виртуализация: $VIRT · ${OS_NAME:-$(lsb_release -ds 2>/dev/null || echo unknown)}"
+
+# Считаем все пункты, НЕ падая на первом, — чтобы показать полный чеклист
 # со статусом по каждому. Если хоть один не прошёл — печатаем причины и выходим
 # с кодом 0 (чистый выход, без вида «упало с ошибкой»).
-VIRT_OK=1; HDR_OK=1; NET_OK=1
-VIRT_WHY=""; HDR_WHY=""; NET_WHY=""
+OS_OK=1; VIRT_OK=1; HDR_OK=1; NET_OK=1
+OS_WHY=""; VIRT_WHY=""; HDR_WHY=""; NET_WHY=""
+
+# 0) Дистрибутив: установщик умеет только apt-семейство Ubuntu/Debian.
+if [[ -z "$OS_FAMILY" ]]; then
+    OS_OK=0
+    OS_WHY="дистрибутив '${OS_NAME:-${OS_ID:-неизвестно}}' не поддерживается — нужен Ubuntu или Debian"
+fi
 
 # 1) Виртуализация: kernel-модуль нельзя загрузить там, где ядро общее с хостом.
 case "$VIRT" in
@@ -98,7 +136,7 @@ elif echo "$HDR_POLICY" | grep -q 'Candidate: [^(]'; then
     :
 elif echo "$HDR_POLICY" | grep -q 'Candidate: (none)'; then
     HDR_OK=0
-    HDR_WHY="нет заголовков под ядро $KERNEL в apt (кастомное ядро провайдера). Решение: apt-get install -y linux-generic && reboot, затем запусти install.sh заново в generic-ядре"
+    HDR_WHY="нет заголовков под ядро $KERNEL в apt. Решение: $HDR_FIX, затем запусти install.sh заново"
 fi
 
 # 3) Доступ в интернет: нужен для архива, Node и пакетов AWG. Без -f: любой
@@ -117,13 +155,15 @@ done
 
 # Чеклист: ✓ — пройдено, ✗ — нет.
 mark() { [[ "$1" == 1 ]] && echo -e "  ${GRN}✓${NC}  $2" || echo -e "  ${RED}✗${NC}  $2"; }
+mark "$OS_OK"   "Дистрибутив"
 mark "$VIRT_OK" "Виртуализация"
 mark "$HDR_OK"  "Заголовки ядра"
 mark "$NET_OK"  "Доступ в интернет"
 
-if [[ "$VIRT_OK" == 0 || "$HDR_OK" == 0 || "$NET_OK" == 0 ]]; then
+if [[ "$OS_OK" == 0 || "$VIRT_OK" == 0 || "$HDR_OK" == 0 || "$NET_OK" == 0 ]]; then
     echo
     warn "Установка невозможна — не пройдены проверки:"
+    [[ "$OS_OK"   == 0 ]] && echo -e "    ${RED}•${NC} $OS_WHY"
     [[ "$VIRT_OK" == 0 ]] && echo -e "    ${RED}•${NC} $VIRT_WHY"
     [[ "$HDR_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $HDR_WHY"
     [[ "$NET_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $NET_WHY"
@@ -461,30 +501,89 @@ start_logging
 # секции «Проверка совместимости»; $KERNEL задан там же.
 step "1/7  AmneziaWG"
 
+# Debian: add-apt-repository нет (software-properties-common из Debian 13 убран),
+# а PPA под Debian-релизы не собирается — подключаем его вручную на Ubuntu-серию
+# с glibc не новее дебиановской. Модуль приезжает DKMS-исходниками и от серии
+# не зависит; серия важна только для бинарника amneziawg-tools.
+#   AMNEZIA_PPA_SUITE — задать серию вручную (focal/jammy/noble).
+AMNEZIA_PPA_URL="https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu"
+AMNEZIA_PPA_FPR="75C9DD72C799870E310542E24166F2C257290828"   # Launchpad PPA for Iurii Egorov
+AMNEZIA_KEYRING="/etc/apt/keyrings/amnezia-ppa.gpg"
+add_amnezia_ppa_debian() {
+    local suite="${AMNEZIA_PPA_SUITE:-}"
+    if [[ -z "$suite" ]]; then
+        case "$OS_CODENAME" in
+            bullseye) suite="focal" ;;
+            bookworm) suite="jammy" ;;
+            trixie)   suite="noble" ;;
+            *)        suite="noble"
+                      warn "Debian '${OS_CODENAME:-неизвестно}' не сопоставлен с серией PPA — берём noble (задать вручную: AMNEZIA_PPA_SUITE=…)" ;;
+        esac
+    fi
+    echo "  → подключение PPA amnezia (Debian ${OS_CODENAME:-?} → серия $suite)"
+
+    # Ключ берём по полному отпечатку и сверяем отпечаток после загрузки —
+    # apt-key в Debian 12+ уже нет, а доверять ответу keyserver вслепую нельзя.
+    local tmp gh fprs=""
+    tmp=$(mktemp); gh=$(mktemp -d)
+    if curl -fsSL --connect-timeout 15 \
+            "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${AMNEZIA_PPA_FPR}" \
+            | gpg --dearmor > "$tmp" 2>/dev/null; then
+        fprs=$(GNUPGHOME="$gh" gpg --batch --show-keys --with-colons "$tmp" 2>/dev/null || true)
+    fi
+    if ! grep -q "^fpr:::::::::${AMNEZIA_PPA_FPR}:" <<< "$fprs"; then
+        rm -rf "$tmp" "$gh"
+        fail "Не удалось получить ключ PPA amnezia ($AMNEZIA_PPA_FPR) с keyserver.ubuntu.com"
+    fi
+    install -d -m 0755 /etc/apt/keyrings
+    install -m 0644 "$tmp" "$AMNEZIA_KEYRING"
+    rm -rf "$tmp" "$gh"
+
+    echo "deb [signed-by=$AMNEZIA_KEYRING] $AMNEZIA_PPA_URL $suite main" \
+        > /etc/apt/sources.list.d/amnezia-ppa.list
+    ok "PPA amnezia подключён: $suite, ключ $AMNEZIA_KEYRING"
+}
+
 if command -v awg &>/dev/null && command -v awg-quick &>/dev/null && modinfo amneziawg &>/dev/null; then
     ok "AWG уже установлен (модуль amneziawg: $(modinfo -F version amneziawg 2>/dev/null || echo present))"
 else
     echo "  → apt-get update"
     apt-get update || fail "apt-get update упал — проверь /etc/apt/sources.list*"
 
-    echo "  → установка зависимостей сборки + заголовков ядра"
+    # iptables — в обоих списках: его зовёт PostUp в awg1.conf, а в Debian 13
+    # (nftables по умолчанию) он в минимальной системе не установлен.
+    if [[ "$OS_FAMILY" == "debian" ]]; then
+        DEPS=(gnupg ca-certificates curl dkms build-essential iptables)
+    else
+        DEPS=(software-properties-common python3-launchpadlib gnupg2 dkms build-essential iptables)
+    fi
+    echo "  → установка зависимостей сборки"
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-    apt-get install -y \
-        software-properties-common \
-        python3-launchpadlib \
-        gnupg2 \
-        dkms \
-        build-essential \
-        "linux-headers-$KERNEL" \
-        linux-headers-generic \
-        || fail "Не удалось установить зависимости или заголовки ядра"
+        apt-get install -y "${DEPS[@]}" \
+        || fail "Не удалось установить зависимости сборки: ${DEPS[*]}"
+
+    # Заголовки — отдельным шагом: их нехватка — самая частая причина сбоя, и на
+    # неё нужен точный совет, а не общее «не удалось установить». Ошибку apt
+    # здесь не валим: решает наличие /lib/modules/$KERNEL/build ниже.
+    HDR_PKGS=("linux-headers-$KERNEL")
+    [[ "$OS_FAMILY" == "ubuntu" ]] && HDR_PKGS+=(linux-headers-generic)
+    echo "  → установка заголовков ядра: ${HDR_PKGS[*]}"
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+        apt-get install -y "${HDR_PKGS[@]}" \
+        || warn "apt не смог поставить ${HDR_PKGS[*]}"
 
     if [[ ! -d "/lib/modules/$KERNEL/build" ]]; then
         warn "Нет /lib/modules/$KERNEL/build — заголовки под текущее ядро отсутствуют."
-
-        warn "Часто бывает на кастомном ядре провайдера. Решение:"
-        warn "    apt-get install -y linux-generic && reboot"
-        warn "и после загрузки в generic-ядро запусти install.sh заново."
+        if [[ "$OS_FAMILY" == "debian" ]]; then
+            # Debian держит в архиве только последнюю сборку ядра: если сервер
+            # давно не перезагружали, пакета под запущенное ядро там уже нет.
+            warn "Debian хранит в архиве только свежую сборку ядра — запущенное $KERNEL"
+            warn "уже устарело. Поставь актуальное ядро вместе с заголовками:"
+        else
+            warn "Часто бывает на кастомном ядре провайдера. Решение:"
+        fi
+        warn "    $HDR_FIX"
+        warn "и после перезагрузки запусти install.sh заново."
         fail "Отсутствуют заголовки ядра $KERNEL — DKMS не соберёт модуль"
     fi
     ok "Заголовки ядра на месте: /lib/modules/$KERNEL/build"
@@ -496,6 +595,8 @@ else
     # apt-get install кэш apt бывает в переходном состоянии и отдаёт пустоту.
     if grep -rqs 'amnezia/ppa' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
         ok "Репозиторий amnezia уже настроен — add-apt-repository пропущен"
+    elif [[ "$OS_FAMILY" == "debian" ]]; then
+        add_amnezia_ppa_debian
     else
         echo "  → add-apt-repository ppa:amnezia/ppa"
         add-apt-repository -y ppa:amnezia/ppa \
@@ -688,12 +789,16 @@ fi
 chmod 600 "$INTERNAL_AUTH_PRIV" "$INTERNAL_AUTH_PUB"
 ok "Ключи внутренней авторизации awg-ui ↔ awg-ctrl"
 
-grep -qxF 'net.ipv4.ip_forward=1' /etc/sysctl.conf \
-    || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-grep -qxF 'net.ipv6.conf.all.forwarding=1' /etc/sysctl.conf \
-    || echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.conf
-sysctl -qp
-ok "IP forwarding включён"
+# Свой файл в /etc/sysctl.d, а не /etc/sysctl.conf: в Debian 13 systemd-sysctl
+# /etc/sysctl.conf при загрузке больше не читает — forwarding включился бы
+# только до первой перезагрузки, и клиенты остались бы без интернета.
+SYSCTL_FILE="/etc/sysctl.d/99-awg-control.conf"
+cat > "$SYSCTL_FILE" <<'SYSCTL'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+SYSCTL
+sysctl -q -p "$SYSCTL_FILE"
+ok "IP forwarding включён ($SYSCTL_FILE)"
 
 # Параметры AmneziaWG 3.1. Значения-диапазоны взяты из дефолтов клиента
 # AmneziaVPN (protocolConstants.h), чтобы сервер и клиент не расходились.
