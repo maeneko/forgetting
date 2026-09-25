@@ -52,6 +52,12 @@ UI_DB_FILE="$AWG_DIR/ui.db"   # своя БД awg-ui (API-ключи); вне PR
 # Внутренняя авторизация awg-ui → awg-ctrl (Ed25519): приватный → awg-ui, публичный → awg-ctrl.
 INTERNAL_AUTH_PRIV="$AWG_DIR/internal_auth_private.key"
 INTERNAL_AUTH_PUB="$AWG_DIR/internal_auth_public.key"
+# Подписка sen:// (SenAWG): ключ подписи ответов (Ed25519) и, при SUB_TLS=on, самоподписанный
+# сертификат. В отличие от internal_auth они НЕ эфемерны — публичный ключ подписи и отпечаток
+# сертификата зашиты во все выданные sen:// ссылки.
+SUB_SIGN_PRIV="$AWG_DIR/sub_sign.key"
+SUB_TLS_KEY="$AWG_DIR/sub_tls.key"
+SUB_TLS_CRT="$AWG_DIR/sub_tls.crt"
 IFACE="awg1"
 AWG_PORT="47619"
 SUBNET="10.9"
@@ -467,6 +473,28 @@ if [[ -f "$DB_FILE" || -f "$PRIV_KEY_FILE" ]]; then
     fi
 fi
 
+# sen://-подписка (мастер-ключи для SenAWG). Порт и режим TLS зашиты в уже выданные ссылки,
+# поэтому при KEEP_DATA=y берём прежние значения из существующего cli.env.
+PREV_ENV="$PROJECT/cli/cli.env"
+prev_val() { grep -s "^$1=" "$PREV_ENV" | tail -1 | cut -d= -f2- || true; }
+SUB_PORT="${SUB_PORT:-}"
+SUB_TLS="${SUB_TLS:-}"
+if [[ "$KEEP_DATA" == "y" ]]; then
+    [[ -z "$SUB_PORT" ]] && SUB_PORT="$(prev_val SUB_PORT)"
+    [[ -z "$SUB_TLS"  ]] && SUB_TLS="$(prev_val SUB_TLS)"
+fi
+if [[ -z "$SUB_PORT" ]]; then
+    read -rp "  Sub port для sen:// (Enter — случайный): " SUB_PORT
+    while [[ -z "$SUB_PORT" || "$SUB_PORT" == "$UI_PORT" || "$SUB_PORT" == "$AWGCTRL_PORT" ]]; do
+        SUB_PORT=$(( (RANDOM % 22768) + 32768 ))
+    done
+fi
+if [[ -z "$SUB_TLS" ]]; then
+    read -rp "  Подписка sen:// по HTTPS (самоподписанный сертификат, домен не нужен)? [Y/n]: " ST
+    [[ "${ST:-y}" =~ ^[Nn]$ ]] && SUB_TLS="off" || SUB_TLS="on"
+fi
+[[ "$SUB_TLS" == "on" ]] || SUB_TLS="off"
+
 # Имя сервера: если база уже существует (DB_EXISTS, проверено заранее в
 # preflight) — имя берётся из неё, не спрашиваем. Если базы нет — спрашиваем.
 if [[ "$DB_EXISTS" == "y" ]]; then
@@ -483,6 +511,7 @@ echo "    Server name:   $SERVER_NAME"
 echo "    AWG port:      $AWG_PORT  (udp)"
 echo "    awgctrl port:  $AWGCTRL_PORT"
 echo "    UI port:       $UI_PORT"
+echo "    Sub port:      $SUB_PORT  (tcp, sen://, TLS: $SUB_TLS)"
 echo "    UI логин:      $UI_USER"
 echo "    Net interface: $NET_IFACE"
 if [[ "$KEEP_DATA" == "y" ]]; then
@@ -789,6 +818,28 @@ fi
 chmod 600 "$INTERNAL_AUTH_PRIV" "$INTERNAL_AUTH_PUB"
 ok "Ключи внутренней авторизации awg-ui ↔ awg-ctrl"
 
+# Подписка sen://. ⚠️ Существующие файлы при KEEP_DATA=y сохраняем: публичный ключ подписи и
+# отпечаток сертификата зашиты во все выданные ссылки, новый ключ сломал бы каждую. При чистой
+# установке ui.db уходит в бэкап (старые мастер-ключи всё равно недействительны) — ключи новые.
+if [[ "$KEEP_DATA" == "y" && -f "$SUB_SIGN_PRIV" ]]; then
+    ok "Ключ подписи sen:// сохранён (существующие ссылки продолжат работать)"
+else
+    ( umask 077; openssl genpkey -algorithm ed25519 -out "$SUB_SIGN_PRIV" )
+    chmod 600 "$SUB_SIGN_PRIV"
+    ok "Ключ подписи sen:// создан"
+fi
+if [[ "$SUB_TLS" == "on" ]]; then
+    if [[ "$KEEP_DATA" == "y" && -f "$SUB_TLS_CRT" && -f "$SUB_TLS_KEY" ]]; then
+        ok "Сертификат подписки sen:// сохранён"
+    else
+        ( umask 077
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+              -keyout "$SUB_TLS_KEY" -out "$SUB_TLS_CRT" -days 3650 -subj "/CN=sen" 2>/dev/null )
+        chmod 600 "$SUB_TLS_KEY" "$SUB_TLS_CRT"
+        ok "Самоподписанный сертификат подписки sen:// создан (10 лет)"
+    fi
+fi
+
 # Свой файл в /etc/sysctl.d, а не /etc/sysctl.conf: в Debian 13 systemd-sysctl
 # /etc/sysctl.conf при загрузке больше не читает — forwarding включился бы
 # только до первой перезагрузки, и клиенты остались бы без интернета.
@@ -953,8 +1004,9 @@ if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: act
         || warn "ufw route allow не сработал — трафик клиентов может резаться"
     ufw allow "${AWG_PORT}/udp" >/dev/null 2>&1 || warn "не удалось открыть ${AWG_PORT}/udp"
     ufw allow "${UI_PORT}/tcp"  >/dev/null 2>&1 || warn "не удалось открыть ${UI_PORT}/tcp"
+    ufw allow "${SUB_PORT}/tcp" >/dev/null 2>&1 || warn "не удалось открыть ${SUB_PORT}/tcp"
     ufw reload >/dev/null 2>&1 || true
-    ok "UFW: форвардинг $IFACE → $NET_IFACE, порты ${AWG_PORT}/udp и ${UI_PORT}/tcp"
+    ok "UFW: форвардинг $IFACE → $NET_IFACE, порты ${AWG_PORT}/udp, ${UI_PORT}/tcp и ${SUB_PORT}/tcp"
 else
     echo "  → UFW не активен, правила фаервола не трогаем"
 fi
@@ -993,6 +1045,13 @@ UI_PORT=${UI_PORT}
 UI_USER=${UI_USER}
 UI_PASS=${UI_PASS}
 JWT_SECRET=${JWT_SECRET}
+
+# ── подписка sen:// для SenAWG (мастер-ключи) ──────────────────────────────
+SUB_PORT=${SUB_PORT}
+SUB_TLS=${SUB_TLS}
+SUB_SIGN_KEY_FILE=${SUB_SIGN_PRIV}
+SUB_TLS_KEY_FILE=${SUB_TLS_KEY}
+SUB_TLS_CERT_FILE=${SUB_TLS_CRT}
 ENV
 
 # Имя продукта попадает в cli.env, только если оператор задал его явно
@@ -1011,6 +1070,7 @@ echo
 echo -e "  ${BLD}Сервисы:${NC}"
 echo "    awg-ctrl  →  http://localhost:${AWGCTRL_PORT}  (внутренний)"
 echo "    awg-ui    →  http://${SERVER_IP}:${UI_PORT}"
+echo "    sen://    →  $([[ "$SUB_TLS" == "on" ]] && echo https || echo http)://${SERVER_IP}:${SUB_PORT}  (подписка SenAWG)"
 echo
 echo -e "  ${BLD}${YLW}UI логин:${NC}   ${UI_USER}"
 echo -e "  ${BLD}${YLW}UI пароль:${NC}  ${UI_PASS}"
