@@ -87,6 +87,20 @@ db.exec(`
     )
 `);
 
+// Пиры устройств sen://-подписки. Отдельная таблица, users не трогаем: у этих
+// пиров нет ни vpn_key, ни имени — приватный ключ живёт только на устройстве,
+// сюда приходит лишь публичный. owner — непрозрачная метка от awg-ui
+// («m<masterId>/d<deviceId>»), нужна только для комментария в conf и логов.
+db.exec(`
+    CREATE TABLE IF NOT EXISTS peers (
+        pub_key    TEXT PRIMARY KEY,
+        ip         TEXT NOT NULL UNIQUE,
+        psk_key    TEXT NOT NULL,
+        owner      TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+    )
+`);
+
 const cfgStmts = {
     get: db.prepare<[string], { value: string }>("SELECT value FROM config WHERE key = ?"),
     set: db.prepare<[string, string]>("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)"),
@@ -276,12 +290,27 @@ interface UserRow {
     vpn_key_prev: string;
 }
 
+interface PeerRow {
+    pub_key:    string;
+    ip:         string;
+    psk_key:    string;
+    owner:      string;
+    created_at: number;
+}
+
 const stmts = {
+    peersAll:    db.prepare<[], PeerRow>("SELECT * FROM peers ORDER BY created_at, rowid"),
+    peerGet:     db.prepare<[string], PeerRow>("SELECT * FROM peers WHERE pub_key = ?"),
+    peerInsert:  db.prepare<[string, string, string, string, number]>("INSERT INTO peers (pub_key, ip, psk_key, owner, created_at) VALUES (?, ?, ?, ?, ?)"),
+    peerDelete:  db.prepare<[string]>("DELETE FROM peers WHERE pub_key = ?"),
+    peerRekey:   db.prepare<[string, string]>("UPDATE peers SET pub_key = ? WHERE pub_key = ?"),
+    peerPsk:     db.prepare<[string, string]>("UPDATE peers SET psk_key = ? WHERE pub_key = ?"),
+    userPubTaken: db.prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM users WHERE pub_key = ?"),
     get:    db.prepare<[string], UserRow>("SELECT * FROM users WHERE name = ?"),
     all:    db.prepare<[], UserRow>("SELECT * FROM users"),
     insert: db.prepare<[string, string, string, string, string, string]>("INSERT INTO users (name, ip, pub_key, vpn_key, psk_key, key_gen) VALUES (?, ?, ?, ?, ?, ?)"),
     delete: db.prepare<[string]>("DELETE FROM users WHERE name = ?"),
-    ips:    db.prepare<[], { ip: string }>("SELECT ip FROM users"),
+    ips:    db.prepare<[], { ip: string }>("SELECT ip FROM users UNION SELECT ip FROM peers"),
     // Перевыпуск: старый блоб уезжает в vpn_key_prev, pub_key/psk_key могут
     // смениться, если исходный ключ не удалось разобрать.
     reissue: db.prepare<[string, string, string, string, string]>(
@@ -547,17 +576,22 @@ function getPeersData(): Record<string, { online: boolean; lastHandshake: number
 
 function rebuildConf() {
     const users    = db.prepare("SELECT name, ip, pub_key, psk_key FROM users").all() as UserRow[];
+    const devices  = stmts.peersAll.all();
     const confFile = path.join(CONFIG.confDir, `${CONFIG.interface}.conf`);
     if (!existsSync(confFile)) return;
 
     const conf  = readFileSync(confFile, "utf8");
     const iface = conf.split(/^\[Peer\]/m)[0].trimEnd();
-    const peers = (users as any[]).map(u =>
-        `\n# ${u.name}\n[Peer]\nPublicKey = ${u.pub_key}\nPresharedKey = ${u.psk_key}\nAllowedIPs = ${u.ip}/32\nPersistentKeepalive = ${CONFIG.keepalive}`
+    // Без записей в peers вывод байт-в-байт прежний.
+    const peers = [
+        ...users.map(u => ({ label: u.name, ...u })),
+        ...devices.map(d => ({ label: d.owner || "device", ...d })),
+    ].map(u =>
+        `\n# ${u.label}\n[Peer]\nPublicKey = ${u.pub_key}\nPresharedKey = ${u.psk_key}\nAllowedIPs = ${u.ip}/32\nPersistentKeepalive = ${CONFIG.keepalive}`
     ).join("\n");
 
     writeFileSync(confFile, iface + "\n" + peers + "\n");
-    logger.info("conf rebuilt", { peers: users.length });
+    logger.info("conf rebuilt", { peers: users.length + devices.length });
 }
 
 const SERVER_PRIV_KEY_FILE = "/etc/amnezia/server_private.key";
@@ -829,6 +863,89 @@ function removeUser(username: string) {
     logger.info("user removed", { name: username });
 }
 
+// ── Пиры устройств (sen://) ────────────────────────────────────────────────
+// awg-ctrl про мастер-ключи ничего не знает: ему приходит «добавь пира с этим
+// публичным ключом». Приватного ключа устройства здесь нет и быть не может.
+class HttpError extends Error {
+    constructor(public status: number, message: string) { super(message); }
+}
+
+// Публичный ключ WireGuard: base64 от 32 байт (44 символа, последний «=»).
+function checkPubKey(k: unknown): string {
+    if (typeof k !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(k) || Buffer.from(k, "base64").length !== 32)
+        throw new HttpError(400, "Неверный публичный ключ");
+    return k;
+}
+
+// В пути base64url: «/» и «+» обычного base64 в URL ломают маршрут.
+function pubKeyFromParam(p: string): string {
+    return checkPubKey(Buffer.from(p, "base64url").toString("base64"));
+}
+
+function assertPubKeyFree(pub: string) {
+    if (stmts.peerGet.get(pub) || stmts.userPubTaken.get(pub)!.n > 0 || pub === getServerPublicKey())
+        throw new HttpError(409, "Публичный ключ уже используется");
+}
+
+function addPeer(pubKey: string, owner: string): { ip: string; psk_key: string } {
+    checkPubKey(pubKey);
+    const psk = run("awg genpsk");
+    const ip = db.transaction(() => {
+        assertPubKeyFree(pubKey);
+        const ip = nextIp();
+        stmts.peerInsert.run(pubKey, ip, psk, owner, Math.floor(Date.now() / 1000));
+        return ip;
+    })();
+
+    const r = setPeer(pubKey, psk, ip);
+    if (r.status !== 0) {
+        stmts.peerDelete.run(pubKey);
+        throw new Error(`awg set failed: ${r.stderr?.toString()}`);
+    }
+    rebuildConf();
+    logger.info("peer added", { owner, ip });
+    return { ip, psk_key: psk };
+}
+
+// Смена ключа устройства: IP и PSK остаются, меняется только pub_key.
+function replacePeer(oldPub: string, newPub: string): { ip: string; psk_key: string } {
+    checkPubKey(newPub);
+    const old = stmts.peerGet.get(oldPub);
+    if (!old) throw new HttpError(404, "Пир не найден");
+    db.transaction(() => { assertPubKeyFree(newPub); stmts.peerRekey.run(newPub, oldPub); })();
+
+    const r = setPeer(newPub, old.psk_key, old.ip);
+    if (r.status !== 0) {
+        stmts.peerRekey.run(oldPub, newPub);
+        throw new Error(`awg set failed: ${r.stderr?.toString()}`);
+    }
+    spawnSync("awg", ["set", CONFIG.interface, "peer", oldPub, "remove"]);
+    rebuildConf();
+    logger.info("peer rekeyed", { owner: old.owner, ip: old.ip });
+    return { ip: old.ip, psk_key: old.psk_key };
+}
+
+function rotatePeerPsk(pub: string): { ip: string; psk_key: string } {
+    const peer = stmts.peerGet.get(pub);
+    if (!peer) throw new HttpError(404, "Пир не найден");
+    const psk = run("awg genpsk");
+    const r = setPeer(pub, psk, peer.ip);
+    if (r.status !== 0) throw new Error(`awg set failed: ${r.stderr?.toString()}`);
+    stmts.peerPsk.run(psk, pub);
+    rebuildConf();
+    logger.info("peer psk rotated", { owner: peer.owner });
+    return { ip: peer.ip, psk_key: psk };
+}
+
+function removePeer(pub: string) {
+    const peer = stmts.peerGet.get(pub);
+    if (!peer) throw new HttpError(404, "Пир не найден");
+    stmts.peerDelete.run(pub);
+    spawnSync("awg", ["set", CONFIG.interface, "peer", pub, "remove"]);
+    rebuildConf();
+    logger.info("peer removed", { owner: peer.owner });
+}
+
 const app = express();
 app.use(express.json({ limit: "1kb" }));
 
@@ -863,7 +980,10 @@ function validateName(req: Request, res: Response, next: NextFunction) {
 function handler(fn: (req: Request, res: Response) => void | Promise<void>) {
     return async (req: Request, res: Response) => {
         try { await fn(req, res); }
-        catch (e) { logger.error("handler error", { error: e }); res.status(500).json({ error: "Internal server error" }); }
+        catch (e) {
+            if (e instanceof HttpError) { res.status(e.status).json({ error: e.message }); return; }
+            logger.error("handler error", { error: e }); res.status(500).json({ error: "Internal server error" });
+        }
     };
 }
 
@@ -929,6 +1049,56 @@ app.post("/api/users/:name", auth, validateName, handler((req, res) => {
 app.delete("/api/users/:name", auth, validateName, handler((req, res) => {
     removeUser(req.params.name);
     res.json({ success: true, name: req.params.name });
+}));
+
+app.post("/api/peers", auth, handler((req, res) => {
+    const { pub_key, owner } = (req.body ?? {}) as { pub_key?: string; owner?: string };
+    if (typeof owner !== "string" || !/^[\w/.-]{0,64}$/.test(owner)) throw new HttpError(400, "Неверный owner");
+    res.status(201).json(addPeer(checkPubKey(pub_key), owner));
+}));
+
+app.get("/api/peers", auth, handler((_req, res) => {
+    const stats = getPeersData();
+    res.json({
+        peers: stmts.peersAll.all().map(p => ({
+            pub_key: p.pub_key, ip: p.ip, psk_key: p.psk_key, owner: p.owner,
+            online:        stats[p.pub_key]?.online        ?? false,
+            lastHandshake: stats[p.pub_key]?.lastHandshake ?? 0,
+            rx:            stats[p.pub_key]?.rx            ?? 0,
+            tx:            stats[p.pub_key]?.tx            ?? 0,
+        })),
+    });
+}));
+
+app.put("/api/peers/:pub", auth, handler((req, res) => {
+    const { pub_key } = (req.body ?? {}) as { pub_key?: string };
+    res.json(replacePeer(pubKeyFromParam(req.params.pub), checkPubKey(pub_key)));
+}));
+
+app.post("/api/peers/:pub/psk", auth, handler((req, res) => {
+    res.json(rotatePeerPsk(pubKeyFromParam(req.params.pub)));
+}));
+
+app.delete("/api/peers/:pub", auth, handler((req, res) => {
+    removePeer(pubKeyFromParam(req.params.pub));
+    res.json({ success: true });
+}));
+
+// Общая часть клиентского конфига для подписки. Ключи obfuscation — именами .conf;
+// пустые (I2–I5, весь 3.x-блок на 2.0) не выводятся, как и в самом conf.
+app.get("/api/profile", auth, handler((_req, res) => {
+    const awg: Record<string, string> = {};
+    for (const [k, v] of Object.entries(CONFIG.awgParams)) if (String(v) !== "") awg[k] = String(v);
+    res.json({
+        name:      CONFIG.serverName,
+        endpoint:  `${CONFIG.serverIp}:${CONFIG.serverPort}`,
+        server_pub: getServerPublicKey(),
+        gen:       CONFIG.gen,
+        dns:       [CONFIG.dns1, CONFIG.dns2],
+        keepalive: CONFIG.keepalive,
+        mtu:       CONFIG.mtu,
+        awg,
+    });
 }));
 
 app.post("/awg/restart", auth, handler((_req, res) => {

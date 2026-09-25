@@ -24,6 +24,7 @@ html, body, #root { height: 100%; }
     --success-bg:   #c0dd97; --success-text: #2c4d0a; --success-dot: #639922;
     --neutral-bg:   #e4dac9; --neutral-text: #7a6a55; --neutral-dot:  #a99a85;
     --error-bg:     #ffdad6; --error-text:   #410002; --error-dot:    #ba1a1a;
+    --warn-dot:     #e08a2c;
 
     --danger-border: #e6c4bc;
     --danger-text:   #b34a3a;
@@ -65,6 +66,7 @@ html, body, #root { height: 100%; }
     --success-bg:   #2d4413; --success-text: #c8e3a0; --success-dot: #8fc24f;
     --neutral-bg:   #34291c; --neutral-text: #d0c0a4; --neutral-dot:  #b0a085;
     --error-bg:     #5c1414; --error-text:   #ffb4ab; --error-dot:    #ff5449;
+    --warn-dot:     #ffb76b;
 
     --danger-border: #6e4540;
     --danger-text:   #ffb4ab;

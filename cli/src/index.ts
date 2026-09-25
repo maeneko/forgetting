@@ -93,6 +93,13 @@ const SERVICES = {
             // ui.db (ключи внешнего API) в каталоге данных AWG (вне PROJECT) —
             // переживает переустановку.
             UI_DB_FILE:   process.env.UI_DB_FILE      ?? "/etc/amnezia/amneziawg/ui.db",
+            // Подписка sen:// (мастер-ключи SenAWG): порт, режим TLS, ключ подписи и
+            // сертификат. Без SUB_PORT или ключа подписи awg-ui подписку не поднимает.
+            SUB_PORT:          process.env.SUB_PORT          ?? "",
+            SUB_TLS:           process.env.SUB_TLS           ?? "off",
+            SUB_SIGN_KEY_FILE: process.env.SUB_SIGN_KEY_FILE ?? "/etc/amnezia/amneziawg/sub_sign.key",
+            SUB_TLS_KEY_FILE:  process.env.SUB_TLS_KEY_FILE  ?? "/etc/amnezia/amneziawg/sub_tls.key",
+            SUB_TLS_CERT_FILE: process.env.SUB_TLS_CERT_FILE ?? "/etc/amnezia/amneziawg/sub_tls.crt",
         },
         pidFile: "/tmp/awg-ui.pid",
         logFile: path.join(LOGS, "awg-ui.log"),

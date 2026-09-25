@@ -7,6 +7,7 @@ import fs       from "fs";
 import crypto   from "crypto";
 import axios    from "axios";
 import Database from "better-sqlite3";
+import { createSub } from "./sub";
 
 const app  = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -279,6 +280,12 @@ ext.delete("/users/:name", wrap(async (req, res) => {
 // его и потребует JWT вместо ключа.
 app.use("/api/v1", ext);
 
+// sen://-подписка: мастер-ключи и устройства (роуты панели, за JWT) и публичный
+// листенер /sub/v1 на своём порту SUB_PORT. Публичная часть сюда не монтируется.
+const sub = createSub({ uidb, ctrl, baseDir: __dirname });
+app.use("/ui/masterkeys", requireAuth, sub.masterKeys);
+app.use("/ui/devices",    requireAuth, sub.devices);
+
 app.use(["/api", "/health", "/awg"], requireAuth, proxy);
 
 app.use(express.static(path.join(__dirname, "dist")));
@@ -288,3 +295,4 @@ app.get("*", (_req: Request, res: Response) => {
 });
 
 app.listen(PORT, () => { console.log(`ui: listening on :${PORT}`); });
+sub.start();

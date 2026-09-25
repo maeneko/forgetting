@@ -35,6 +35,13 @@ export const IcoRefresh = () => (
         <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
     </svg>
 );
+export const IcoSettings = () => (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="17" x2="20" y2="17"/>
+        <circle cx="9" cy="7" r="2.5" fill="var(--surface-bright, transparent)"/>
+        <circle cx="15" cy="17" r="2.5" fill="var(--surface-bright, transparent)"/>
+    </svg>
+);
 export const IcoQR = () => (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
