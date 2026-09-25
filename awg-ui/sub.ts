@@ -269,7 +269,27 @@ export function createSub(deps: { uidb: Database.Database; ctrl: Ctrl; baseDir: 
             return;
         }
         const dev = q.deviceById.get(deviceRowId) as DeviceRow;
-        send(res, 201, { device: dev.id, config: await buildConfig(dev) });
+        // devices / device_limit: сколько мест занято с этим устройством — клиент показывает это сразу,
+        // без отдельного запроса списка.
+        send(res, 201, {
+            device: dev.id, config: await buildConfig(dev),
+            devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit,
+        });
+    }));
+
+    // Сколько мест у ключа занято — клиент показывает это, пока ссылку только вставили и ещё ничего не
+    // регистрировали. Запрос не подписан устройством (его ещё нет): доступ по секрету из ссылки, как у register,
+    // а ответ подписан, как всегда. Неверный секрет считается в failLimit — секрет не перебрать.
+    sub.post("/sub/v1/peek", wrap(async (req, res) => {
+        const ip = req.socket.remoteAddress ?? "unknown";
+        const secretB = typeof (req.body as any)?.sub === "string" && /^[A-Za-z0-9_-]{22}$/.test((req.body as any).sub) ? (req.body as any).sub as string : null;
+        const master = secretB ? q.masterBySecret.get(Buffer.from(secretB, "base64url")) as MasterRow | undefined : undefined;
+        if (!master) {
+            if (!failLimit(ip)) { send(res, 429, { error: "rate_limited" }); return; }
+            send(res, secretB ? 404 : 400, { error: secretB ? "not_found" : "bad_request" });
+            return;
+        }
+        send(res, 200, { devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit });
     }));
 
     sub.get("/sub/v1/config", deviceAuth, wrap(async (req, res) => {
