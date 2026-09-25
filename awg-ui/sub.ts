@@ -281,6 +281,22 @@ export function createSub(deps: { uidb: Database.Database; ctrl: Ctrl; baseDir: 
         send(res, 200, { config: await buildConfig(dev) });
     }));
 
+    // Устройства того же мастер-ключа: клиент показывает их на вкладке «Ключ». Только чтение — отвязать
+    // можно лишь себя (DELETE /sub/v1/device); чужие устройства убирает панель.
+    sub.get("/sub/v1/devices", deviceAuth, wrap(async (req, res) => {
+        const dev = (req as DevReq).device as DeviceRow;
+        const master = q.masterById.get(dev.master_id) as MasterRow | undefined;
+        if (!master) { send(res, 404, { error: "not_found" }); return; }
+        send(res, 200, {
+            name: master.label,
+            device_limit: master.device_limit,
+            devices: (q.devicesOf.all(master.id) as DeviceRow[]).map(d => ({
+                id: d.id, name: d.device_name, platform: d.platform, version: d.version,
+                created_at: d.created_at, last_seen: d.last_seen, current: d.id === dev.id,
+            })),
+        });
+    }));
+
     sub.post("/sub/v1/rekey", deviceAuth, wrap(async (req, res) => {
         const dev = (req as DevReq).device as DeviceRow;
         const pub = (req.body as { pub_key?: unknown } | undefined)?.pub_key;
