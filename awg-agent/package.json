@@ -1,0 +1,19 @@
+{
+  "name": "awg-agent",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Агент ноды: держит исходящее WSS-соединение к core и исполняет запросы на локальном awg-ctrl",
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

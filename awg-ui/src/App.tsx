@@ -4,20 +4,27 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import './App.css';
-import { TOKEN_KEY, THEME_KEY, BRAND_FALLBACK, apiFetch, type ServerInfo, type Brand } from './lib/shared';
+import {
+    TOKEN_KEY, THEME_KEY, SERVER_KEY, BRAND_FALLBACK, apiFetch, setServerId, getServerId,
+    type NodeInfo, type Brand,
+} from './lib/shared';
 import { IcoMenu, IcoLogout, IcoSun, IcoMoon, IcoRefresh } from './components/icons';
 import ServerBar from './components/ServerBar';
+import AddServerModal from './components/AddServerModal';
 import { TABS } from './tabs';
 
 // Оболочка приложения: логин, тема, drawer/сайдбар, общая сессия (token,
-// serverInfo, снэкбар) и переключение вкладок. Контент каждой вкладки приходит
+// список серверов и выбранный сервер, снэкбар) и переключение вкладок. Контент каждой вкладки приходит
 // из реестра TABS — App про конкретные вкладки ничего не знает.
 export default function App() {
     const [token, setToken]           = useState(() => localStorage.getItem(TOKEN_KEY) ?? '');
     const [loginUser, setLoginUser]   = useState('');
     const [loginPass, setLoginPass]   = useState('');
     const [statusText, setStatusText] = useState('');
-    const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
+    const [nodes, setNodes]           = useState<NodeInfo[]>([]);
+    const [hubEnabled, setHubEnabled] = useState(false);
+    const [serverId, setServerIdState] = useState<number | null>(null);
+    const [modal, setModal]           = useState<{ node?: NodeInfo } | null>(null);
     const [msg, setMsg]               = useState('');
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [activeTab, setActiveTab]   = useState(TABS[0].id);
@@ -33,16 +40,33 @@ export default function App() {
         setTimeout(() => setMsg(''), 3000);
     }, []);
 
-    // Проверяет токен и подтягивает данные сервера (/health). Данные конкретных
-    // вкладок (юзеры, ключи) грузят сами вкладки.
-    const startSession = useCallback(async (tok: string) => {
-        const { data: h } = await axios.get('/health', { headers: { Authorization: `Bearer ${tok}` } });
-        setServerInfo({
-            name: h.server || 'VPN', ip: h.ip || '', peers: h.awg?.peers ?? 0, gen: h.gen || '2',
-            mod: h.awg?.module ?? '', tools: h.awg?.tools ?? '',
-        });
-        setStatusText('online:' + (h.server || 'ok') + ' · peers: ' + (h.awg?.peers ?? '?'));
+    // Выбрать сервер: id уходит заголовком X-Server-Id во все запросы вкладок
+    // (setServerId — до смены state, чтобы вкладка с новым key читала уже с ним).
+    const pickServer = useCallback((id: number | null) => {
+        setServerId(id);
+        setServerIdState(id);
+        try { if (id !== null) localStorage.setItem(SERVER_KEY, String(id)); } catch { /* не критично */ }
     }, []);
+
+    // Список серверов (core + ноды) с их состоянием. Если выбранного больше нет —
+    // берём сохранённый, иначе первый.
+    const loadNodes = useCallback(async (tok: string) => {
+        const { data } = await axios.get('/ui/nodes', { headers: { Authorization: `Bearer ${tok}` } });
+        const list: NodeInfo[] = data.nodes ?? [];
+        setNodes(list);
+        setHubEnabled(!!data.hub);
+        const cur = getServerId();
+        if (cur !== null && list.some(n => n.id === cur)) return;
+        let saved: number | null = null;
+        try { const raw = localStorage.getItem(SERVER_KEY); saved = raw === null ? null : Number(raw); } catch { /* не критично */ }
+        pickServer(list.find(n => n.id === saved)?.id ?? list[0]?.id ?? null);
+    }, [pickServer]);
+
+    // Проверяет токен и подтягивает список серверов. Данные конкретных вкладок
+    // (юзеры, ключи) грузят сами вкладки.
+    const startSession = useCallback(async (tok: string) => {
+        await loadNodes(tok);
+    }, [loadNodes]);
 
     const login = useCallback(async () => {
         try {
@@ -69,9 +93,22 @@ export default function App() {
         localStorage.removeItem(TOKEN_KEY);
         setToken('');
         setStatusText('');
-        setServerInfo(null);
+        setNodes([]);
+        setServerId(null);
+        setServerIdState(null);
         setDrawerOpen(false);
     }, [token]);
+
+    const deleteNode = useCallback(async (n: NodeInfo) => {
+        if (!confirm(`Удалить сервер «${n.name}»? Нода отключится от панели.`)) return;
+        try {
+            await apiFetch('DELETE', `/ui/nodes/${n.id}`, token);
+            showMsg('Сервер удалён');
+            await loadNodes(token);
+        } catch (e) {
+            showMsg(axios.isAxiosError(e) ? e.response?.data?.error ?? 'Не удалось удалить' : 'Не удалось удалить');
+        }
+    }, [token, showMsg, loadNodes]);
 
     // Перезапуск AWG-интерфейса (awg-quick down/up + ресинк пиров в awg-ctrl).
     // Соединения клиентов кратковременно прерываются — поэтому подтверждение.
@@ -111,6 +148,13 @@ export default function App() {
         }
     }, [startSession]);
 
+    // Состояние серверов (онлайн, пиры) обновляем раз в 15 с, пока открыта панель.
+    useEffect(() => {
+        if (!token) return;
+        const t = setInterval(() => { loadNodes(token).catch(() => { /* следующий тик */ }); }, 15_000);
+        return () => clearInterval(t);
+    }, [token, loadNodes]);
+
     // Имя продукта и версия — с сервера, до логина (роут без авторизации).
     // Если не ответил, остаётся фолбэк из констант.
     useEffect(() => {
@@ -143,8 +187,7 @@ export default function App() {
         return () => document.removeEventListener('keydown', h);
     }, [drawerOpen]);
 
-    const isOnline = statusText.startsWith('online:');
-    const statusLabel = statusText.replace(/^(online|offline):/, '');
+        const statusLabel = statusText.replace(/^(online|offline):/, '');
     const tab = TABS.find(t => t.id === activeTab) ?? TABS[0];
     // Хром вкладки (сервер-бар + перезапуск). Любой флаг по умолчанию включён.
     const chrome = tab.chrome ?? {};
@@ -161,7 +204,7 @@ export default function App() {
                 {theme === 'dark' ? <IcoSun /> : <IcoMoon />}
             </button>
 
-            {token && showRestart && (
+            {token && showRestart && serverId !== null && (
                 <button
                     className={`awg-restart${restarting ? ' spinning' : ''}`}
                     aria-label="Перезапустить AWG"
@@ -257,17 +300,39 @@ export default function App() {
                             {/* Общий хром над вкладкой — App владеет им сам, вкладки про него не знают */}
                             {showServerBar && (
                                 <ServerBar
-                                    serverInfo={serverInfo}
-                                    serverOnline={isOnline}
+                                    nodes={nodes}
+                                    serverId={serverId}
+                                    hubEnabled={hubEnabled}
+                                    onSelect={pickServer}
+                                    onAdd={() => setModal({})}
+                                    onJoin={n => setModal({ node: n })}
+                                    onDelete={deleteNode}
                                     onRestartAwg={restartAwg}
                                     restarting={restarting}
                                     showRestart={showRestart}
                                 />
                             )}
-                            <tab.Page token={token} showMsg={showMsg} />
+                            {serverId === null && showServerBar ? (
+                                <p className="login-sub">
+                                    Серверов пока нет. Добавьте ноду: она сама подключится к этой панели.
+                                </p>
+                            ) : (
+                                // key: при смене сервера вкладка монтируется заново и читает данные уже с ним
+                                <tab.Page key={`${tab.id}:${serverId}`} token={token} showMsg={showMsg} />
+                            )}
                         </main>
                     </div>
                 </>
+            )}
+
+            {modal && (
+                <AddServerModal
+                    token={token}
+                    node={modal.node}
+                    onClose={() => setModal(null)}
+                    onChanged={() => { loadNodes(token).catch(() => { /* следующий тик */ }); }}
+                    showMsg={showMsg}
+                />
             )}
 
             {msg && <div className="snack">{msg}</div>}

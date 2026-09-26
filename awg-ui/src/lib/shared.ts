@@ -47,10 +47,32 @@ export interface PageProps {
 export const BRAND_FALLBACK = 'Forgetting';
 export interface Brand { brand: string; channel: string; version: string }
 
-export const TOKEN_KEY = 'awg_token';
-export const THEME_KEY = 'awg_theme';
+export const TOKEN_KEY  = 'awg_token';
+export const THEME_KEY  = 'awg_theme';
+export const SERVER_KEY = 'awg_server';
+
+// Сервер (core или нода) в списке ServerBar: то, что отдаёт GET /ui/nodes.
+export interface NodeInfo {
+    id:        number;
+    name:      string;
+    local:     boolean;        // id 0 — локальный awg-ctrl этой же машины
+    online:    boolean;
+    pending:   boolean;        // нода создана, но ещё ни разу не подключалась
+    last_seen: number | null;
+    health:    { server: string; ip: string; gen: AwgGen; peers: number; awg_up: boolean; module: string; tools: string } | null;
+}
+
+// Выбранный сервер. Вкладки зовут apiFetch без явного id — заголовок X-Server-Id
+// подставляется здесь; App ставит значение до смены key у вкладки, поэтому та
+// перечитывает данные уже с новым сервером.
+let currentServerId: number | null = null;
+export const setServerId = (id: number | null) => { currentServerId = id; };
+export const getServerId = () => currentServerId;
+
 export async function apiFetch(method: string, path: string, token: string, body?: object): Promise<any> {
-    const r = await axios({ method, url: path, headers: { Authorization: `Bearer ${token}` }, data: body });
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (currentServerId !== null) headers['X-Server-Id'] = String(currentServerId);
+    const r = await axios({ method, url: path, headers, data: body });
     return r.data;
 }
 

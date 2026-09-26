@@ -375,6 +375,7 @@ body {
 .server-bar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
 }
 .server-card {
@@ -389,6 +390,45 @@ body {
     user-select: none;
 }
 .server-card--active { border-color: var(--primary-container); }
+.server-card--inactive { cursor: pointer; }
+.server-card--inactive:hover { background: var(--state-primary); }
+.server-card:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* «Добавить сервер»: призрачная кнопка с пунктиром (design.md, 4.2) */
+.server-add {
+    background: transparent;
+    border: 1.5px dashed var(--outline);
+    color: var(--neutral-text);
+}
+.server-add:disabled { opacity: .6; cursor: not-allowed; }
+
+/* Модалка добавления ноды */
+.node-scrim {
+    position: fixed; inset: 0; z-index: 60;
+    background: var(--scrim);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+}
+.node-modal {
+    width: 100%; max-width: 520px;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--r-card);
+    padding: 20px;
+    display: flex; flex-direction: column; gap: 12px;
+}
+.node-modal-title { margin: 0; font-size: 16px; font-weight: 500; color: var(--on-surface); }
+.node-modal-hint  { margin: 0; font-size: 12px; color: var(--neutral-text); }
+.node-modal-cmd {
+    display: block;
+    font-family: var(--mono); font-size: 12px;
+    background: var(--surface-container);
+    border-radius: var(--r-table);
+    padding: 12px;
+    word-break: break-all;
+    user-select: all;
+}
+.node-modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .server-card-info {
     display: flex;
     flex-direction: column;
@@ -656,6 +696,9 @@ tbody td:last-child  { padding-right: 20px; }
         border-color: var(--primary-container);
         padding: 12px 14px;
     }
+    .server-card--inactive { border-color: var(--outline-variant); }
+    .server-add { width: 100%; justify-content: center; }
+    .node-modal-actions .btn { flex: 1; }
     .server-toggle       { display: flex; }
     .server-online-chip  { display: none; }
 

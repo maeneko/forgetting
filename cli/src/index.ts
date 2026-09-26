@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { spawn }                                from "child_process";
+import { spawn, spawnSync }                     from "child_process";
 import { readFileSync, writeFileSync, existsSync,
     mkdirSync, openSync, closeSync,
     unlinkSync }                           from "fs";
@@ -100,14 +100,48 @@ const SERVICES = {
             SUB_SIGN_KEY_FILE: process.env.SUB_SIGN_KEY_FILE ?? "/etc/amnezia/amneziawg/sub_sign.key",
             SUB_TLS_KEY_FILE:  process.env.SUB_TLS_KEY_FILE  ?? "/etc/amnezia/amneziawg/sub_tls.key",
             SUB_TLS_CERT_FILE: process.env.SUB_TLS_CERT_FILE ?? "/etc/amnezia/amneziawg/sub_tls.crt",
+            // Приём нод (core): порт хаба WSS и его самоподписанный сертификат (pin зашит в
+            // join-строки, живёт как sub_tls.*). Без NODE_PORT хаб выключен. LOCAL_NODE=off —
+            // core без собственного VPN: awg-ctrl рядом не нужен.
+            NODE_PORT:          process.env.NODE_PORT          ?? "",
+            LOCAL_NODE:         process.env.LOCAL_NODE         ?? "on",
+            NODE_TLS_KEY_FILE:  process.env.NODE_TLS_KEY_FILE  ?? "/etc/amnezia/amneziawg/node_tls.key",
+            NODE_TLS_CERT_FILE: process.env.NODE_TLS_CERT_FILE ?? "/etc/amnezia/amneziawg/node_tls.crt",
         },
         pidFile: "/tmp/awg-ui.pid",
         logFile: path.join(LOGS, "awg-ui.log"),
     },
+    // Агент ноды: сам звонит в core (CORE_HOST/PORT/PIN из join-строки) и исполняет запросы
+    // на локальном awg-ctrl. Запускается вместо awg-ui — см. ROLE.
+    agent: {
+        label:   "awg-agent",
+        cwd:     path.join(ROOT, "awg-agent"),
+        entry:   "index.ts",
+        env: {
+            CORE_HOST:     process.env.CORE_HOST     ?? "",
+            CORE_PORT:     process.env.CORE_PORT     ?? "",
+            CORE_PIN:      process.env.CORE_PIN      ?? "",
+            NODE_ID:       process.env.NODE_ID       ?? "",
+            NODE_KEY_FILE: process.env.NODE_KEY_FILE ?? "/etc/amnezia/amneziawg/node.key",
+            JOIN_SECRET:   process.env.JOIN_SECRET   ?? "",
+            CLI_ENV_FILE:  envFile,
+            AWGCTRL_PORT:  process.env.AWGCTRL_PORT  ?? "3005",
+            INTERNAL_AUTH_KEY_FILE: process.env.INTERNAL_AUTH_KEY_FILE
+                ?? "/etc/amnezia/amneziawg/internal_auth_private.key",
+        },
+        pidFile: "/tmp/awg-agent.pid",
+        logFile: path.join(LOGS, "awg-agent.log"),
+    },
 } as const;
 
 type SvcName = keyof typeof SERVICES;
-const ALL: SvcName[] = ["awgctrl", "ui"];
+
+// Роль установки. node — VPN-сервер без панели: awg-ctrl + агент, который сам
+// подключается к core (есть CORE_HOST, его пишет `join`). core с LOCAL_NODE=off —
+// панель без собственного VPN (только awg-ui). Иначе — обычная установка.
+const IS_NODE = !!process.env.CORE_HOST;
+const NO_LOCAL = (process.env.LOCAL_NODE ?? "on").toLowerCase() === "off";
+const ALL: SvcName[] = IS_NODE ? ["awgctrl", "agent"] : NO_LOCAL ? ["ui"] : ["awgctrl", "ui"];
 
 function readPid(name: SvcName): number | null {
     const { pidFile } = SERVICES[name];
@@ -270,7 +304,7 @@ function probe(url: string, timeoutMs = 1000): Promise<boolean> {
 
 // Ждём, пока awg-ctrl начнёт отвечать. Если процесс умер (например,
 // ensureInterfaceUp() бросил исключение) — сразу выходим.
-async function waitForHealth(name: SvcName, attempts = 10): Promise<boolean> {
+async function waitForHealth(name: "awgctrl", attempts = 10): Promise<boolean> {
     const url = `http://127.0.0.1:${SERVICES[name].env.PORT}/health`;
     for (let i = 0; i < attempts; i++) {
         if (!isRunning(name)) return false;
@@ -281,12 +315,16 @@ async function waitForHealth(name: SvcName, attempts = 10): Promise<boolean> {
 }
 
 async function startAll() {
+    // Панель без своего VPN: awg-ctrl рядом нет, health-gate не нужен.
+    if (!ALL.includes("awgctrl")) { for (const n of ALL) await start(n); return; }
+
     await start("awgctrl");
+    const next: SvcName = IS_NODE ? "agent" : "ui";
     if (!isRunning("awgctrl") || !(await waitForHealth("awgctrl"))) {
-        console.error(`  ${grey("■")} awg-ctrl не отвечает — awg-ui не запущен (см. ${SERVICES.awgctrl.logFile})`);
+        console.error(`  ${grey("■")} awg-ctrl не отвечает — ${SERVICES[next].label} не запущен (см. ${SERVICES.awgctrl.logFile})`);
         return;
     }
-    await start("ui");
+    await start(next);
 }
 
 async function stopAll()    { for (const n of ALL) await stop(n); }
@@ -297,6 +335,64 @@ function updateEnvVar(content: string, key: string, value: string): string {
     return re.test(content)
         ? content.replace(re, `${key}=${value}`)
         : content.trimEnd() + `\n${key}=${value}\n`;
+}
+
+function removeEnvVar(content: string, key: string): string {
+    return content.split("\n").filter(l => !l.startsWith(`${key}=`)).join("\n");
+}
+
+// Роль читается из окружения при старте процесса, поэтому после смены cli.env
+// перезапуск делаем свежим процессом CLI, а не в этом же.
+function restartFresh(): void {
+    spawnSync(process.execPath, [...process.execArgv, process.argv[1], "restart"], { stdio: "inherit" });
+}
+
+// `join <awgjoin://…>`: превратить эту установку в ноду. Панель (awg-ui) на этой машине
+// останавливается, вместо неё запускается агент; awg-ctrl и пользователи остаются как были.
+async function joinCore(link?: string) {
+    if (!link?.startsWith("awgjoin://")) {
+        console.error("  Usage: awg-ctrl join <awgjoin://…>   (ссылку даёт панель: «Добавить сервер»)");
+        process.exit(1);
+    }
+    let j: { v?: number; h?: string; p?: number; pin?: string; n?: number; s?: string };
+    try { j = JSON.parse(Buffer.from(link.slice("awgjoin://".length), "base64url").toString("utf8")); }
+    catch { console.error("  Ссылка повреждена"); process.exit(1); }
+    const ok = j.v === 1 && typeof j.h === "string" && /^[A-Za-z0-9.:_-]{1,253}$/.test(j.h)
+        && Number.isInteger(j.p) && j.p! > 0 && j.p! < 65536
+        && typeof j.pin === "string" && /^[A-Za-z0-9_-]{43}$/.test(j.pin)
+        && Number.isInteger(j.n) && j.n! > 0 && typeof j.s === "string" && /^[A-Za-z0-9_-]{22}$/.test(j.s);
+    if (!ok) { console.error("  Ссылка неверного формата или от другой версии панели"); process.exit(1); }
+    if (IS_NODE && !await confirmYes(`  Эта нода уже подключена к ${process.env.CORE_HOST}. Перепривязать?`)) return;
+
+    let content = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+    const set: Record<string, string> = {
+        CORE_HOST: j.h!, CORE_PORT: String(j.p), CORE_PIN: j.pin!, NODE_ID: String(j.n), JOIN_SECRET: j.s!,
+    };
+    for (const [k, v] of Object.entries(set)) content = updateEnvVar(content, k, v);
+    writeFileSync(envFile, content, { mode: 0o600 });
+
+    await stop("ui");                      // панель на ноде не нужна
+    console.log(`\n  ${green("✓")} Настроено: core ${j.h}:${j.p}, нода #${j.n}`);
+    restartFresh();
+}
+
+async function unjoinCore() {
+    if (!IS_NODE) { console.log("  Эта установка не подключена к core"); return; }
+    await stop("agent");
+    let content = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+    for (const k of ["CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET"]) content = removeEnvVar(content, k);
+    writeFileSync(envFile, content, { mode: 0o600 });
+    console.log(`  ${green("✓")} Нода отвязана. Удалите её в панели (сервер) и запустите: awg-ctrl restart`);
+    // Нода, поставленная install.sh с ролью «нода», панели не имеет — без пароля в неё не войти.
+    if (!process.env.UI_PASS)
+        console.log(`  ${dim("Панель на этой машине не настроена: задайте логин и пароль — awg-ctrl credentials")}`);
+}
+
+async function confirmYes(q: string): Promise<boolean> {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const a = await new Promise<string>(r => rl.question(`${q} [y/N] `, r));
+    rl.close();
+    return /^y/i.test(a.trim());
 }
 
 async function setCredentials(field?: "user" | "pass") {
@@ -393,7 +489,7 @@ async function main() {
         return;
     }
 
-    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]>";
+    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…>|unjoin>";
 
     const [,,, sub] = process.argv;
 
@@ -407,6 +503,8 @@ async function main() {
             else if (sub === "pass") await setCredentials("pass");
             else await setCredentials();
             break;
+        case "join":        await joinCore(sub);                               break;
+        case "unjoin":      await unjoinCore();                                break;
         default: console.log(USAGE); process.exit(1);
     }
 }
