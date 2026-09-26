@@ -2,7 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useCallback } from 'react';
-import { apiFetch, copyText, timeAgo, type ApiKey, type PageProps } from '../../lib/shared';
+import { apiFetch, copyText, timeAgo, getServerId, type ApiKey, type PageProps } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy } from '../../components/icons';
 import './apikeys.css';
 
@@ -26,7 +26,7 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
 
     const createKey = useCallback(async () => {
         if (!label.trim()) return;
-        const r = await apiFetch('POST', '/ui/apikeys', token, { label: label.trim(), server_id: 0 });
+        const r = await apiFetch('POST', '/ui/apikeys', token, { label: label.trim(), server_id: getServerId() ?? 0 });
         if (r.error) { showMsg(r.error); return; }
         setLabel('');
         setCreated({ label: r.label, key: r.key });

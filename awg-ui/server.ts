@@ -8,6 +8,7 @@ import crypto   from "crypto";
 import axios    from "axios";
 import Database from "better-sqlite3";
 import { createSub } from "./sub";
+import { createNodes } from "./nodes";
 
 const app  = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -180,10 +181,10 @@ app.post("/ui/apikeys", requireAuth, (req: Request, res: Response) => {
     if (!label || !/^[\w \-]{1,40}$/.test(label)) {
         res.status(400).json({ error: "Метка: буквы, цифры, пробел, _ и -, до 40 символов" }); return;
     }
-    // TODO multi-server: server_id пока всегда 0 (текущий сервер). Когда появится
-    // список серверов — валидировать его против реального реестра серверов.
+    const sid = server_id === undefined ? nodes.defaultId() : Number(server_id);
+    if (!Number.isInteger(sid) || !nodes.exists(sid)) { res.status(400).json({ error: "Такого сервера нет" }); return; }
     const { key, hash, prefix } = genApiKey();
-    const info = keyStmts.insert.run(label, hash, prefix, Number(server_id) || 0, Math.floor(Date.now() / 1000));
+    const info = keyStmts.insert.run(label, hash, prefix, sid, Math.floor(Date.now() / 1000));
     // Открытое значение отдаётся один раз — дальше в БД только хэш.
     res.status(201).json({ id: info.lastInsertRowid, label, prefix, key });
 });
@@ -195,24 +196,23 @@ app.delete("/ui/apikeys/:id", requireAuth, (req: Request, res: Response) => {
     res.json({ success: true, id });
 });
 
+// Сервер, к которому относится запрос панели: заголовок X-Server-Id (0 — локальный
+// awg-ctrl, остальное — нода). Без заголовка — сервер по умолчанию.
+function serverIdOf(req: Request): number {
+    const raw = req.headers["x-server-id"];
+    if (raw === undefined) return nodes.defaultId();
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 0 ? n : nodes.defaultId();
+}
+
 async function proxy(req: Request, res: Response) {
     try {
-        const r = await axios({
-            method: req.method,
-            url:    CTRL + req.originalUrl,
-            headers: { Authorization: `Bearer ${mintInternalToken()}`, "Content-Type": "application/json" },
-            data:   req.body,
-            validateStatus: () => true,
-        });
+        const r = await nodes.ctrlFor(serverIdOf(req))(req.method, req.originalUrl, req.body);
         res.status(r.status).json(r.data);
     } catch {
         res.status(502).json({ error: "awg-ctrl недоступен" });
     }
 }
-
-// TODO multi-server: ключ привязан к server_id (пока всегда 0 = текущий
-// сервер). Когда серверов станет несколько — маршрутизировать ctrl() на нужный
-// awg-ctrl по (req as ExtRequest).apiKey.server_id.
 
 interface ExtRequest extends Request { apiKey?: ApiKeyRow; }
 
@@ -243,6 +243,9 @@ interface ExtUser { name: string; ip: string; vpn_key: string; key_gen: string }
 const ext = express.Router();
 ext.use(requireApiKey);
 
+// Ключ привязан к server_id — все вызовы уходят на его сервер.
+const ctrlOf = (req: Request) => nodes.ctrlFor((req as ExtRequest).apiKey?.server_id ?? 0);
+
 // Express 4 не ловит отказы async-обработчиков: незакрытый reject (awg-ctrl не
 // отвечает, внутренний ключ не загружен) уронил бы весь процесс панели. Ответ
 // тот же, что у proxy() в такой ситуации.
@@ -253,26 +256,26 @@ const wrap = (fn: Handler) => (req: Request, res: Response) => {
 
 ext.post("/users", wrap(async (req, res) => {
     const { name } = (req.body ?? {}) as { name?: string };
-    const r = await ctrl("POST", "/api/users", { name });
+    const r = await ctrlOf(req)("POST", "/api/users", { name });
     if (r.status >= 400) { res.status(r.status).json(r.data); return; }
     const u = r.data as ExtUser;
     res.status(201).json({ name: u.name, ip: u.ip, gen: u.key_gen, vpn_key: u.vpn_key });
 }));
 
-ext.get("/users", wrap(async (_req, res) => {
-    const r = await ctrl("GET", "/api/users/stats");
+ext.get("/users", wrap(async (req, res) => {
+    const r = await ctrlOf(req)("GET", "/api/users/stats");
     res.status(r.status).json(r.data);
 }));
 
 ext.get("/users/:name", wrap(async (req, res) => {
-    const r = await ctrl("POST", `/api/users/${encodeURIComponent(req.params.name)}`);
+    const r = await ctrlOf(req)("POST", `/api/users/${encodeURIComponent(req.params.name)}`);
     if (r.status >= 400) { res.status(r.status).json(r.data); return; }
     const u = r.data as ExtUser;
     res.json({ name: u.name, ip: u.ip, gen: u.key_gen, vpn_key: u.vpn_key });
 }));
 
 ext.delete("/users/:name", wrap(async (req, res) => {
-    const r = await ctrl("DELETE", `/api/users/${encodeURIComponent(req.params.name)}`);
+    const r = await ctrlOf(req)("DELETE", `/api/users/${encodeURIComponent(req.params.name)}`);
     res.status(r.status).json(r.data);
 }));
 
@@ -282,7 +285,12 @@ app.use("/api/v1", ext);
 
 // sen://-подписка: мастер-ключи и устройства (роуты панели, за JWT) и публичный
 // листенер /sub/v1 на своём порту SUB_PORT. Публичная часть сюда не монтируется.
-const sub = createSub({ uidb, ctrl, baseDir: __dirname });
+// Несколько серверов: core (эта панель) + ноды по исходящему WSS. Реестр — в ui.db.
+const nodes = createNodes({ uidb, ctrlLocal: ctrl, baseDir: __dirname });
+app.use("/ui/nodes", requireAuth, nodes.router);
+
+// sen://-подписка пока обслуживает один сервер — по умолчанию. Несколько нод — следующий шаг.
+const sub = createSub({ uidb, ctrl: (m, p, b) => nodes.ctrlFor(nodes.defaultId())(m, p, b), baseDir: __dirname });
 app.use("/ui/masterkeys", requireAuth, sub.masterKeys);
 app.use("/ui/devices",    requireAuth, sub.devices);
 
@@ -295,4 +303,5 @@ app.get("*", (_req: Request, res: Response) => {
 });
 
 app.listen(PORT, () => { console.log(`ui: listening on :${PORT}`); });
+nodes.start();
 sub.start();
