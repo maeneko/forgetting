@@ -162,13 +162,11 @@ LICENSE file in the root directory of this source tree.
 .mk-server-name { font-weight: 500; }
 .mk-server-ip, .mk-server-gen { font-size: 12px; color: var(--neutral-text); }
 .mk-server-ip { font-family: var(--mono); margin-left: auto; }
-.mk-server-add {
-    width: 100%; justify-content: center;
-    background: transparent;
-    border: 1px dashed var(--outline);
-    color: var(--neutral-dot);
-    cursor: not-allowed;
-}
+.mk-server { cursor: pointer; }
+.mk-server:hover { background: var(--state-primary); }
+.mk-server--locked { cursor: default; }
+.mk-server--locked:hover { background: var(--surface-container); }
+.mk-server-dot { padding: 0; background: none; }
 .mk-box .tip-wrap { width: 100%; }
 
 /* дети: вертикальная линия слева и «ножка» к каждому узлу */

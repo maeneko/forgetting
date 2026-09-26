@@ -3,18 +3,24 @@
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback } from 'react';
 import QRCode from 'qrcode';
-import { apiFetch, copyText, bytes, timeAgo, genLabel, type AwgGen, type PageProps } from '../../lib/shared';
+import { apiFetch, copyText, bytes, timeAgo, genLabel, type NodeInfo, type PageProps } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings } from '../../components/icons';
 import './masterkeys.css';
 
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
 // плюс лимит устройств; устройства регистрируются сами (приватный ключ остаётся
 // на них) и здесь только отображаются и отзываются. Формат — docs/sen-link.md.
-interface MasterKey { id: number; label: string; device_limit: number; devices: number; created_at: number }
+interface MasterKey { id: number; label: string; device_limit: number; devices: number; servers: number[]; created_at: number }
 interface Device {
     id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null;
     rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number;
+    servers_total: number; servers_ok: number;   // на скольких серверах ключа уже стоит его текущий ключ
 }
+
+// Устройство ещё не на всех серверах ключа (нода не в сети при регистрации или смене ключа) —
+// панель догонит, когда нода появится.
+const syncLabel = (d: Device): string =>
+    d.servers_ok < d.servers_total ? ` · на ${d.servers_ok} из ${d.servers_total} серверов` : '';
 
 // Платформа и версия клиента: «macOS-0.6.5»; без версии — просто платформа.
 const platformLabel = (d: Device): string =>
@@ -26,7 +32,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const [keys, setKeys]       = useState<MasterKey[]>([]);
     const [enabled, setEnabled] = useState(true);
     const [tls, setTls]         = useState(false);
-    const [server, setServer]   = useState<{ name: string; ip: string; gen: string } | null>(null);
+    const [nodes, setNodes]     = useState<NodeInfo[]>([]);   // серверы, которые можно включить в ключ
     const [label, setLabel]     = useState('');
     const [limit, setLimit]     = useState('3');
     const [devs, setDevs]       = useState<Record<number, Device[]>>({});
@@ -40,8 +46,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
             const d = await apiFetch('GET', '/ui/masterkeys', token);
             const list: MasterKey[] = d.keys ?? [];
             setKeys(list); setEnabled(!!d.enabled); setTls(!!d.tls);
-            // Сервер, который сейчас отдаётся по ключу (он пока единственный).
-            apiFetch('GET', '/health', token).then(h => setServer({ name: h.server, ip: h.ip, gen: h.gen })).catch(() => {});
+            apiFetch('GET', '/ui/nodes', token).then(r => setNodes(r.nodes ?? [])).catch(() => {});
             const all = await Promise.all(list.map(k =>
                 apiFetch('GET', `/ui/masterkeys/${k.id}/devices`, token).then(r => [k.id, r.devices ?? []] as const)));
             setDevs(Object.fromEntries(all));
@@ -57,10 +62,14 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const create = useCallback(async () => {
         if (!label.trim()) return;
         await act(async () => {
-            await apiFetch('POST', '/ui/masterkeys', token, { label: label.trim(), device_limit: Number(limit) });
+            // Новый ключ отдаёт все серверы, которые уже подключались; набор потом правится в настройках ключа.
+            const ready = nodes.filter(n => !n.pending).map(n => n.id);
+            await apiFetch('POST', '/ui/masterkeys', token, {
+                label: label.trim(), device_limit: Number(limit), ...(ready.length ? { servers: ready } : {}),
+            });
             setLabel('');
         }, 'Мастер-ключ создан');
-    }, [label, limit, token, act]);
+    }, [label, limit, nodes, token, act]);
 
     const remove = useCallback(async (k: MasterKey) => {
         if (!confirm(`Удалить «${k.label}»? Все ${k.devices} устройств потеряют доступ.`)) return;
@@ -146,20 +155,32 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 </div>
             </section>
 
-            {/* Справа — какие серверы отдаются пользователю. Заглушка: сервер один и всегда включён.
-                TODO multi-server: список серверов из реестра, выбор по галочкам; в config.servers[]
-                уйдут только выбранные (подписка уже отдаёт servers[] массивом с id). */}
+            {/* Справа — какие серверы отдаёт ключ: в config.servers[] каждого устройства. Снять галочку —
+                пиры его устройств с этого сервера удалятся; поставить — добавятся. Последний не снимается. */}
             <section className="mk-box">
-                <h4 className="mk-box-title">Включённые серверы</h4>
-                <label className="mk-server">
-                    <input type="checkbox" checked disabled />
-                    <span className="mk-server-name">{server?.name ?? 'Текущий сервер'}</span>
-                    {server?.ip && <code className="mk-server-ip">{server.ip}</code>}
-                    {server?.gen && <span className="mk-server-gen">{genLabel(server.gen as AwgGen)}</span>}
-                </label>
-                <span className="tip-wrap" data-tip="Появится вместе с поддержкой нескольких серверов">
-                    <button className="btn mk-server-add" disabled><IcoPlus /> Добавить сервер</button>
-                </span>
+                <h4 className="mk-box-title">Серверы ключа</h4>
+                {nodes.map(n => {
+                    const on = k.servers.includes(n.id);
+                    const last = on && k.servers.length === 1;
+                    const h = n.health;
+                    return (
+                        <label className={`mk-server${last ? ' mk-server--locked' : ''}`} key={n.id}>
+                            <input type="checkbox" checked={on} disabled={last}
+                                onChange={() => {
+                                    const next = on ? k.servers.filter(id => id !== n.id) : [...k.servers, n.id];
+                                    act(() => apiFetch('PATCH', `/ui/masterkeys/${k.id}`, token, { servers: next }),
+                                        on ? `«${h?.server || n.name}» убран из ключа` : `«${h?.server || n.name}» добавлен в ключ`);
+                                }} />
+                            <span className={`chip chip--${n.online ? 'online' : 'offline'} mk-server-dot`} title={n.online ? 'В сети' : 'Нет связи'}>
+                                <span className="chip-dot" />
+                            </span>
+                            <span className="mk-server-name">{h?.server || n.name}</span>
+                            {h?.ip && <code className="mk-server-ip">{h.ip}</code>}
+                            {h?.gen && <span className="mk-server-gen">{genLabel(h.gen)}</span>}
+                        </label>
+                    );
+                })}
+                <p className="mk-setting-hint">Новые серверы добавляются кнопкой «Добавить сервер» над вкладкой.</p>
             </section>
         </div>
     );
@@ -181,8 +202,13 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
 
     const deviceActions = (d: Device) => (
         <div className="actions">
-            <button className="btn-icon" title="Новый PSK" aria-label="Новый PSK" onClick={() =>
-                act(() => apiFetch('POST', `/ui/devices/${d.id}/psk`, token), 'PSK обновлён')}><IcoRefresh /></button>
+            <button className="btn-icon" title="Новый PSK" aria-label="Новый PSK" onClick={async () => {
+                try {
+                    const r = await apiFetch('POST', `/ui/devices/${d.id}/psk`, token);
+                    showMsg(r.pending ? `PSK обновлён; ещё на ${r.pending} — когда сервер будет на связи` : 'PSK обновлён');
+                    await load();
+                } catch (e) { showMsg(errText(e)); }
+            }}><IcoRefresh /></button>
             <button className="btn-icon btn-icon--danger" title="Отозвать устройство" aria-label="Отозвать устройство" onClick={() => {
                 if (confirm('Отозвать устройство «' + (d.device_name || d.id) + '»?'))
                     act(() => apiFetch('DELETE', `/ui/devices/${d.id}`, token), 'Устройство отозвано');
@@ -205,7 +231,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                         <code className="mk-device-id" title={`ID устройства: ${d.device_id}`}>{d.device_id}</code>
                     </span>
                     <span className="mk-device-sub">{platformLabel(d)} · был {d.last_seen ? timeAgo(d.last_seen) + ' назад' : 'никогда'}
-                        {d.rekey_requested ? ' · ждёт смены ключа' : ''}</span>
+                        {d.rekey_requested ? ' · ждёт смены ключа' : ''}{syncLabel(d)}</span>
                 </div>
                 <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
                     <span className="chip-dot" />{d.online ? 'Онлайн' : 'Офлайн'}
@@ -276,7 +302,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                                             <td className="td-mono">{bytes(d.rx)}</td>
                                             <td className="td-mono">{bytes(d.tx)}</td>
                                             <td>{d.last_seen ? timeAgo(d.last_seen) + ' назад' : 'никогда'}
-                                                {d.rekey_requested && <span className="mk-flag"> · ждёт смены ключа</span>}</td>
+                                                {d.rekey_requested && <span className="mk-flag"> · ждёт смены ключа</span>}
+                                                {syncLabel(d) && <span className="mk-flag">{syncLabel(d)}</span>}</td>
                                             <td></td>
                                             <td className="td-actions mk-td-actions">{deviceActions(d)}</td>
                                         </tr>

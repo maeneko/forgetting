@@ -289,8 +289,8 @@ app.use("/api/v1", ext);
 const nodes = createNodes({ uidb, ctrlLocal: ctrl, baseDir: __dirname });
 app.use("/ui/nodes", requireAuth, nodes.router);
 
-// sen://-подписка пока обслуживает один сервер — по умолчанию. Несколько нод — следующий шаг.
-const sub = createSub({ uidb, ctrl: (m, p, b) => nodes.ctrlFor(nodes.defaultId())(m, p, b), baseDir: __dirname });
+// sen://-подписка: мастер-ключ отдаёт набор серверов (локальный и/или ноды).
+const sub = createSub({ uidb, servers: nodes, baseDir: __dirname });
 app.use("/ui/masterkeys", requireAuth, sub.masterKeys);
 app.use("/ui/devices",    requireAuth, sub.devices);
 

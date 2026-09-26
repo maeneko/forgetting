@@ -100,6 +100,9 @@ const SERVICES = {
             SUB_SIGN_KEY_FILE: process.env.SUB_SIGN_KEY_FILE ?? "/etc/amnezia/amneziawg/sub_sign.key",
             SUB_TLS_KEY_FILE:  process.env.SUB_TLS_KEY_FILE  ?? "/etc/amnezia/amneziawg/sub_tls.key",
             SUB_TLS_CERT_FILE: process.env.SUB_TLS_CERT_FILE ?? "/etc/amnezia/amneziawg/sub_tls.crt",
+            // Публичный адрес панели в sen://-ссылках и endpoints. Пусто — адрес локального
+            // сервера (у панели без своего VPN — тот, по которому к ней зашли).
+            SUB_HOST:          process.env.SUB_HOST          ?? "",
             // Приём нод (core): порт хаба WSS и его самоподписанный сертификат (pin зашит в
             // join-строки, живёт как sub_tls.*). Без NODE_PORT хаб выключен. LOCAL_NODE=off —
             // core без собственного VPN: awg-ctrl рядом не нужен.

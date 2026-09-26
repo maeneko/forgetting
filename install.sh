@@ -1363,6 +1363,7 @@ SUB_TLS=${SUB_TLS}
 SUB_SIGN_KEY_FILE=${SUB_SIGN_PRIV}
 SUB_TLS_KEY_FILE=${SUB_TLS_KEY}
 SUB_TLS_CERT_FILE=${SUB_TLS_CRT}
+SUB_HOST=${SERVER_IP}
 
 # ── приём нод (несколько серверов) ────────────────────────────────────────
 NODE_PORT=${NODE_PORT}

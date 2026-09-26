@@ -138,6 +138,16 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
 
     const exists = (id: number) => (id === 0 ? LOCAL : q.byId.get(id) !== undefined);
 
+    /** Есть ли сейчас связь с сервером (локальный считаем доступным всегда — до первого отказа awg-ctrl). */
+    const isOnline = (id: number) => (id === 0 ? LOCAL : conns.has(id));
+
+    /** Все серверы реестра: локальный (если есть) и ноды. */
+    const ids = (): number[] => [...(LOCAL ? [0] : []), ...(q.all.all() as NodeRow[]).map(n => n.id)];
+
+    // Подписчики на «сервер снова на связи» — подписка по этому сигналу догоняет пропущенное.
+    const onlineHandlers: ((id: number) => void)[] = [];
+    const onOnline = (cb: (id: number) => void) => { onlineHandlers.push(cb); };
+
     /** Сервер по умолчанию: локальный, а без него — первая нода. */
     function defaultId(): number {
         if (LOCAL) return 0;
@@ -216,6 +226,7 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
             ws.send(JSON.stringify({ t: "ready" }));
             console.log(`nodes: «${row.name}» (#${row.id}) подключена${joining ? " (первое подключение)" : ""}`);
             void refreshHealth(row.id);
+            for (const cb of onlineHandlers) { try { cb(row.id); } catch { /* подписчик сам разберётся */ } }
         }
 
         ws.on("message", raw => {
@@ -241,7 +252,10 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
     }
 
     function start() {
-        if (LOCAL) void refreshHealth(0);
+        if (LOCAL) {
+            void refreshHealth(0);
+            for (const cb of onlineHandlers) { try { cb(0); } catch { /* подписчик сам разберётся */ } }
+        }
         if (!NODE_PORT || !tls) return;
         const server = https.createServer(tls);
         const wss = new WebSocketServer({ server, path: "/node/v1", maxPayload: 4 * 1024 * 1024 });
@@ -330,7 +344,7 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         const n = validId(id) ? q.byId.get(id) as NodeRow | undefined : undefined;
         if (!n) { res.status(404).json({ error: "Не найден" }); return; }
         // Ключи API и мастер-ключи ссылаются на server_id — не оставляем их висеть в воздухе.
-        const used = (["api_keys", "master_keys"] as const).some(t => {
+        const used = (["api_keys", "master_servers"] as const).some(t => {
             try { return (uidb.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE server_id = ?`).get(id) as { n: number }).n > 0; }
             catch { return false; }
         });
@@ -338,8 +352,12 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         const c = conns.get(id);
         if (c) { dropConn(id, c); c.ws.close(4004, "removed"); }
         q.delete.run(id);
+        // Хвосты подписки для этого сервера больше некому доделать.
+        for (const t of ["peer_tombstones", "server_profiles"]) {
+            try { uidb.prepare(`DELETE FROM ${t} WHERE server_id = ?`).run(id); } catch { /* таблицы ещё нет */ }
+        }
         res.json({ success: true, id });
     });
 
-    return { router, ctrlFor, exists, defaultId, start };
+    return { router, ctrlFor, exists, isOnline, ids, onOnline, defaultId, start };
 }
