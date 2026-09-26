@@ -48,6 +48,14 @@ run() {
     return "${PIPESTATUS[0]}"
 }
 
+# Случайная строка из [a-zA-Z0-9]. Вход конечный: при `tr < /dev/urandom | head` tr получает
+# SIGPIPE, под pipefail вся цепочка «падала», и срабатывал запасной openssl — пароль склеивался
+# из двух половин. Из 1 КиБ случайных байт букв и цифр выходит ~240 — хватает с запасом.
+# LC_ALL=C: tr работает с байтами, а не с символами локали.
+rand_alnum() {
+    head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | head -c "$1"
+}
+
 # Вопрос: ask VAR "текст: " [secret]. Введённое печатает сам терминал — в поток вывода, а значит
 # и в лог, оно не попадает. Поэтому после ответа строка «вопрос ответ» печатается ещё раз: на
 # экране — поверх себя же (курсор на строку вверх), в логе — целиком. Скрытый ввод — точками.
@@ -81,7 +89,10 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 # Права 600: в итоге печатается пароль панели. LOGFILE — глобал, на него ссылается ERR-трап.
 LOGFILE="/var/log/awg-install-$(date +%Y%m%d-%H%M%S).log"
 ( umask 077; : > "$LOGFILE" )
-exec > >(tee >(sed -u -e $'s/\033\\[[0-9;]*[A-Za-z]//g' -e $'s/.*\r//' >> "$LOGFILE")) 2>&1
+# LC_ALL=C: sed режет байты, а не символы — на битом UTF-8 из чужого вывода (make.log, dmesg) он
+# не спотыкается. tee -p: если запись лога вдруг умрёт, tee не падает от SIGPIPE и продолжает
+# писать на экран — иначе вслед за ним молча умер бы и сам установщик.
+exec > >(tee -p >(LC_ALL=C sed -u -e $'s/\033\\[[0-9;]*[A-Za-z]//g' -e $'s/.*\r//' >> "$LOGFILE")) 2>&1
 LOG_PID="${!:-}"
 # Дождаться, пока tee допишет хвост, — иначе последние строки вылезут уже после приглашения шелла.
 trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true' EXIT
@@ -207,7 +218,6 @@ elif [[ -z "$ROLE" ]]; then
         3) ROLE="node" ;;
         *) fail "Неверный выбор: введи 1, 2 или 3" ;;
     esac
-    echo
 fi
 [[ "$ROLE" =~ ^(standalone|core|node)$ ]] || fail "ROLE должен быть standalone, core или node (задано: $ROLE)"
 case "$ROLE" in
@@ -333,7 +343,6 @@ fi
 # сервера (если база есть, имя берётся из неё). Без вывода. KEEP_DATA — отдельно.
 DB_EXISTS="n"
 [[ -f "$DB_FILE" ]] && DB_EXISTS="y"
-echo
 
 # TODO: рандомизировать параметры обфускации при установке.
 #   awg-ctrl уже читает их из [Interface] awg1.conf (readAwgParams), поэтому
@@ -533,7 +542,6 @@ start_and_status() {
         run "$TSX" "$CLI" start all
     fi
     sleep 2
-    echo
     "$TSX" "$CLI" status
 }
 
@@ -547,7 +555,6 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     npm_install_all
     start_and_status
 
-    echo
     rule
     echo -e "  ${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}  ${DIM}${ROLE_LABEL}${NC}"
     rule
@@ -587,11 +594,11 @@ if [[ "$ROLE" != "node" ]]; then
     ask UI_USER "UI логин [admin]: "
     UI_USER="${UI_USER:-admin}"
 
-    SUGGESTED_PASS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12 2>/dev/null || openssl rand -hex 6)
+    SUGGESTED_PASS=$(rand_alnum 12)
     ask UI_PASS "UI пароль [$SUGGESTED_PASS]: " secret
     UI_PASS="${UI_PASS:-$SUGGESTED_PASS}"
 
-    JWT_SECRET=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32 2>/dev/null || openssl rand -hex 16)
+    JWT_SECRET=$(rand_alnum 32)
 fi
 
 # Что сохранять при переустановке.
@@ -1211,6 +1218,7 @@ else
     # помогло — снимаем 3.x-ключи и поднимаемся на 2.0, а не валим установку.
     AWG3_KEY_RE='^(HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts|RandomTrailers|DisableCookies) *='
 
+    info "awg-quick up $IFACE"
     if ! run awg-quick up "$IFACE"; then
         ip link delete dev "$IFACE" 2>/dev/null || true
 
@@ -1265,6 +1273,7 @@ else
     # хендшейк проходит, данные не идут). Unhold перед апгрейдом уже сделан выше;
     # hold ставим только теперь, когда версия проверена и интерфейс реально поднялся.
     if [[ "$AWG_PIN" == "y" ]]; then
+        info "apt-mark hold amneziawg amneziawg-dkms amneziawg-tools"
         run apt-mark hold amneziawg amneziawg-dkms amneziawg-tools || true
         ok "Версия пакета закреплена (apt-mark hold) — снять: apt-mark unhold amneziawg amneziawg-dkms amneziawg-tools"
     fi
@@ -1279,7 +1288,7 @@ fi
 # «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
 # Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
 if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
-    info "UFW активен, открываем маршрут и порты"
+    info "UFW активен, открываем $([[ "$ROLE" != "core" ]] && echo "маршрут и ")порты"
     UFW_OPEN=()
     if [[ "$ROLE" != "core" ]]; then
         run ufw route allow in on "$IFACE" out on "$NET_IFACE" \
@@ -1402,12 +1411,16 @@ if [[ "$ROLE" == "node" ]]; then
     if [[ "$NODE_UP" == "y" ]]; then
         ok "Нода подключилась к панели $CORE_HOST:$CORE_PORT"
     else
-        warn "Нода пока не подключилась к панели. Последние строки $AGENT_LOG:"
-        tail -n "+$AGENT_LOG_FROM" "$AGENT_LOG" 2>/dev/null | tail -n 5 | logblock || true
+        warn "Нода пока не подключилась к панели."
+        if [[ -s "$AGENT_LOG" ]]; then
+            info "$AGENT_LOG — последние строки"
+            tail -n "+$AGENT_LOG_FROM" "$AGENT_LOG" 2>/dev/null | tail -n 5 | logblock || true
+        else
+            info "агент ещё ничего не записал — проверь: awg-ctrl status"
+        fi
     fi
 fi
 
-echo
 rule
 echo -e "  ${GRN}${BLD}✓ Готово${NC}  ${DIM}${BRAND} ${VERSION} · ${ROLE_LABEL}${NC}"
 rule
