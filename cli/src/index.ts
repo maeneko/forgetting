@@ -141,7 +141,13 @@ type SvcName = keyof typeof SERVICES;
 // панель без собственного VPN (только awg-ui). Иначе — обычная установка.
 const IS_NODE = !!process.env.CORE_HOST;
 const NO_LOCAL = (process.env.LOCAL_NODE ?? "on").toLowerCase() === "off";
-const ALL: SvcName[] = IS_NODE ? ["awgctrl", "agent"] : NO_LOCAL ? ["ui"] : ["awgctrl", "ui"];
+// Нода со своей панелью: работающий сервер «панель + VPN» подключили к главной панели, не
+// выключая его собственную (join без --no-panel). Обе панели ходят в один awg-ctrl — он и
+// есть источник правды, поэтому друг другу они не мешают. У ноды, поставленной install.sh,
+// панели нет (UI_PASS не задан).
+const NODE_PANEL = IS_NODE && !!process.env.UI_PASS && (process.env.NODE_PANEL ?? "on").toLowerCase() !== "off";
+const ALL: SvcName[] = IS_NODE ? (NODE_PANEL ? ["awgctrl", "ui", "agent"] : ["awgctrl", "agent"])
+    : NO_LOCAL ? ["ui"] : ["awgctrl", "ui"];
 
 function readPid(name: SvcName): number | null {
     const { pidFile } = SERVICES[name];
@@ -319,12 +325,12 @@ async function startAll() {
     if (!ALL.includes("awgctrl")) { for (const n of ALL) await start(n); return; }
 
     await start("awgctrl");
-    const next: SvcName = IS_NODE ? "agent" : "ui";
+    const rest = ALL.filter(n => n !== "awgctrl");
     if (!isRunning("awgctrl") || !(await waitForHealth("awgctrl"))) {
-        console.error(`  ${grey("■")} awg-ctrl не отвечает — ${SERVICES[next].label} не запущен (см. ${SERVICES.awgctrl.logFile})`);
+        console.error(`  ${grey("■")} awg-ctrl не отвечает — ${rest.map(n => SERVICES[n].label).join(", ")} не запущен (см. ${SERVICES.awgctrl.logFile})`);
         return;
     }
-    await start(next);
+    for (const n of rest) await start(n);
 }
 
 async function stopAll()    { for (const n of ALL) await stop(n); }
@@ -347,11 +353,12 @@ function restartFresh(): void {
     spawnSync(process.execPath, [...process.execArgv, process.argv[1], "restart"], { stdio: "inherit" });
 }
 
-// `join <awgjoin://…>`: превратить эту установку в ноду. Панель (awg-ui) на этой машине
-// останавливается, вместо неё запускается агент; awg-ctrl и пользователи остаются как были.
-async function joinCore(link?: string) {
-    if (!link?.startsWith("awgjoin://")) {
-        console.error("  Usage: awg-ctrl join <awgjoin://…>   (ссылку даёт панель: «Добавить сервер»)");
+// `join <awgjoin://…> [--no-panel]`: подключить эту установку к главной панели как ноду. Рядом
+// запускается агент; awg-ctrl и пользователи остаются как были. Своя панель (awg-ui) продолжает
+// работать, если она здесь есть, — с --no-panel она останавливается.
+async function joinCore(link?: string, flag?: string) {
+    if (!link?.startsWith("awgjoin://") || (flag !== undefined && flag !== "--no-panel")) {
+        console.error("  Usage: awg-ctrl join <awgjoin://…> [--no-panel]   (ссылку даёт панель: «Добавить сервер»)");
         process.exit(1);
     }
     let j: { v?: number; h?: string; p?: number; pin?: string; n?: number; s?: string };
@@ -364,15 +371,18 @@ async function joinCore(link?: string) {
     if (!ok) { console.error("  Ссылка неверного формата или от другой версии панели"); process.exit(1); }
     if (IS_NODE && !await confirmYes(`  Эта нода уже подключена к ${process.env.CORE_HOST}. Перепривязать?`)) return;
 
+    const keepPanel = flag !== "--no-panel" && !!process.env.UI_PASS;
     let content = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
     const set: Record<string, string> = {
         CORE_HOST: j.h!, CORE_PORT: String(j.p), CORE_PIN: j.pin!, NODE_ID: String(j.n), JOIN_SECRET: j.s!,
+        NODE_PANEL: keepPanel ? "on" : "off",
     };
     for (const [k, v] of Object.entries(set)) content = updateEnvVar(content, k, v);
     writeFileSync(envFile, content, { mode: 0o600 });
 
-    await stop("ui");                      // панель на ноде не нужна
-    console.log(`\n  ${green("✓")} Настроено: core ${j.h}:${j.p}, нода #${j.n}`);
+    if (!keepPanel) await stop("ui");
+    console.log(`\n  ${green("✓")} Настроено: core ${j.h}:${j.p}, нода #${j.n}` +
+        (keepPanel ? " · своя панель продолжает работать" : process.env.UI_PASS ? " · своя панель остановлена" : ""));
     restartFresh();
 }
 
@@ -380,7 +390,7 @@ async function unjoinCore() {
     if (!IS_NODE) { console.log("  Эта установка не подключена к core"); return; }
     await stop("agent");
     let content = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
-    for (const k of ["CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET"]) content = removeEnvVar(content, k);
+    for (const k of ["CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET", "NODE_PANEL"]) content = removeEnvVar(content, k);
     writeFileSync(envFile, content, { mode: 0o600 });
     console.log(`  ${green("✓")} Нода отвязана. Удалите её в панели (сервер) и запустите: awg-ctrl restart`);
     // Нода, поставленная install.sh с ролью «нода», панели не имеет — без пароля в неё не войти.
@@ -489,9 +499,9 @@ async function main() {
         return;
     }
 
-    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…>|unjoin>";
+    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin>";
 
-    const [,,, sub] = process.argv;
+    const [,,, sub, arg] = process.argv;
 
     switch (cmd) {
         case "start":       await startAll();                                  break;
@@ -503,7 +513,7 @@ async function main() {
             else if (sub === "pass") await setCredentials("pass");
             else await setCredentials();
             break;
-        case "join":        await joinCore(sub);                               break;
+        case "join":        await joinCore(sub, arg);                          break;
         case "unjoin":      await unjoinCore();                                break;
         default: console.log(USAGE); process.exit(1);
     }
