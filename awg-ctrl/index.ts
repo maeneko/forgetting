@@ -305,6 +305,7 @@ const stmts = {
     peerDelete:  db.prepare<[string]>("DELETE FROM peers WHERE pub_key = ?"),
     peerRekey:   db.prepare<[string, string]>("UPDATE peers SET pub_key = ? WHERE pub_key = ?"),
     peerPsk:     db.prepare<[string, string]>("UPDATE peers SET psk_key = ? WHERE pub_key = ?"),
+    peerOwner:   db.prepare<[string, string]>("UPDATE peers SET owner = ? WHERE pub_key = ?"),
     userPubTaken: db.prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM users WHERE pub_key = ?"),
     get:    db.prepare<[string], UserRow>("SELECT * FROM users WHERE name = ?"),
     all:    db.prepare<[], UserRow>("SELECT * FROM users"),
@@ -946,8 +947,52 @@ function removePeer(pub: string) {
     logger.info("peer removed", { owner: peer.owner });
 }
 
+// Сведение пиров одной панели: панель присылает полный список ключей, которые ей нужны
+// на этом сервере, — всё остальное из её области («<panel>/…») снимается. Удаляем только
+// по такому явному списку, никогда по времени или неактивности: панель не на связи —
+// ничего не происходит. Пиры без области (owner «m1/d2», выданы до областей) панель
+// забирает себе, только если их ключ есть в её списке; остальные не трогаем — чьи они,
+// уже не разобрать.
+const PANEL_ID     = /^[a-z0-9]{8,16}$/;
+const LEGACY_OWNER = /^m\d+\/d\d+$/;
+const SYNC_MAX     = 10_000;
+
+function syncOwnedPeers(panel: string, keep: string[]): {
+    present: string[]; removed: number; legacy: { pub_key: string; owner: string; ip: string }[];
+} {
+    const want = new Set(keep);
+    const prefix = panel + "/";
+    const removed: PeerRow[] = [];
+    let claimed = 0;
+    db.transaction(() => {
+        for (const p of stmts.peersAll.all()) {
+            if (p.owner.startsWith(prefix)) {
+                if (!want.has(p.pub_key)) { stmts.peerDelete.run(p.pub_key); removed.push(p); }
+            } else if (LEGACY_OWNER.test(p.owner) && want.has(p.pub_key)) {
+                stmts.peerOwner.run(prefix + p.owner, p.pub_key);
+                claimed++;
+            }
+        }
+    })();
+
+    for (const p of removed) spawnSync("awg", ["set", CONFIG.interface, "peer", p.pub_key, "remove"]);
+    if (removed.length || claimed) rebuildConf();
+    if (removed.length) logger.info("peers synced out", { panel, removed: removed.map(p => p.owner) });
+
+    const all = stmts.peersAll.all();
+    return {
+        present: all.filter(p => p.owner.startsWith(prefix)).map(p => p.pub_key),
+        removed: removed.length,
+        legacy:  all.filter(p => LEGACY_OWNER.test(p.owner)).map(p => ({ pub_key: p.pub_key, owner: p.owner, ip: p.ip })),
+    };
+}
+
 const app = express();
-app.use(express.json({ limit: "1kb" }));
+// Сведение пиров несёт полный список ключей панели — ему лимит побольше, остальным хватает 1kb.
+const SYNC_PATH = "/api/peers/sync";
+const jsonSmall = express.json({ limit: "1kb" });
+const jsonSync  = express.json({ limit: "512kb" });
+app.use((req, res, next) => (req.path === SYNC_PATH ? jsonSync : jsonSmall)(req, res, next));
 
 function verifyInternalToken(token: string): boolean {
     try {
@@ -1068,6 +1113,14 @@ app.get("/api/peers", auth, handler((_req, res) => {
             tx:            stats[p.pub_key]?.tx            ?? 0,
         })),
     });
+}));
+
+// Должен стоять ДО PUT /api/peers/:pub — иначе тот примет «sync» за ключ.
+app.put(SYNC_PATH, auth, handler((req, res) => {
+    const { owner, keep } = (req.body ?? {}) as { owner?: unknown; keep?: unknown };
+    if (typeof owner !== "string" || !PANEL_ID.test(owner)) throw new HttpError(400, "Неверный owner");
+    if (!Array.isArray(keep) || keep.length > SYNC_MAX) throw new HttpError(400, "Неверный список ключей");
+    res.json(syncOwnedPeers(owner, keep.map(checkPubKey)));
 }));
 
 app.put("/api/peers/:pub", auth, handler((req, res) => {

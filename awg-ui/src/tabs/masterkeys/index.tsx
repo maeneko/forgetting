@@ -10,7 +10,8 @@ import './masterkeys.css';
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
 // плюс лимит устройств; устройства регистрируются сами (приватный ключ остаётся
 // на них) и здесь только отображаются и отзываются. Формат — docs/sen-link.md.
-interface MasterKey { id: number; label: string; device_limit: number; devices: number; servers: number[]; created_at: number }
+// deleting — ключ удалён и уже не работает, но эти серверы ещё не подтвердили, что сняли его пиров.
+interface MasterKey { id: number; label: string; device_limit: number; devices: number; servers: number[]; created_at: number; deleting?: number[] }
 interface Device {
     id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null;
     rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number;
@@ -47,7 +48,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
             const list: MasterKey[] = d.keys ?? [];
             setKeys(list); setEnabled(!!d.enabled); setTls(!!d.tls);
             apiFetch('GET', '/ui/nodes', token).then(r => setNodes(r.nodes ?? [])).catch(() => {});
-            const all = await Promise.all(list.map(k =>
+            const all = await Promise.all(list.filter(k => !k.deleting).map(k =>
                 apiFetch('GET', `/ui/masterkeys/${k.id}/devices`, token).then(r => [k.id, r.devices ?? []] as const)));
             setDevs(Object.fromEntries(all));
         } catch { showMsg('Ошибка загрузки мастер-ключей'); }
@@ -71,10 +72,18 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         }, 'Мастер-ключ создан');
     }, [label, limit, nodes, token, act]);
 
+    const serverNames = useCallback((ids: number[]) =>
+        ids.map(id => nodes.find(n => n.id === id)?.name ?? `#${id}`).join(', '), [nodes]);
+
     const remove = useCallback(async (k: MasterKey) => {
         if (!confirm(`Удалить «${k.label}»? Все ${k.devices} устройств потеряют доступ.`)) return;
-        await act(() => apiFetch('DELETE', `/ui/masterkeys/${k.id}`, token), 'Удалён: ' + k.label);
-    }, [token, act]);
+        try {
+            const r = await apiFetch('DELETE', `/ui/masterkeys/${k.id}`, token);
+            const pending: number[] = r.pending ?? [];
+            showMsg(pending.length ? `«${k.label}» отключён, ждём подтверждения: ${serverNames(pending)}` : 'Удалён: ' + k.label);
+            await load();
+        } catch (e) { showMsg(errText(e)); }
+    }, [token, load, showMsg, serverNames]);
 
     const fetchLink = useCallback(async (k: MasterKey) => {
         const r = await apiFetch('GET', `/ui/masterkeys/${k.id}/link`, token);
@@ -100,6 +109,20 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const openTools = (k: MasterKey) => { setLimitEdit(String(k.device_limit)); setTools(tools === k.id ? null : k.id); };
 
     useEffect(() => { if (token) load(); }, [token, load]);
+
+    // Пока какой-то ключ ждёт серверы, время от времени проверяем, не подтвердили ли они.
+    const waiting = keys.some(k => k.deleting);
+    useEffect(() => {
+        if (!waiting) return;
+        const t = setInterval(load, 15_000);
+        return () => clearInterval(t);
+    }, [waiting, load]);
+
+    const deletingChip = (k: MasterKey) => (
+        <span className="chip chip--offline" title="Ключ уже не работает; строка исчезнет, когда серверы подтвердят, что сняли его устройства">
+            <span className="chip-dot" />Удаляется — ждёт: {serverNames(k.deleting ?? [])}
+        </span>
+    );
 
     const actions = (k: MasterKey) => (
         <div className="actions">
@@ -277,6 +300,12 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                         {keys.length === 0 ? (
                             <tr><td colSpan={9} className="empty">Нет мастер-ключей</td></tr>
                         ) : keys.map(k => {
+                            if (k.deleting) return (
+                                <tr key={k.id} className="mk-tr-master mk-last">
+                                    <td><span className="mk-name"><IcoKey />{k.label}</span></td>
+                                    <td colSpan={8}>{deletingChip(k)}</td>
+                                </tr>
+                            );
                             const list = devs[k.id] ?? [];
                             const free = Math.max(0, k.device_limit - list.length);
                             const open = !folded.has(k.id);
@@ -324,6 +353,15 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
             {keys.length === 0 ? <p className="mk-empty mk-tree">Нет мастер-ключей</p> : (
                 <ul className="mk-tree">
                     {keys.map(k => {
+                        if (k.deleting) return (
+                            <li className="mk-root" key={k.id}>
+                                <div className="mk-master">
+                                    <IcoKey />
+                                    <span className="mk-master-label">{k.label}</span>
+                                    {deletingChip(k)}
+                                </div>
+                            </li>
+                        );
                         const list = devs[k.id] ?? [];
                         const free = Math.max(0, k.device_limit - list.length);
                         const isFolded = folded.has(k.id);

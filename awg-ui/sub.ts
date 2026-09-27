@@ -16,6 +16,14 @@
 // хранит, какой ключ сейчас стоит на сервере, peer_tombstones — что там надо удалить,
 // а reconcile() приводит сервер к нужному состоянию, как только до него можно достучаться
 // (сразу при действии, при подключении ноды и раз в минуту).
+//
+// Каждый проход заканчивается сведением пиров панели (PUT /api/peers/sync): awg-ctrl
+// получает полный список ключей, которые этой панели нужны на сервере, и снимает из её
+// области всё остальное. Это страховка от пиров, чья судьба потерялась (ответ ноды не
+// дошёл, устройство удалили посреди прохода). Область — id панели в owner пира
+// («<panel>/m1/d2»): у ноды может быть своя панель на том же awg-ctrl, чужих не трогаем.
+// Удаляем только по такому списку, никогда по времени: панель не на связи — ничего не
+// происходит, неактивные устройства никто не снимает.
 import crypto from "crypto";
 import fs from "fs";
 import http from "http";
@@ -38,6 +46,7 @@ export interface Servers {
     ids(): number[];
     defaultId(): number;
     onOnline(cb: (id: number) => void): void;
+    beforeDelete(cb: (id: number, force: boolean) => Promise<{ error: string; forcible: boolean } | null>): void;
 }
 
 interface MasterRow {
@@ -69,13 +78,17 @@ const CLIENT_VERSION = /^[\w.+-]{1,32}$/;   // версия приложения
 const pubParam = (pub: string) => Buffer.from(pub, "base64").toString("base64url");
 
 // ── Простой лимитер по IP ──────────────────────────────────────────────────
-function makeLimiter(max: number, windowMs: number) {
+// onLimited зовётся один раз за окно — на первом отказе, чтобы лог не забивало.
+function makeLimiter(max: number, windowMs: number, onLimited?: (ip: string) => void) {
     const hits = new Map<string, { n: number; reset: number }>();
     return (ip: string): boolean => {
         const now = Date.now();
         const e = hits.get(ip);
         if (!e || e.reset < now) { hits.set(ip, { n: 1, reset: now + windowMs }); return true; }
-        if (e.n >= max) return false;
+        if (e.n >= max) {
+            if (e.n === max) { e.n++; onLimited?.(ip); }
+            return false;
+        }
         e.n++;
         return true;
     };
@@ -172,6 +185,10 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
             profile    TEXT    NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS sub_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     `);
     // Версия клиента — необязательное поле, добавленное позже: у уже созданной
     // таблицы колонки может не быть.
@@ -185,20 +202,37 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     uidb.exec(`
         INSERT OR IGNORE INTO master_servers (master_id, server_id)
             SELECT id, server_id FROM master_keys
-            WHERE id NOT IN (SELECT master_id FROM master_servers);
+            WHERE revoked_at IS NULL AND id NOT IN (SELECT master_id FROM master_servers);
         INSERT OR IGNORE INTO device_peers (device_id, server_id, peer_pub)
             SELECT d.id, m.server_id, d.pub_key FROM devices d JOIN master_keys m ON m.id = d.master_id
             WHERE d.id NOT IN (SELECT device_id FROM device_peers);
     `);
 
+    // Id панели — область её пиров на серверах. Живёт, пока живёт ui.db; копия в panel.id
+    // нужна CLI (у него нет SQLite), чтобы отличать пиров этой панели на awg-ctrl.
+    uidb.prepare("INSERT OR IGNORE INTO sub_meta (key, value) VALUES ('panel_id', ?)").run(crypto.randomBytes(6).toString("hex"));
+    const panelId = (uidb.prepare("SELECT value FROM sub_meta WHERE key = 'panel_id'").get() as { value: string }).value;
+    try { fs.writeFileSync(path.join(deps.baseDir, "panel.id"), panelId + "\n"); }
+    catch (e) { console.warn(`sub: не удалось записать panel.id: ${(e as Error).message}`); }
+
     const q = {
-        masters:      uidb.prepare("SELECT m.*, (SELECT COUNT(*) FROM devices d WHERE d.master_id = m.id) AS devices FROM master_keys m WHERE revoked_at IS NULL ORDER BY id"),
+        // И отозванные: удалённый ключ висит в списке, пока все его серверы не подтвердят удаление.
+        masters:      uidb.prepare("SELECT m.*, (SELECT COUNT(*) FROM devices d WHERE d.master_id = m.id) AS devices FROM master_keys m ORDER BY id"),
         masterById:   uidb.prepare<[number]>("SELECT * FROM master_keys WHERE id = ? AND revoked_at IS NULL"),
         masterBySecret: uidb.prepare<[Buffer]>("SELECT * FROM master_keys WHERE secret = ? AND revoked_at IS NULL"),
         masterInsert: uidb.prepare<[string, Buffer, number, number, number]>("INSERT INTO master_keys (label, secret, device_limit, server_id, created_at) VALUES (?, ?, ?, ?, ?)"),
         masterUpdate: uidb.prepare<[string, number, number]>("UPDATE master_keys SET label = ?, device_limit = ? WHERE id = ?"),
         masterSecret: uidb.prepare<[Buffer, number]>("UPDATE master_keys SET secret = ? WHERE id = ?"),
-        masterDelete: uidb.prepare<[number]>("DELETE FROM master_keys WHERE id = ?"),
+        masterRevoke: uidb.prepare<[number, number]>("UPDATE master_keys SET revoked_at = ? WHERE id = ?"),
+        // Сервер сведён и надгробий на нём нет — отозванным ключам он больше не нужен.
+        revokedServerDone: uidb.prepare<[number]>(
+            "DELETE FROM master_servers WHERE server_id = ? AND master_id IN (SELECT id FROM master_keys WHERE revoked_at IS NOT NULL)"),
+        revokedGone:  uidb.prepare("DELETE FROM master_keys WHERE revoked_at IS NOT NULL AND id NOT IN (SELECT master_id FROM master_servers)"),
+        liveOnServer: uidb.prepare<[number]>(
+            "SELECT m.label FROM master_servers s JOIN master_keys m ON m.id = s.master_id WHERE s.server_id = ? AND m.revoked_at IS NULL"),
+        revokedOnServer: uidb.prepare<[number]>(
+            "SELECT m.label FROM master_servers s JOIN master_keys m ON m.id = s.master_id WHERE s.server_id = ? AND m.revoked_at IS NOT NULL"),
+        serverRelease: uidb.prepare<[number]>("DELETE FROM master_servers WHERE server_id = ?"),
         serversOf:    uidb.prepare<[number]>("SELECT server_id FROM master_servers WHERE master_id = ? ORDER BY server_id"),
         serverAdd:    uidb.prepare<[number, number]>("INSERT OR IGNORE INTO master_servers (master_id, server_id) VALUES (?, ?)"),
         serverDel:    uidb.prepare<[number, number]>("DELETE FROM master_servers WHERE master_id = ? AND server_id = ?"),
@@ -228,6 +262,16 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         tombsOf:      uidb.prepare<[number]>("SELECT pub_key FROM peer_tombstones WHERE server_id = ?"),
         tombAdd:      uidb.prepare<[number, string]>("INSERT OR IGNORE INTO peer_tombstones (server_id, pub_key) VALUES (?, ?)"),
         tombDel:      uidb.prepare<[number, string]>("DELETE FROM peer_tombstones WHERE server_id = ? AND pub_key = ?"),
+        tombCount:    uidb.prepare<[number]>("SELECT COUNT(*) AS n FROM peer_tombstones WHERE server_id = ?"),
+        // Что панели нужно на сервере: текущий ключ каждого устройства и ключ, который там стоит
+        // сейчас (расходится с текущим, пока смена ключа не догнала сервер).
+        keepOf:       uidb.prepare<[number, number]>(`
+            SELECT d.pub_key AS pub FROM device_peers l JOIN devices d ON d.id = l.device_id WHERE l.server_id = ?
+            UNION SELECT peer_pub FROM device_peers WHERE server_id = ? AND peer_pub IS NOT NULL`),
+        // Связи, которые считаются сведёнными: на сервере должен стоять текущий ключ устройства.
+        linksSettled: uidb.prepare<[number]>(`
+            SELECT l.device_id, l.peer_pub FROM device_peers l JOIN devices d ON d.id = l.device_id
+            WHERE l.server_id = ? AND l.peer_pub = d.pub_key`),
         profileGet:   uidb.prepare<[number]>("SELECT profile FROM server_profiles WHERE server_id = ?"),
         profileSet:   uidb.prepare<[number, string, number]>(
             "INSERT INTO server_profiles (server_id, profile, updated_at) VALUES (?, ?, ?) ON CONFLICT(server_id) DO UPDATE SET profile = excluded.profile, updated_at = excluded.updated_at"),
@@ -290,7 +334,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         for (const l of q.linksToFix.all(id) as (LinkRow & { dev_pub: string; master_id: number })[]) {
             // null — не вышло, попробуем в следующий проход; "gone" — связь пропала, проход прекращаем.
             const add = async (): Promise<Peer | null | "gone"> => {
-                const r = await ctrl("POST", "/api/peers", { pub_key: l.dev_pub, owner: `m${l.master_id}/d${l.device_id}` });
+                const r = await ctrl("POST", "/api/peers", { pub_key: l.dev_pub, owner: `${panelId}/m${l.master_id}/d${l.device_id}` });
                 if (hasCtrlOk(r.status)) return r.data;
                 if (r.status === 409) return onServer(l.dev_pub);      // уже добавлен, но ответ потерялся
                 return gone(r.status) ? "gone" : null;
@@ -321,6 +365,33 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
             }
             q.linkSet.run(l.dev_pub, peer.ip, peer.psk_key, pending, l.device_id, id);
         }
+
+        await syncPeers(id, ctrl);
+    }
+
+    // Сведение пиров панели на сервере — в конце прохода и под его блокировкой: список строится
+    // из ui.db сейчас, поэтому устройство, удалённое посреди прохода, в него уже не попадёт, и
+    // ключ, поставленный для него этим проходом, снимется здесь же.
+    async function syncPeers(id: number, ctrl: Ctrl) {
+        const keep = (q.keepOf.all(id, id) as { pub: string }[]).map(r => r.pub);
+        const r = await ctrl("PUT", "/api/peers/sync", { owner: panelId, keep });
+        if (hasCtrlOk(r.status)) {
+            // Самолечение: ключ считается стоящим, а его нет (откат смены ключа после потерянного
+            // ответа, пир сняли руками) — забываем и ставим заново следующим проходом.
+            const present = new Set(r.data?.present as string[]);
+            let lost = 0;
+            for (const l of q.linksSettled.all(id) as { device_id: number; peer_pub: string }[]) {
+                if (present.has(l.peer_pub)) continue;
+                q.linkSet.run(null, null, null, 0, l.device_id, id);
+                lost++;
+            }
+            if (lost) void reconcile(id);
+        } else if (r.status !== 400 && r.status !== 413) {
+            return;     // 400/413 — awg-ctrl старше sync: чистим, как раньше, одними надгробиями
+        }
+        if ((q.tombCount.get(id) as { n: number }).n > 0) return;
+        q.revokedServerDone.run(id);
+        q.revokedGone.run();
     }
 
     /** Устройство удаляется: его пиров — в список на удаление, строку — из реестра. */
@@ -387,49 +458,69 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         verify: (req, _res, buf) => { (req as any).rawBody = buf; },
     }));
 
-    const registerLimit = makeLimiter(30, 15 * 60 * 1000);
-    const failLimit     = makeLimiter(30, 15 * 60 * 1000);
+    const limited = (what: string) => (ip: string) => console.warn(`sub: 429 ${what} ip=${ip} — лимит исчерпан на 15 минут`);
+    const registerLimit = makeLimiter(30, 15 * 60 * 1000, limited("register"));
+    const failLimit     = makeLimiter(30, 15 * 60 * 1000, limited("неудачные запросы"));
     const seenSigs      = new Map<string, number>(); // подпись → когда забыть
+    const ipOf = (req: Request) => req.socket.remoteAddress ?? "unknown";
 
-    function send(res: Response, status: number, payload: unknown) {
-        res.status(status).json(signResponse(payload, signKey as crypto.KeyObject));
+    // Ответ подписан и несёт эхо запроса: device (X-Sen-Device) и ts (X-Sen-Ts). Клиент сверяет
+    // их со своим запросом — иначе подсунуть ему можно было бы чужой подписанный ответ (чужой
+    // revoked, старый config), подпись ведь на запрос не завязана.
+    function send(req: Request, res: Response, status: number, payload: object) {
+        const echo: { device?: number; ts?: number } = {};
+        const device = Number(req.headers["x-sen-device"]), ts = Number(req.headers["x-sen-ts"]);
+        if (req.headers["x-sen-device"] !== undefined && Number.isSafeInteger(device)) echo.device = device;
+        if (req.headers["x-sen-ts"] !== undefined && Number.isSafeInteger(ts)) echo.ts = ts;
+        // Поля ответа важнее эха: device из тела register не перетрёт лишний заголовок.
+        res.status(status).json(signResponse({ ...echo, ...payload }, signKey as crypto.KeyObject));
     }
 
     // Проверка подписи запроса + защита от повторов. auth_pub — 32 байта.
-    function checkSigned(req: Request, authPub: Buffer): boolean {
+    // null — всё верно, иначе причина отказа (для лога).
+    function signFailure(req: Request, authPub: Buffer): string | null {
         const ts  = Number(req.headers["x-sen-ts"]);
         const sig = String(req.headers["x-sen-sig"] ?? "");
-        if (!Number.isInteger(ts) || Math.abs(ts - now()) > TS_WINDOW || !sig) return false;
+        if (!Number.isInteger(ts) || !sig) return "no_signature";
+        if (Math.abs(ts - now()) > TS_WINDOW) return `ts_window (часы клиента расходятся на ${ts - now()} с)`;
         const body = ((req as any).rawBody as Buffer | undefined) ?? Buffer.alloc(0);
-        if (!verifyRequest(req.method, req.path, ts, body, sig, authPub)) return false;
+        if (!verifyRequest(req.method, req.path, ts, body, sig, authPub)) return "bad_signature";
         const t = Date.now();
         for (const [k, exp] of seenSigs) if (exp < t) seenSigs.delete(k);
-        if (seenSigs.has(sig)) return false;
+        if (seenSigs.has(sig)) return "replay";
         seenSigs.set(sig, t + 2 * TS_WINDOW * 1000);
-        return true;
+        return null;
     }
 
     interface DevReq extends Request { device?: DeviceRow }
 
     function deviceAuth(req: Request, res: Response, next: NextFunction) {
         const id = Number(req.headers["x-sen-device"]);
-        const dev = Number.isInteger(id) ? q.deviceById.get(id) as DeviceRow | undefined : undefined;
-        if (dev && checkSigned(req, Buffer.from(dev.auth_pub, "base64url"))) {
+        const dev = Number.isSafeInteger(id) && id > 0 ? q.deviceById.get(id) as DeviceRow | undefined : undefined;
+        // Устройства нет — его удалили (id не переиспользуются: AUTOINCREMENT). Отвечаем 410,
+        // чтобы клиент снял конфиг, и не считаем в лимит неудач: такие клиенты опрашивают
+        // по таймеру и иначе выбивали бы лимит соседям за тем же NAT. Существующему
+        // устройству 410 не выдать, поэтому подписанный ответ тут можно отдать без проверки.
+        if (!dev && Number.isSafeInteger(id) && id > 0) { send(req, res, 410, { error: "revoked" }); return; }
+        const why = dev ? signFailure(req, Buffer.from(dev.auth_pub, "base64url")) : "no_device";
+        if (!why) {
             (req as DevReq).device = dev;
             next();
             return;
         }
         // Лимитируем только неудачи: живой клиент, опрашивающий config, под лимит не попадает.
-        if (!failLimit(req.socket.remoteAddress ?? "unknown")) { send(res, 429, { error: "rate_limited" }); return; }
-        send(res, 401, { error: "unauthorized" });
+        const ip = ipOf(req);
+        if (!failLimit(ip)) { send(req, res, 429, { error: "rate_limited" }); return; }
+        console.warn(`sub: 401 ${req.method} ${req.path} device=${req.headers["x-sen-device"] ?? "-"} ${why} ip=${ip}`);
+        send(req, res, 401, { error: "unauthorized" });
     }
 
     const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
-        (req: Request, res: Response) => { fn(req, res).catch(() => { send(res, 502, { error: "unavailable" }); }); };
+        (req: Request, res: Response) => { fn(req, res).catch(() => { send(req, res, 502, { error: "unavailable" }); }); };
 
     sub.post("/sub/v1/register", wrap(async (req, res) => {
-        const ip = req.socket.remoteAddress ?? "unknown";
-        if (!registerLimit(ip)) { send(res, 429, { error: "rate_limited" }); return; }
+        const ip = ipOf(req);
+        if (!registerLimit(ip)) { send(req, res, 429, { error: "rate_limited" }); return; }
 
         const b = (req.body ?? {}) as Record<string, unknown>;
         const str = (v: unknown, re: RegExp) => typeof v === "string" && re.test(v) ? v : null;
@@ -440,16 +531,21 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         const name = typeof b.device_name === "string" ? b.device_name.slice(0, 64) : "";
         const platform = typeof b.platform === "string" ? b.platform.slice(0, 32) : "";
         const version = str(b.version, CLIENT_VERSION) ?? "";
-        if (!secretB || !deviceId || !pubKey || !authPubS) { send(res, 400, { error: "bad_request" }); return; }
+        if (!secretB || !deviceId || !pubKey || !authPubS) { send(req, res, 400, { error: "bad_request" }); return; }
 
         // Регистрация подписана ключом auth_pub из самого тела — доказательство владения.
         const authPub = Buffer.from(authPubS, "base64url");
-        if (authPub.length !== 32 || !checkSigned(req, authPub)) { send(res, 401, { error: "unauthorized" }); return; }
+        const why = authPub.length !== 32 ? "bad_auth_pub" : signFailure(req, authPub);
+        if (why) {
+            console.warn(`sub: 401 register ${why} ip=${ip}`);
+            send(req, res, 401, { error: "unauthorized" });
+            return;
+        }
 
         const master = q.masterBySecret.get(Buffer.from(secretB, "base64url")) as MasterRow | undefined;
-        if (!master) { send(res, 404, { error: "not_found" }); return; }
+        if (!master) { send(req, res, 404, { error: "not_found" }); return; }
         const serverIds = serverIdsOf(master.id).filter(id => servers.exists(id));
-        if (serverIds.length === 0) { send(res, 502, { error: "unavailable" }); return; }
+        if (serverIds.length === 0) { send(req, res, 502, { error: "unavailable" }); return; }
 
         let deviceRowId = 0;
         let touched: number[] = [];
@@ -463,8 +559,8 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
                 for (const sid of serverIds) q.linkAdd.run(deviceRowId, sid);
             })();
         } catch (e: any) {
-            if (e?.code === "limit") { send(res, 403, { error: "device_limit" }); return; }
-            send(res, 409, { error: "conflict" }); return; // UNIQUE: pub_key/auth_pub уже заняты
+            if (e?.code === "limit") { send(req, res, 403, { error: "device_limit" }); return; }
+            send(req, res, 409, { error: "conflict" }); return; // UNIQUE: pub_key/auth_pub уже заняты
         }
 
         await reconcileAll([...touched, ...serverIds]);
@@ -473,12 +569,12 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         if (cfg.servers.length === 0) {
             // Ни один сервер пира не принял — регистрацию откатываем, клиент повторит позже.
             await reconcileAll(forgetDevice(dev));
-            send(res, 502, { error: "unavailable" });
+            send(req, res, 502, { error: "unavailable" });
             return;
         }
         // devices / device_limit: сколько мест занято с этим устройством — клиент показывает это сразу,
         // без отдельного запроса списка.
-        send(res, 201, {
+        send(req, res, 201, {
             device: dev.id, config: cfg,
             devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit,
         });
@@ -488,15 +584,15 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     // регистрировали. Запрос не подписан устройством (его ещё нет): доступ по секрету из ссылки, как у register,
     // а ответ подписан, как всегда. Неверный секрет считается в failLimit — секрет не перебрать.
     sub.post("/sub/v1/peek", wrap(async (req, res) => {
-        const ip = req.socket.remoteAddress ?? "unknown";
+        const ip = ipOf(req);
         const secretB = typeof (req.body as any)?.sub === "string" && /^[A-Za-z0-9_-]{22}$/.test((req.body as any).sub) ? (req.body as any).sub as string : null;
         const master = secretB ? q.masterBySecret.get(Buffer.from(secretB, "base64url")) as MasterRow | undefined : undefined;
         if (!master) {
-            if (!failLimit(ip)) { send(res, 429, { error: "rate_limited" }); return; }
-            send(res, secretB ? 404 : 400, { error: secretB ? "not_found" : "bad_request" });
+            if (!failLimit(ip)) { send(req, res, 429, { error: "rate_limited" }); return; }
+            send(req, res, secretB ? 404 : 400, { error: secretB ? "not_found" : "bad_request" });
             return;
         }
-        send(res, 200, { devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit });
+        send(req, res, 200, { devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit });
     }));
 
     sub.get("/sub/v1/config", deviceAuth, wrap(async (req, res) => {
@@ -505,7 +601,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         // Версия клиента меняется при обновлении приложения; заголовок не подписан — это лишь подпись в панели.
         const v = String(req.headers["x-sen-version"] ?? "");
         if (CLIENT_VERSION.test(v) && v !== dev.version) q.deviceVersion.run(v, dev.id);
-        send(res, 200, { config: await readyConfig(dev, req) });
+        send(req, res, 200, { config: await readyConfig(dev, req) });
     }));
 
     // Устройства того же мастер-ключа: клиент показывает их на вкладке «Ключ». Только чтение — отвязать
@@ -513,8 +609,8 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     sub.get("/sub/v1/devices", deviceAuth, wrap(async (req, res) => {
         const dev = (req as DevReq).device as DeviceRow;
         const master = q.masterById.get(dev.master_id) as MasterRow | undefined;
-        if (!master) { send(res, 404, { error: "not_found" }); return; }
-        send(res, 200, {
+        if (!master) { send(req, res, 404, { error: "not_found" }); return; }
+        send(req, res, 200, {
             name: master.label,
             device_limit: master.device_limit,
             devices: (q.devicesOf.all(master.id) as DeviceRow[]).map(d => ({
@@ -529,10 +625,10 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     sub.post("/sub/v1/rekey", deviceAuth, wrap(async (req, res) => {
         const dev = (req as DevReq).device as DeviceRow;
         const pub = (req.body as { pub_key?: unknown } | undefined)?.pub_key;
-        if (typeof pub !== "string" || !B64_PUB.test(pub)) { send(res, 400, { error: "bad_request" }); return; }
-        if (pub === dev.pub_key) { send(res, 200, { config: await readyConfig(dev, req) }); return; }
+        if (typeof pub !== "string" || !B64_PUB.test(pub)) { send(req, res, 400, { error: "bad_request" }); return; }
+        if (pub === dev.pub_key) { send(req, res, 200, { config: await readyConfig(dev, req) }); return; }
         try { q.devicePub.run(pub, 0, dev.id); }
-        catch { send(res, 409, { error: "conflict" }); return; }  // этот ключ уже у другого устройства
+        catch { send(req, res, 409, { error: "conflict" }); return; }  // этот ключ уже у другого устройства
 
         const ids = (q.linksOf.all(dev.id) as LinkRow[]).map(l => l.server_id);
         await reconcileAll(ids);
@@ -540,21 +636,21 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         if (cfg.servers.length === 0) {
             q.devicePub.run(dev.pub_key, dev.rekey_requested, dev.id);
             await reconcileAll(ids);                             // вернуть старый ключ туда, где успели сменить
-            send(res, 502, { error: "unavailable" });
+            send(req, res, 502, { error: "unavailable" });
             return;
         }
-        send(res, 200, { config: cfg });
+        send(req, res, 200, { config: cfg });
     }));
 
     sub.delete("/sub/v1/device", deviceAuth, wrap(async (req, res) => {
         const dev = (req as DevReq).device as DeviceRow;
         await reconcileAll(forgetDevice(dev));
-        send(res, 200, { ok: true });
+        send(req, res, 200, { ok: true });
     }));
 
-    sub.use((_req, res) => { send(res, 404, { error: "not_found" }); });
+    sub.use((req, res) => { send(req, res, 404, { error: "not_found" }); });
     // Битый JSON и т. п.: ответ всё равно подписан, чтобы клиент мог ему доверять.
-    sub.use((_err: unknown, _req: Request, res: Response, _next: NextFunction) => { send(res, 400, { error: "bad_request" }); });
+    sub.use((_err: unknown, req: Request, res: Response, _next: NextFunction) => { send(req, res, 400, { error: "bad_request" }); });
 
     // ── Админ-роуты панели (монтируются в server.ts за JWT) ─────────────────
     const aw = (fn: (req: Request, res: Response) => Promise<void>) =>
@@ -578,9 +674,11 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         res.json({
             enabled: signKey !== null,
             tls: tlsPin !== null,
+            // deleting — ключ удалён, но эти серверы ещё не подтвердили, что сняли его пиров.
             keys: (q.masters.all() as (MasterRow & { devices: number })[]).map(m => ({
                 id: m.id, label: m.label, device_limit: m.device_limit,
                 devices: m.devices, servers: serverIdsOf(m.id), created_at: m.created_at,
+                ...(m.revoked_at !== null ? { deleting: serverIdsOf(m.id) } : {}),
             })),
         });
     });
@@ -651,14 +749,19 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         res.json({ id: m.id });
     });
 
+    // Ключ сразу перестаёт работать (ссылка, регистрация, устройства), но строка остаётся
+    // отозванной, пока каждый его сервер не подтвердит, что снял пиров, — иначе панель
+    // сказала бы «удалён», пока на офлайн-ноде устройства ещё подключаются.
     masterKeys.delete("/:id", aw(async (req, res) => {
         const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
         if (!m) { res.status(404).json({ error: "Не найден" }); return; }
-        const affected: number[] = [];
-        for (const d of q.devicesOf.all(m.id) as DeviceRow[]) affected.push(...forgetDevice(d));
-        q.masterDelete.run(m.id); // master_servers уйдут каскадом
+        const affected = serverIdsOf(m.id);
+        uidb.transaction(() => {
+            for (const d of q.devicesOf.all(m.id) as DeviceRow[]) affected.push(...forgetDevice(d));
+            q.masterRevoke.run(now(), m.id);
+        })();
         await reconcileAll(affected);
-        res.json({ success: true, id: m.id });
+        res.json({ success: true, id: m.id, pending: serverIdsOf(m.id) });
     }));
 
     masterKeys.get("/:id/link", (req, res) => {
@@ -734,6 +837,26 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
 
     // ── Листенер и фоновое сведение ────────────────────────────────────────
     servers.onOnline(id => { void reconcile(id); });
+
+    // Сервер удаляют из реестра: пока им пользуется живой мастер-ключ — нельзя. Иначе сперва
+    // сводим его (ключи его не используют, значит, список пуст и пиры панели снимутся) — после
+    // удаления до него уже не дотянуться. Не вышло (нода не в сети) — удалять только с force.
+    servers.beforeDelete(async (id, force) => {
+        const live = (q.liveOnServer.all(id) as { label: string }[]).map(r => r.label);
+        if (live.length) return { error: `Сервер в мастер-ключах: ${live.join(", ")} — сначала уберите его оттуда`, forcible: false };
+        if (servers.isOnline(id)) await reconcile(id);
+        const waiting = (q.revokedOnServer.all(id) as { label: string }[]).map(r => r.label);
+        const tombs = (q.tombCount.get(id) as { n: number }).n;
+        if (!waiting.length && !tombs) return null;
+        if (!force) return {
+            error: "Сервер не подтвердил, что снял пиров" + (waiting.length ? ` удалённых мастер-ключей (${waiting.join(", ")})` : "") +
+                ". Дождитесь, пока он выйдет на связь, или удалите принудительно — тогда пиры могут остаться на нём (снять: awg-ctrl peers drop)",
+            forcible: true,
+        };
+        q.serverRelease.run(id);
+        q.revokedGone.run();
+        return null;
+    });
 
     function start() {
         // Сводим и без подписки: у ключей могут остаться хвосты на удаление.

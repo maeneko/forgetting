@@ -383,10 +383,148 @@ async function joinCore(link?: string, flag?: string) {
     for (const [k, v] of Object.entries(set)) content = updateEnvVar(content, k, v);
     writeFileSync(envFile, content, { mode: 0o600 });
 
+    // Панель останавливается, а пиры её устройств остаются на awg-ctrl — управлять ими больше
+    // некому. Решает оператор; спрашиваем до остановки, снимаем после (иначе панель вернёт их).
+    const dropPeers = !keepPanel && process.env.UI_PASS ? await askDropPanelPeers() : false;
     if (!keepPanel) await stop("ui");
+    if (dropPeers) await dropArea(localPanelId()!);
     console.log(`\n  ${green("✓")} Настроено: core ${j.h}:${j.p}, нода #${j.n}` +
         (keepPanel ? " · своя панель продолжает работать" : process.env.UI_PASS ? " · своя панель остановлена" : ""));
     restartFresh();
+}
+
+// ── Пиры подписки (sen://) на локальном awg-ctrl ──────────────────────────────
+// Пира ставит панель, owner = «<id панели>/m<ключ>/d<устройство>»: id — область панели.
+// У ноды со своей панелью на одном awg-ctrl две области (своя и core). Пиры без области
+// («m1/d2») выданы до областей. Снимает их awg-ctrl по полному списку от панели
+// (PUT /api/peers/sync); пустой список = снять всю область. Здесь — ручной рычаг для
+// оператора: панель выключена или core пропал насовсем. По времени ничего не удаляется.
+const PANEL_ID_FILE = path.join(ROOT, "awg-ui", "panel.id");
+const AREA_RE       = /^[a-z0-9]{8,16}$/;
+const LEGACY_OWNER  = /^m\d+\/d\d+$/;
+
+function localPanelId(): string | null {
+    try { const id = readFileSync(PANEL_ID_FILE, "utf8").trim(); return AREA_RE.test(id) ? id : null; }
+    catch { return null; }
+}
+
+// Тот же короткоживущий токен, что awg-ui и awg-agent шлют awg-ctrl (Ed25519, 60 с).
+function mintInternalToken(): string {
+    const key = crypto.createPrivateKey(readFileSync(SERVICES.ui.env.INTERNAL_AUTH_KEY_FILE));
+    const t = Math.floor(Date.now() / 1000);
+    const h = Buffer.from('{"alg":"EdDSA","typ":"JWT"}').toString("base64url");
+    const p = Buffer.from(JSON.stringify({ iss: "awg-cli", iat: t, exp: t + 60 })).toString("base64url");
+    return `${h}.${p}.${crypto.sign(null, Buffer.from(`${h}.${p}`), key).toString("base64url")}`;
+}
+
+function ctrlCall(method: string, urlPath: string, body?: unknown): Promise<{ status: number; data: any }> {
+    return new Promise((resolve, reject) => {
+        const payload = body === undefined ? undefined : JSON.stringify(body);
+        const req = http.request({
+            host: "127.0.0.1", port: Number(SERVICES.awgctrl.env.PORT), method, path: urlPath, timeout: 30_000,
+            headers: {
+                Authorization: `Bearer ${mintInternalToken()}`, "Content-Type": "application/json",
+                ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+            },
+        }, res => {
+            let raw = "";
+            res.on("data", c => { raw += c; });
+            res.on("end", () => { try { resolve({ status: res.statusCode ?? 0, data: JSON.parse(raw) }); } catch { resolve({ status: res.statusCode ?? 0, data: null }); } });
+        });
+        req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error("timeout")));
+        req.end(payload);
+    });
+}
+
+interface CtrlPeer { pub_key: string; ip: string; owner: string; online: boolean }
+
+async function listPeers(): Promise<CtrlPeer[]> {
+    const r = await ctrlCall("GET", "/api/peers");
+    if (r.status !== 200) throw new Error(r.data?.error ?? `awg-ctrl ответил ${r.status}`);
+    return r.data.peers as CtrlPeer[];
+}
+
+// Область пира: id панели, «legacy» (до областей) или null (чужой формат — не наш).
+function areaOf(owner: string): string | null {
+    const head = owner.split("/")[0];
+    if (owner.includes("/") && AREA_RE.test(head)) return head;
+    return LEGACY_OWNER.test(owner) ? "legacy" : null;
+}
+
+const peersWord = (n: number) =>
+    n % 10 === 1 && n % 100 !== 11 ? "пир" : [2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100) ? "пира" : "пиров";
+
+async function askDropPanelPeers(): Promise<boolean> {
+    const own = localPanelId();
+    if (!own) return false;
+    let n: number;
+    try { n = (await listPeers()).filter(p => areaOf(p.owner) === own).length; }
+    catch (e) { console.warn(`  ${dim(`Не удалось посмотреть пиров подписки: ${(e as Error).message}`)}`); return false; }
+    if (n === 0) return false;
+
+    const preset = (process.env.NODE_PEERS ?? "").toLowerCase();
+    if (preset === "keep" || preset === "drop") return preset === "drop";
+    console.log(`\n  На этой панели ${n} ${peersWord(n)} подписки (устройства мастер-ключей). Без панели ими некому управлять:`);
+    console.log(`    1) Оставить — продолжат работать, отозвать их можно будет только после unjoin`);
+    console.log(`    2) Отключить — снять их с VPN (ключи останутся в ui.db и вернутся после unjoin)`);
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const a = await new Promise<string>(r => rl.question("  Выбор [1]: ", r));
+    rl.close();
+    return a.trim() === "2";
+}
+
+// Снять всю область: для панели — пустым списком через sync, для legacy — по одному.
+async function dropArea(area: string): Promise<void> {
+    try {
+        if (area === "legacy") {
+            const legacy = (await listPeers()).filter(p => areaOf(p.owner) === "legacy");
+            for (const p of legacy) await ctrlCall("DELETE", `/api/peers/${Buffer.from(p.pub_key, "base64").toString("base64url")}`);
+            console.log(`  ${green("✓")} Снято пиров без области: ${legacy.length}`);
+            return;
+        }
+        const r = await ctrlCall("PUT", "/api/peers/sync", { owner: area, keep: [] });
+        if (r.status !== 200) throw new Error(r.data?.error ?? `awg-ctrl ответил ${r.status}`);
+        console.log(`  ${green("✓")} Снято пиров области ${area}: ${r.data.removed}`);
+    } catch (e) {
+        console.error(`  Не удалось снять пиров: ${(e as Error).message}`);
+    }
+}
+
+async function peersCmd(sub?: string, arg?: string) {
+    const own = localPanelId();
+    let peers: CtrlPeer[];
+    try { peers = await listPeers(); }
+    catch (e) { console.error(`  awg-ctrl недоступен: ${(e as Error).message}`); process.exit(1); }
+    const areas = new Map<string, CtrlPeer[]>();
+    for (const p of peers) { const a = areaOf(p.owner); if (a) areas.set(a, [...(areas.get(a) ?? []), p]); }
+
+    if (sub === undefined) {
+        if (!areas.size) { console.log("  Пиров подписки (sen://) на этом сервере нет"); return; }
+        console.log("\n  Пиры подписки (sen://) на этом сервере:\n");
+        for (const [a, list] of areas) {
+            const mark = a === own ? "эта панель" : a === "legacy" ? "без области (выданы до областей)" : "";
+            console.log(`    ${bold(a.padEnd(16))} ${String(list.length).padStart(4)} ${peersWord(list.length).padEnd(5)}` +
+                `  онлайн ${list.filter(p => p.online).length}  ${dim(mark)}`);
+        }
+        console.log(`\n  ${dim("Снять область целиком: awg-ctrl peers drop <область>")}`);
+        return;
+    }
+    if (sub !== "drop" || !arg || !(arg === "legacy" || AREA_RE.test(arg))) {
+        console.error("  Usage: awg-ctrl peers [drop <область|legacy>]");
+        process.exit(1);
+    }
+    const n = areas.get(arg)?.length ?? 0;
+    if (!n) { console.log(`  В области ${arg} пиров нет`); return; }
+    // Панель, которая ведёт эту область, вернёт пиров при следующем сведении — снимать бесполезно.
+    if (arg === own && isRunning("ui")) {
+        console.error("  Эту область ведёт панель на этой машине — удаляйте мастер-ключи или устройства в ней");
+        process.exit(1);
+    }
+    console.log(`  ${dim("Если панель этой области ещё ведёт сервер, она вернёт пиров при следующем сведении —")}`);
+    console.log(`  ${dim("сперва удалите сервер в ней (или мастер-ключи).")}`);
+    if (!await confirmYes(`  Снять ${n} ${peersWord(n)} области ${arg}? Их устройства потеряют доступ к этому серверу.`)) return;
+    await dropArea(arg);
 }
 
 async function unjoinCore() {
@@ -502,7 +640,7 @@ async function main() {
         return;
     }
 
-    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin>";
+    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|peers [drop <область>]>";
 
     const [,,, sub, arg] = process.argv;
 
@@ -518,6 +656,7 @@ async function main() {
             break;
         case "join":        await joinCore(sub, arg);                          break;
         case "unjoin":      await unjoinCore();                                break;
+        case "peers":       await peersCmd(sub, arg);                          break;
         default: console.log(USAGE); process.exit(1);
     }
 }

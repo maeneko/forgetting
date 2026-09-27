@@ -4,6 +4,7 @@
 **/node_modules/
 **/dist/
 cli/cli.env
+awg-ui/panel.id
 logs/
 npm-debug.log*
 yarn-debug.log*

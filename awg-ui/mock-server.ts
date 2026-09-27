@@ -48,15 +48,15 @@ let apiId = 1;
 
 // ── мастер-ключи sen:// ──
 interface Dev { id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null; rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number }
-interface MK { id: number; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[] }
+interface MK { id: number; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
 let mkId = 1, devId = 1;
 const dev = (name: string, platform: string, online: boolean, version = "0.6.5"): Dev => ({ id: devId++, device_id: crypto.randomUUID(), device_name: name, platform, version, created_at: now() - 86400, last_seen: now() - rnd(900), rekey_requested: false, online, lastHandshake: now() - rnd(300), rx: rnd(9e8), tx: rnd(3e8) });
 const masters: MK[] = [{ id: mkId++, label: "Семья", device_limit: 3, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1] }];
 const signPub = crypto.randomBytes(32);
-const mkOut = (m: MK) => ({ id: m.id, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at });
+const mkOut = (m: MK) => ({ id: m.id, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
 // Мок: устройство «догнано» на всех серверах ключа, кроме Tokyo (id 2 — ещё не подключалась).
 const devOut = (m: MK, d: Dev) => ({ ...d, servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
-const find = (id: string) => masters.find(m => m.id === Number(id));
+const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
 
 app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: "0.2.2-mock" }));
 app.post("/login", (q, r) => q.body.user === "admin" && q.body.pass === "admin" ? r.json({ token: "mock." + crypto.randomBytes(8).toString("hex") + ".sig" }) : r.status(401).json({ error: "Неверный логин или пароль" }));
@@ -80,7 +80,16 @@ app.post("/ui/nodes", (q, r) => {
     r.status(201).json({ id, name, join: joinStr(id), expires_in: 3600 });
 });
 app.post("/ui/nodes/:id/join", (q, r) => { const n = mnodes.find(x => x.id === Number(q.params.id)); n ? r.json({ id: n.id, name: n.name, join: joinStr(n.id), expires_in: 3600 }) : r.status(404).json({ error: "Не найден" }); });
-app.delete("/ui/nodes/:id", (q, r) => { const i = mnodes.findIndex(x => x.id === Number(q.params.id)); if (i < 0) return r.status(404).json({ error: "Не найден" }); mnodes.splice(i, 1); r.json({ success: true }); });
+app.delete("/ui/nodes/:id", (q, r) => {
+    const id = Number(q.params.id), i = mnodes.findIndex(x => x.id === id); if (i < 0) return r.status(404).json({ error: "Не найден" });
+    if (masters.some(m => !m.deleting && m.servers.includes(id))) return r.status(409).json({ error: "Сервер в мастер-ключах — сначала уберите его оттуда", can_force: false });
+    const waiting = masters.filter(m => m.deleting?.includes(id));
+    if (waiting.length && q.query.force !== "1")
+        return r.status(409).json({ error: `Сервер не подтвердил, что снял пиров удалённых мастер-ключей (${waiting.map(m => m.label).join(", ")})`, can_force: true });
+    for (const m of waiting) m.deleting = m.deleting!.filter(x => x !== id);
+    for (const m of waiting) if (!m.deleting!.length) masters.splice(masters.indexOf(m), 1);
+    mnodes.splice(i, 1); r.json({ success: true });
+});
 app.post("/awg/restart", (_q, r) => r.json({ up: true }));
 app.get("/awg/status", (_q, r) => r.json({ up: true, peers: users.length }));
 
@@ -116,7 +125,12 @@ app.patch("/ui/masterkeys/:id", (q, r) => {
 });
 app.post("/ui/masterkeys/:id/rotate", (q, r) => { const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" }); m.secret = crypto.randomBytes(16); r.json({ id: m.id }); });
 app.post("/ui/masterkeys/:id/rekey", (q, r) => { const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" }); m.devs.forEach(d => d.rekey_requested = true); r.json({ id: m.id }); });
-app.delete("/ui/masterkeys/:id", (q, r) => { const i = masters.findIndex(m => m.id === Number(q.params.id)); if (i >= 0) masters.splice(i, 1); r.json({ success: true }); });
+app.delete("/ui/masterkeys/:id", (q, r) => {
+    const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
+    const pending = m.servers.filter(id => id !== 0 && !mnodes.find(n => n.id === id)?.online);
+    if (pending.length) { m.deleting = pending; m.devs = []; } else masters.splice(masters.indexOf(m), 1);
+    r.json({ success: true, id: m.id, pending });
+});
 app.get("/ui/masterkeys/:id/link", (q, r) => {
     const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
     r.json({ link: encodeSenLink({ tls: false, addrs: [{ host: "203.0.113.7", port: 41234 }], secret: m.secret, signPub, name: m.label }), tls: false });

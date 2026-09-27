@@ -102,7 +102,15 @@ export default function App() {
     const deleteNode = useCallback(async (n: NodeInfo) => {
         if (!confirm(`Удалить сервер «${n.name}»? Нода отключится от панели.`)) return;
         try {
-            await apiFetch('DELETE', `/ui/nodes/${n.id}`, token);
+            try {
+                await apiFetch('DELETE', `/ui/nodes/${n.id}`, token);
+            } catch (e) {
+                // Сервер не подтвердил, что снял пиров удалённых мастер-ключей (не в сети) —
+                // панель объясняет, что останется, и удаляет только с согласия.
+                const data = axios.isAxiosError(e) ? e.response?.data : undefined;
+                if (!data?.can_force || !confirm(`${data.error}\n\nВсё равно удалить «${n.name}»?`)) throw e;
+                await apiFetch('DELETE', `/ui/nodes/${n.id}?force=1`, token);
+            }
             showMsg('Сервер удалён');
             await loadNodes(token);
         } catch (e) {
