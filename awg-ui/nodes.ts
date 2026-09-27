@@ -25,7 +25,7 @@ export type Ctrl = (method: string, urlPath: string, body?: unknown) => Promise<
 interface NodeRow {
     id: number; name: string; pub: string | null;
     join_hash: Buffer | null; join_expires: number | null;
-    created_at: number; last_seen: number | null;
+    created_at: number; last_seen: number | null; version: string | null;
 }
 
 interface Health {
@@ -46,11 +46,12 @@ const RPC_TIMEOUT   = 15_000;
 const RPC_SLOW      = 120_000;       // /awg/*: рестарт и upgrade идут долго
 const NAME_RE       = /^[^\r\n<>]{1,40}$/;
 const HOST_RE       = /^[A-Za-z0-9.:_-]{1,253}$/;
+const VERSION_RE    = /^[\w.+-]{1,32}$/;
 
 // Сообщение, которое нода подписывает своим ключом. Дублируется в awg-agent.
 const authMsg = (nonce: string, nodeId: number) => Buffer.from(`awg-node-v1\n${nonce}\n${nodeId}`);
 
-export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; baseDir: string }) {
+export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; baseDir: string; version: string }) {
     const { uidb, ctrlLocal } = deps;
 
     const NODE_PORT = Number(process.env.NODE_PORT) || 0;
@@ -94,6 +95,10 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
             last_seen    INTEGER
         );
     `);
+    // Версия Forgetting на ноде — из кадра auth (агенты до 0.3.4 её не присылают). Колонка
+    // добавлена позже, у существующей таблицы её может не быть.
+    if (!(uidb.prepare("PRAGMA table_info(nodes)").all() as { name: string }[]).some(c => c.name === "version"))
+        uidb.exec("ALTER TABLE nodes ADD COLUMN version TEXT");
     const q = {
         all:    uidb.prepare("SELECT * FROM nodes ORDER BY id"),
         byId:   uidb.prepare<[number]>("SELECT * FROM nodes WHERE id = ?"),
@@ -101,7 +106,7 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         rename: uidb.prepare<[string, number]>("UPDATE nodes SET name = ? WHERE id = ?"),
         rejoin: uidb.prepare<[Buffer, number, number]>("UPDATE nodes SET join_hash = ?, join_expires = ? WHERE id = ? AND pub IS NULL"),
         bind:   uidb.prepare<[string, number]>("UPDATE nodes SET pub = ?, join_hash = NULL, join_expires = NULL WHERE id = ?"),
-        seen:   uidb.prepare<[number, number]>("UPDATE nodes SET last_seen = ? WHERE id = ?"),
+        seen:   uidb.prepare<[number, string | null, number]>("UPDATE nodes SET last_seen = ?, version = ? WHERE id = ?"),
         delete: uidb.prepare<[number]>("DELETE FROM nodes WHERE id = ?"),
     };
     const now = () => Math.floor(Date.now() / 1000);
@@ -225,7 +230,9 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
 
             clearTimeout(authTimer);
             if (joining) q.bind.run(pubB64 as string, row.id);
-            q.seen.run(now(), row.id);
+            // Версия — только для показа в панели: не подписана, но и доверия не даёт.
+            const version = typeof m.version === "string" && VERSION_RE.test(m.version) ? m.version : null;
+            q.seen.run(now(), version, row.id);
 
             const old = conns.get(row.id);
             conn = { ws, seq: 0, alive: true, pending: new Map() };
@@ -303,15 +310,15 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         const nodes: unknown[] = [];
         if (LOCAL) {
             const h = health.get(0) ?? null;
-            nodes.push({ id: 0, name: h?.server ?? "VPN", local: true, online: h !== null, pending: false, last_seen: null, health: h });
+            nodes.push({ id: 0, name: h?.server ?? "VPN", local: true, online: h !== null, pending: false, last_seen: null, version: deps.version || null, health: h });
         }
         for (const n of q.all.all() as NodeRow[]) {
             nodes.push({
                 id: n.id, name: n.name, local: false, online: conns.has(n.id),
-                pending: n.pub === null, last_seen: n.last_seen, health: health.get(n.id) ?? null,
+                pending: n.pub === null, last_seen: n.last_seen, version: n.version ?? null, health: health.get(n.id) ?? null,
             });
         }
-        res.json({ hub: hubReady(), local: LOCAL, nodes });
+        res.json({ hub: hubReady(), local: LOCAL, version: deps.version || null, nodes });
     });
 
     router.post("/", (req: Request, res: Response) => {

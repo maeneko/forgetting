@@ -60,7 +60,18 @@ export interface NodeInfo {
     online:    boolean;
     pending:   boolean;        // нода создана, но ещё ни разу не подключалась
     last_seen: number | null;
+    version:   string | null;  // версия Forgetting на сервере; null — нода ещё не подключалась или агент старше 0.3.4
     health:    { server: string; ip: string; gen: AwgGen; peers: number; awg_up: boolean; module: string; tools: string } | null;
+}
+
+// Сравнение версий вида 0.3.3 (хвост после «-» не учитывается): <0 — a старше b.
+export function cmpVersion(a: string, b: string): number {
+    const pa = a.split('-')[0].split('.').map(Number), pb = b.split('-')[0].split('.').map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0);
+        if (d) return d;
+    }
+    return 0;
 }
 
 // Выбранный сервер. Вкладки зовут apiFetch без явного id — заголовок X-Server-Id

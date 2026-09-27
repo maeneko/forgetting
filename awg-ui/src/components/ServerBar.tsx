@@ -1,17 +1,39 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { type NodeInfo, genLabel } from '../lib/shared';
+import { type NodeInfo, genLabel, cmpVersion } from '../lib/shared';
 import { IcoRefresh, IcoPlus, IcoTrash, IcoCopy } from './icons';
 
 // Сервер-бар: карточки серверов (core-локальный и ноды) + «Добавить сервер» и
 // (на мобильной) перезапуск AWG под ними. Общий для вкладок — показывает
 // серверы, между которыми переключается содержимое вкладки (пиры / абоненты).
+// Версия Forgetting на сервере. Нода, которая отстаёт от панели или не сообщает версию
+// (агент старше 0.3.4), подсвечена: её стоит обновить — install.sh, «Обновить».
+function versionChip(n: NodeInfo, panel: string | null) {
+    if (n.pending) return null;
+    let tip = '', warn = false;
+    if (!n.version) {
+        warn = true;
+        tip = 'Версия неизвестна: нода старше 0.3.4 — обнови её (install.sh → «Обновить»)';
+    } else if (panel && !n.local) {
+        const d = cmpVersion(n.version, panel);
+        if (d < 0) { warn = true; tip = `Панель на ${panel} — обнови ноду (install.sh → «Обновить»)`; }
+        else if (d > 0) { warn = true; tip = `Нода новее панели (${panel}) — обнови панель`; }
+    }
+    const chip = (
+        <span className={`chip server-ver-chip${warn ? ' server-ver-chip--warn' : ''}`}>
+            {n.version ? `v${n.version}` : 'v?.?.?'}
+        </span>
+    );
+    return tip ? <span className="tip-wrap server-gen-wrap" data-tip={tip}>{chip}</span> : chip;
+}
+
 export default function ServerBar({
-    nodes, serverId, hubEnabled, onSelect, onAdd, onJoin, onDelete,
+    nodes, serverId, hubEnabled, panelVersion, onSelect, onAdd, onJoin, onDelete,
     onRestartAwg, restarting, showRestart = true,
 }: {
     nodes: NodeInfo[];
+    panelVersion: string | null;
     serverId: number | null;
     hubEnabled: boolean;
     onSelect: (id: number) => void;
@@ -52,9 +74,12 @@ export default function ServerBar({
                             ) : !n.online ? (
                                 <span className="server-card-ip">нет связи</span>
                             ) : h && (
-                                <>
-                                    <span className="server-card-ip">{h.ip}</span>
-                                    {(h.module || h.tools) ? (
+                                <span className="server-card-ip">{h.ip}</span>
+                            )}
+                            {/* Плашки: поколение AWG (только на связи) и версия Forgetting (известна и без связи) */}
+                            {!n.pending && (
+                                <span className="server-chips">
+                                    {h && n.online && ((h.module || h.tools) ? (
                                         <span
                                             className="tip-wrap server-gen-wrap"
                                             data-tip={`модуль ${h.module || '?'} · tools ${h.tools || '?'}`}
@@ -63,8 +88,9 @@ export default function ServerBar({
                                         </span>
                                     ) : (
                                         <span className="chip chip--offline server-gen-chip">{genLabel(h.gen)}</span>
-                                    )}
-                                </>
+                                    ))}
+                                    {versionChip(n, panelVersion)}
+                                </span>
                             )}
                         </div>
                         {h && n.online && <span className="server-card-peers">{h.peers} peers</span>}

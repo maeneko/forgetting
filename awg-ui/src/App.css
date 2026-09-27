@@ -25,6 +25,8 @@ html, body, #root { height: 100%; }
     --neutral-bg:   #e4dac9; --neutral-text: #7a6a55; --neutral-dot:  #a99a85;
     --error-bg:     #ffdad6; --error-text:   #410002; --error-dot:    #ba1a1a;
     --warn-dot:     #e08a2c;
+    --tertiary-container:    #ffdcad;   /* design.md: tertiary-container */
+    --on-tertiary-container: #7a4a14;
 
     --danger-border: #e6c4bc;
     --danger-text:   #b34a3a;
@@ -67,6 +69,8 @@ html, body, #root { height: 100%; }
     --neutral-bg:   #34291c; --neutral-text: #d0c0a4; --neutral-dot:  #b0a085;
     --error-bg:     #5c1414; --error-text:   #ffb4ab; --error-dot:    #ff5449;
     --warn-dot:     #ffb76b;
+    --tertiary-container:    #4a3218;   /* тёплый тёмный, как у статусов в тёмной теме */
+    --on-tertiary-container: #ffdcad;
 
     --danger-border: #6e4540;
     --danger-text:   #ffb4ab;
@@ -449,6 +453,16 @@ body {
     line-height: 1.2;
 }
 .server-gen-wrap { align-self: flex-start; margin-top: 2px; }
+.server-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.server-chips .server-gen-wrap, .server-chips .server-gen-chip { margin-top: 0; }
+.server-ver-chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    background: var(--neutral-bg);
+    color: var(--neutral-text);
+}
+.server-ver-chip--warn { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .server-gen-chip {
     align-self: flex-start;
     margin-top: 2px;

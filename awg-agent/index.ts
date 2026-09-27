@@ -23,6 +23,16 @@ const INTERNAL_AUTH_KEY_FILE = process.env.INTERNAL_AUTH_KEY_FILE ?? "/etc/amnez
 const CLI_ENV_FILE = process.env.CLI_ENV_FILE ?? "";
 let joinSecret = process.env.JOIN_SECRET ?? "";                // одноразовый, живёт до первого успешного подключения
 
+// Версия Forgetting на этой ноде — панель показывает её в карточке сервера. CLI передаёт её из
+// .env в корне проекта; при запуске вручную читаем тот же .env сами.
+function envFromFile(file: string, key: string): string {
+    try {
+        const m = fs.readFileSync(file, "utf8").match(new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`, "m"));
+        return m ? m[1].trim() : "";
+    } catch { return ""; }
+}
+const VERSION = process.env.VERSION || envFromFile(path.join(__dirname, "..", ".env"), "VERSION");
+
 if (!CORE_HOST || !CORE_PORT || !CORE_PIN || !NODE_ID) {
     console.error("agent: не заданы CORE_HOST / CORE_PORT / CORE_PIN / NODE_ID — выполните `awg-ctrl join <ссылка>`");
     process.exit(1);
@@ -138,6 +148,7 @@ function connectOnce(): Promise<{ authFailed: boolean }> {
                     sig: crypto.sign(null, authMsg(m.nonce), nodeKey).toString("base64url"),
                 };
                 if (joinSecret) auth.join = { secret: joinSecret, pub: nodePubRaw };
+                if (VERSION) auth.version = VERSION;
                 ws.send(JSON.stringify(auth));
             } else if (m.t === "ready") {
                 ready = true; backoff = 1000; armDead();

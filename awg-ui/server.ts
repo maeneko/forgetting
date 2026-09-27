@@ -355,7 +355,7 @@ app.use("/api/v1", ext);
 // sen://-подписка: мастер-ключи и устройства (роуты панели, за JWT) и публичный
 // листенер /sub/v1 на своём порту SUB_PORT. Публичная часть сюда не монтируется.
 // Несколько серверов: core (эта панель) + ноды по исходящему WSS. Реестр — в ui.db.
-const nodes = createNodes({ uidb, ctrlLocal: ctrl, baseDir: __dirname });
+const nodes = createNodes({ uidb, ctrlLocal: ctrl, baseDir: __dirname, version: VERSION });
 app.use("/ui/nodes", requireAuth, nodes.router);
 
 // sen://-подписка: мастер-ключ отдаёт набор серверов (локальный и/или ноды).

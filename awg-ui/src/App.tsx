@@ -23,6 +23,7 @@ export default function App() {
     const [statusText, setStatusText] = useState('');
     const [nodes, setNodes]           = useState<NodeInfo[]>([]);
     const [hubEnabled, setHubEnabled] = useState(false);
+    const [panelVersion, setPanelVersion] = useState<string | null>(null);
     const [serverId, setServerIdState] = useState<number | null>(null);
     const [modal, setModal]           = useState<{ node?: NodeInfo } | null>(null);
     const [msg, setMsg]               = useState('');
@@ -55,6 +56,7 @@ export default function App() {
         const list: NodeInfo[] = data.nodes ?? [];
         setNodes(list);
         setHubEnabled(!!data.hub);
+        setPanelVersion(data.version ?? null);
         const cur = getServerId();
         if (cur !== null && list.some(n => n.id === cur)) return;
         let saved: number | null = null;
@@ -311,6 +313,7 @@ export default function App() {
                                     nodes={nodes}
                                     serverId={serverId}
                                     hubEnabled={hubEnabled}
+                                    panelVersion={panelVersion}
                                     onSelect={pickServer}
                                     onAdd={() => setModal({})}
                                     onJoin={n => setModal({ node: n })}

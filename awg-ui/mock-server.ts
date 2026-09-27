@@ -15,6 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
+const MOCK_VERSION = "0.3.3";
 
 // ── пользователи (vpn://) ──
 interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
@@ -34,12 +35,13 @@ const usersOf: Record<number, U[]> = {
 };
 const srv = (q: express.Request) => { const n = Number(q.headers["x-server-id"]); return Number.isInteger(n) && usersOf[n] ? n : 0; };
 const U_ = (q: express.Request) => usersOf[srv(q)];
-interface MNode { id: number; name: string; ip: string; gen: string; online: boolean; pending: boolean }
+interface MNode { id: number; name: string; ip: string; gen: string; online: boolean; pending: boolean; version: string | null }
 const mnodes: MNode[] = [
-    { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false },
-    { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true },
+    { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.3.2" },   // отстаёт от панели
+    { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
+    { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: true, pending: false, version: null },  // старый агент: версию не шлёт
 ];
-let nodeId = 2;
+let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
 
 // ── API-ключи ──
@@ -58,7 +60,7 @@ const mkOut = (m: MK) => ({ id: m.id, label: m.label, device_limit: m.device_lim
 const devOut = (m: MK, d: Dev) => ({ ...d, servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
 const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
 
-app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: "0.2.2-mock" }));
+app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: MOCK_VERSION }));
 app.post("/login", (q, r) => q.body.user === "admin" && q.body.pass === "admin" ? r.json({ token: "mock." + crypto.randomBytes(8).toString("hex") + ".sig" }) : r.status(401).json({ error: "Неверный логин или пароль" }));
 app.post("/logout", (_q, r) => r.json({ ok: true }));
 app.get("/health", (q, r) => {
@@ -68,15 +70,15 @@ app.get("/health", (q, r) => {
 
 // ── серверы ──
 const nodeView = () => [
-    { id: 0, name: "VPN (mock)", local: true, online: true, pending: false, last_seen: null, health: { server: "VPN (mock)", ip: "203.0.113.7", gen: GEN, peers: users.length, awg_up: true, module: "3.0.1", tools: "1.0.0" } },
-    ...mnodes.map(n => ({ id: n.id, name: n.name, local: false, online: n.online, pending: n.pending, last_seen: n.online ? now() - 5 : null,
+    { id: 0, name: "VPN (mock)", local: true, online: true, pending: false, last_seen: null, version: MOCK_VERSION, health: { server: "VPN (mock)", ip: "203.0.113.7", gen: GEN, peers: users.length, awg_up: true, module: "3.0.1", tools: "1.0.0" } },
+    ...mnodes.map(n => ({ id: n.id, name: n.name, local: false, online: n.online, pending: n.pending, last_seen: n.online ? now() - 5 : null, version: n.version,
         health: n.online ? { server: n.name, ip: n.ip, gen: n.gen, peers: (usersOf[n.id] ?? []).length, awg_up: true, module: "3.0.1", tools: "1.0.0" } : null })),
 ];
-app.get("/ui/nodes", (_q, r) => r.json({ hub: true, local: true, nodes: nodeView() }));
+app.get("/ui/nodes", (_q, r) => r.json({ hub: true, local: true, version: MOCK_VERSION, nodes: nodeView() }));
 app.post("/ui/nodes", (q, r) => {
     const name = String(q.body.name ?? "");
     if (!name || name.length > 40) return r.status(400).json({ error: "Имя: до 40 символов, без переводов строк и <>" });
-    const id = ++nodeId; mnodes.push({ id, name, ip: "", gen: "2", online: false, pending: true });
+    const id = ++nodeId; mnodes.push({ id, name, ip: "", gen: "2", online: false, pending: true, version: null });
     r.status(201).json({ id, name, join: joinStr(id), expires_in: 3600 });
 });
 app.post("/ui/nodes/:id/join", (q, r) => { const n = mnodes.find(x => x.id === Number(q.params.id)); n ? r.json({ id: n.id, name: n.name, join: joinStr(n.id), expires_in: 3600 }) : r.status(404).json({ error: "Не найден" }); });
