@@ -12,7 +12,7 @@ import './masterkeys.css';
 // плюс лимит устройств; устройства регистрируются сами (приватный ключ остаётся
 // на них) и здесь только отображаются и отзываются. Формат — docs/sen-link.md.
 // deleting — ключ удалён и уже не работает, но эти серверы ещё не подтвердили, что сняли его пиров.
-interface MasterKey { id: number; label: string; device_limit: number; devices: number; servers: number[]; created_at: number; deleting?: number[] }
+interface MasterKey { id: number; uuid: string; label: string; device_limit: number; devices: number; servers: number[]; created_at: number; deleting?: number[] }
 interface Device {
     id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null;
     rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number;
@@ -140,6 +140,19 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <h4 className="mk-box-title">Настройки ключа</h4>
                 <div className="mk-setting">
                     <div className="mk-setting-text">
+                        <span className="mk-setting-name">UUID</span>
+                        <code className="mk-uuid" title={k.uuid}>{k.uuid}</code>
+                        <span className="mk-setting-hint">Постоянный: перевыпуск ссылки его не меняет</span>
+                    </div>
+                    <div className="mk-setting-ctl">
+                        <button className="btn btn--tonal" onClick={() =>
+                            copyText(k.uuid).then(() => showMsg('UUID скопирован'), () => showMsg('Не удалось скопировать'))}>
+                            <IcoCopy /> Скопировать
+                        </button>
+                    </div>
+                </div>
+                <div className="mk-setting">
+                    <div className="mk-setting-text">
                         <label className="mk-setting-name" htmlFor={`mk-limit-${k.id}`}>Лимит устройств</label>
                         <span className="mk-setting-hint">Сколько устройств может подключить ключ</span>
                     </div>
@@ -221,6 +234,17 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         </div>
     );
 
+    // UUID ключа в строке списка — как ID устройств под ним (та же ширина и обрезка),
+    // полностью — в подсказке, по клику копируется.
+    const uuidCell = (k: MasterKey) => (
+        <span className="tip-wrap mk-uuid-wrap" data-tip={`UUID ${k.uuid} · нажми, чтобы скопировать`}>
+            <button className="mk-uuid-btn" aria-label={`Скопировать UUID ${k.uuid}`}
+                onClick={() => copyText(k.uuid).then(() => showMsg('UUID скопирован'), () => showMsg('Не удалось скопировать'))}>
+                <code className="mk-device-id">{k.uuid}</code>
+            </button>
+        </span>
+    );
+
     const caret = (k: MasterKey) => (
         <button className={`mk-caret${folded.has(k.id) ? ' mk-caret--folded' : ''}`}
             aria-label={folded.has(k.id) ? 'Развернуть' : 'Свернуть'} aria-expanded={!folded.has(k.id)}
@@ -285,7 +309,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                             if (k.deleting) return (
                                 <tr key={k.id} className="mk-tr-master mk-last">
                                     <td><span className="mk-name"><IcoKey />{k.label}</span></td>
-                                    <td colSpan={8}>{deletingChip(k)}</td>
+                                    <td className="td-mono">{uuidCell(k)}</td>
+                                    <td colSpan={7}>{deletingChip(k)}</td>
                                 </tr>
                             );
                             const list = devs[k.id] ?? [];
@@ -295,7 +320,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                                 <Fragment key={k.id}>
                                     <tr className="mk-tr-master">
                                         <td><span className="mk-name">{caret(k)}<IcoKey />{k.label}</span></td>
-                                        <td colSpan={6}></td>
+                                        <td className="td-mono">{uuidCell(k)}</td>
+                                        <td colSpan={5}></td>
                                         <td>{meter(k, list.length)}</td>
                                         <td className="td-actions mk-td-actions">{actions(k)}</td>
                                     </tr>
@@ -339,7 +365,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                             <li className="mk-root" key={k.id}>
                                 <div className="mk-master">
                                     <IcoKey />
-                                    <span className="mk-master-label">{k.label}</span>
+                                    <span className="mk-master-label">{k.label}<code className="mk-master-uuid">{k.uuid}</code></span>
                                     {deletingChip(k)}
                                 </div>
                             </li>
@@ -352,7 +378,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                                 <div className="mk-master">
                                     {caret(k)}
                                     <IcoKey />
-                                    <span className="mk-master-label">{k.label}</span>
+                                    <span className="mk-master-label">{k.label}<code className="mk-master-uuid">{k.uuid}</code></span>
                                     {meter(k, list.length)}
                                     {actions(k)}
                                 </div>

@@ -26,6 +26,19 @@ LICENSE file in the root directory of this source tree.
 .mk-tr-master td { background: var(--surface-container); font-weight: 500; padding-top: 6px; padding-bottom: 6px; }
 .mk-tr-master:hover td { background: var(--surface-container); }
 .mk-name { display: inline-flex; align-items: center; gap: 8px; color: var(--primary); }
+/* UUID ключа в строке: выглядит как ID устройства, по клику копирует */
+.mk-uuid-btn {
+    background: none; border: 0; padding: 0; margin: 0;
+    cursor: pointer; font: inherit; font-weight: 400; color: inherit; line-height: inherit;
+}
+.mk-uuid-btn:hover .mk-device-id { color: var(--primary); }
+.mk-uuid-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
+.mk-master-uuid {
+    display: block;
+    font-family: var(--mono); font-size: 12px; font-weight: 400;
+    color: var(--neutral-text);
+    overflow: hidden; text-overflow: ellipsis;
+}
 .mk-name .mk-caret { margin-left: -8px; }
 .mk-tr-master .mk-name { color: var(--on-surface); }
 .mk-tr-master .mk-name svg { color: var(--primary); }
@@ -111,6 +124,10 @@ LICENSE file in the root directory of this source tree.
 .mk-setting-name { font-size: 14px; font-weight: 500; color: var(--on-surface); }
 .mk-setting-hint { font-size: 12px; color: var(--neutral-text); }
 .mk-setting-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.mk-uuid {
+    font-family: var(--mono); font-size: 12px; color: var(--on-surface);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
 .mk-setting-ctl .btn { height: 36px; padding: 0 16px; font-size: 13px; }
 .mk-limit-input { height: 36px; width: 80px !important; text-align: center; }
 

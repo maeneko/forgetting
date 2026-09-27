@@ -50,12 +50,12 @@ let apiId = 1;
 
 // ── мастер-ключи sen:// ──
 interface Dev { id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null; rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number }
-interface MK { id: number; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
+interface MK { id: number; uuid: string; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
 let mkId = 1, devId = 1;
 const dev = (name: string, platform: string, online: boolean, version = "0.6.5"): Dev => ({ id: devId++, device_id: crypto.randomUUID(), device_name: name, platform, version, created_at: now() - 86400, last_seen: now() - rnd(900), rekey_requested: false, online, lastHandshake: now() - rnd(300), rx: rnd(9e8), tx: rnd(3e8) });
-const masters: MK[] = [{ id: mkId++, label: "Семья", device_limit: 3, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1] }];
+const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 3, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1] }];
 const signPub = crypto.randomBytes(32);
-const mkOut = (m: MK) => ({ id: m.id, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
+const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
 // Мок: устройство «догнано» на всех серверах ключа, кроме Tokyo (id 2 — ещё не подключалась).
 const devOut = (m: MK, d: Dev) => ({ ...d, servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
 const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
@@ -123,7 +123,7 @@ app.get("/ui/masterkeys", (_q, r) => r.json({ enabled: true, tls: false, keys: m
 app.post("/ui/masterkeys", (q, r) => {
     const limit = q.body.device_limit ?? 3;
     if (!q.body.label || !Number.isInteger(limit) || limit < 1 || limit > 100) return r.status(400).json({ error: "Неверные параметры" });
-    const m: MK = { id: mkId++, label: q.body.label, device_limit: limit, created_at: now(), secret: crypto.randomBytes(16), devs: [], servers: q.body.servers ?? [0] };
+    const m: MK = { id: mkId++, uuid: crypto.randomUUID(), label: q.body.label, device_limit: limit, created_at: now(), secret: crypto.randomBytes(16), devs: [], servers: q.body.servers ?? [0] };
     masters.push(m); r.status(201).json(mkOut(m));
 });
 app.patch("/ui/masterkeys/:id", (q, r) => {

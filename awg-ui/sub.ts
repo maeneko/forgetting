@@ -51,7 +51,7 @@ export interface Servers {
 }
 
 interface MasterRow {
-    id: number; label: string; secret: Buffer; device_limit: number;
+    id: number; uuid: string; label: string; secret: Buffer; device_limit: number;
     server_id: number; created_at: number; revoked_at: number | null;
 }
 interface DeviceRow {
@@ -195,6 +195,16 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     // таблицы колонки может не быть.
     if (!(uidb.prepare("PRAGMA table_info(devices)").all() as { name: string }[]).some(c => c.name === "version"))
         uidb.exec("ALTER TABLE devices ADD COLUMN version TEXT NOT NULL DEFAULT ''");
+    // uuid мастер-ключа — постоянный идентификатор: не меняется ни при перевыпуске ссылки,
+    // ни при правке метки. Существующим ключам выдаётся здесь один раз.
+    if (!(uidb.prepare("PRAGMA table_info(master_keys)").all() as { name: string }[]).some(c => c.name === "uuid"))
+        uidb.exec("ALTER TABLE master_keys ADD COLUMN uuid TEXT");
+    {
+        const setUuid = uidb.prepare<[string, number]>("UPDATE master_keys SET uuid = ? WHERE id = ?");
+        for (const { id } of uidb.prepare("SELECT id FROM master_keys WHERE uuid IS NULL").all() as { id: number }[])
+            setUuid.run(crypto.randomUUID(), id);
+    }
+    uidb.exec("CREATE UNIQUE INDEX IF NOT EXISTS master_keys_uuid ON master_keys (uuid)");
     uidb.pragma("foreign_keys = ON");
 
     // Перенос со времени одного сервера: ключ отдавал master_keys.server_id, а пир устройства
@@ -222,7 +232,8 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         masterById:   uidb.prepare<[number]>("SELECT * FROM master_keys WHERE id = ? AND revoked_at IS NULL"),
         masterRow:    uidb.prepare<[number]>("SELECT m.*, (SELECT COUNT(*) FROM devices d WHERE d.master_id = m.id) AS devices FROM master_keys m WHERE id = ?"),
         masterBySecret: uidb.prepare<[Buffer]>("SELECT * FROM master_keys WHERE secret = ? AND revoked_at IS NULL"),
-        masterInsert: uidb.prepare<[string, Buffer, number, number, number]>("INSERT INTO master_keys (label, secret, device_limit, server_id, created_at) VALUES (?, ?, ?, ?, ?)"),
+        masterInsert: uidb.prepare<[string, string, Buffer, number, number, number]>("INSERT INTO master_keys (uuid, label, secret, device_limit, server_id, created_at) VALUES (?, ?, ?, ?, ?, ?)"),
+        masterIdByUuid: uidb.prepare<[string]>("SELECT id FROM master_keys WHERE uuid = ?"),
         masterUpdate: uidb.prepare<[string, number, number]>("UPDATE master_keys SET label = ?, device_limit = ? WHERE id = ?"),
         masterSecret: uidb.prepare<[Buffer, number]>("UPDATE master_keys SET secret = ? WHERE id = ?"),
         masterRevoke: uidb.prepare<[number, number]>("UPDATE master_keys SET revoked_at = ? WHERE id = ?"),
@@ -577,7 +588,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         // devices / device_limit: сколько мест занято с этим устройством — клиент показывает это сразу,
         // без отдельного запроса списка.
         send(req, res, 201, {
-            device: dev.id, config: cfg,
+            device: dev.id, config: cfg, key_uuid: master.uuid,
             devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit,
         });
     }));
@@ -594,7 +605,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
             send(req, res, secretB ? 404 : 400, { error: secretB ? "not_found" : "bad_request" });
             return;
         }
-        send(req, res, 200, { devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit });
+        send(req, res, 200, { key_uuid: master.uuid, devices: (q.deviceCount.get(master.id) as { n: number }).n, device_limit: master.device_limit });
     }));
 
     sub.get("/sub/v1/config", deviceAuth, wrap(async (req, res) => {
@@ -614,6 +625,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         if (!master) { send(req, res, 404, { error: "not_found" }); return; }
         send(req, res, 200, {
             name: master.label,
+            key_uuid: master.uuid,
             device_limit: master.device_limit,
             devices: (q.devicesOf.all(master.id) as DeviceRow[]).map(d => ({
                 id: d.id, name: d.device_name, platform: d.platform, version: d.version,
@@ -674,6 +686,11 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         });
     };
     const idOf = (v: string) => { const n = Number(v); return Number.isSafeInteger(n) ? n : -1; };   // -1 — не найдётся
+    // Мастер-ключ в пути — числовой id или uuid.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const masterIdOf = (v: string) => UUID_RE.test(v)
+        ? (q.masterIdByUuid.get(v.toLowerCase()) as { id: number } | undefined)?.id ?? -1
+        : idOf(v);
     const LABEL = /^[^\r\n<>]{1,40}$/;
     const limitOk = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 100;
 
@@ -707,7 +724,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     // deleting — ключ удалён, но эти серверы ещё не подтвердили, что сняли его пиров.
     function masterOut(m: MasterRow & { devices: number }) {
         return {
-            id: m.id, label: m.label, device_limit: m.device_limit,
+            id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit,
             devices: m.devices, servers: serverIdsOf(m.id), created_at: m.created_at,
             ...(m.revoked_at !== null ? { deleting: serverIdsOf(m.id) } : {}),
         };
@@ -728,7 +745,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         catch (e) { throw wanted === undefined && scope === null ? new ApiError(400, "Сначала добавьте сервер") : e; }
         let id = 0;
         uidb.transaction(() => {
-            id = Number(q.masterInsert.run(label as string, crypto.randomBytes(16), limit as number, ids[0], now()).lastInsertRowid);
+            id = Number(q.masterInsert.run(crypto.randomUUID(), label as string, crypto.randomBytes(16), limit as number, ids[0], now()).lastInsertRowid);
             for (const sid of ids) q.serverAdd.run(id, sid);
         })();
         return masterOutById(id);
@@ -849,12 +866,12 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         res.json({ enabled: signKey !== null, tls: tlsPin !== null, keys: listMasters(null) });
     });
     masterKeys.post("/", aw((req, res) => { res.status(201).json(createMaster(req.body, null)); }));
-    masterKeys.patch("/:id", aw(async (req, res) => { res.json(await updateMaster(masterFor(idOf(req.params.id), null), req.body, null)); }));
-    masterKeys.post("/:id/rotate", aw((req, res) => { const m = masterFor(idOf(req.params.id), null); rotateMaster(m); res.json({ id: m.id }); }));
-    masterKeys.post("/:id/rekey", aw((req, res) => { const m = masterFor(idOf(req.params.id), null); rekeyMaster(m); res.json({ id: m.id }); }));
-    masterKeys.delete("/:id", aw(async (req, res) => { res.json(await deleteMaster(masterFor(idOf(req.params.id), null))); }));
-    masterKeys.get("/:id/link", aw((req, res) => { res.json(linkOf(masterFor(idOf(req.params.id), null), req)); }));
-    masterKeys.get("/:id/devices", aw(async (req, res) => { res.json({ devices: await masterDevices(masterFor(idOf(req.params.id), null)) }); }));
+    masterKeys.patch("/:id", aw(async (req, res) => { res.json(await updateMaster(masterFor(masterIdOf(req.params.id), null), req.body, null)); }));
+    masterKeys.post("/:id/rotate", aw((req, res) => { const m = masterFor(masterIdOf(req.params.id), null); rotateMaster(m); res.json({ id: m.id }); }));
+    masterKeys.post("/:id/rekey", aw((req, res) => { const m = masterFor(masterIdOf(req.params.id), null); rekeyMaster(m); res.json({ id: m.id }); }));
+    masterKeys.delete("/:id", aw(async (req, res) => { res.json(await deleteMaster(masterFor(masterIdOf(req.params.id), null))); }));
+    masterKeys.get("/:id/link", aw((req, res) => { res.json(linkOf(masterFor(masterIdOf(req.params.id), null), req)); }));
+    masterKeys.get("/:id/devices", aw(async (req, res) => { res.json({ devices: await masterDevices(masterFor(masterIdOf(req.params.id), null)) }); }));
 
     const devices = Router();
     devices.delete("/:id", aw(async (req, res) => { res.json(await deleteDevice(deviceFor(idOf(req.params.id)))); }));
@@ -866,7 +883,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     // область проверялась через их мастер-ключ.
     function apiRouter(scopeOf: (req: Request) => number[]) {
         const r = Router();
-        const master = (req: Request) => masterFor(idOf(req.params.id), scopeOf(req));
+        const master = (req: Request) => masterFor(masterIdOf(req.params.id), scopeOf(req));
         const device = (req: Request) => deviceFor(idOf(req.params.device), master(req));
 
         r.get("/", aw((req, res) => { res.json({ keys: listMasters(scopeOf(req)) }); }));

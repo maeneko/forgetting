@@ -104,8 +104,8 @@ curl -s -X POST http://HOST:PORT/api/v1/masterkeys \
 
 | Метод | Что делает |
 |---|---|
-| `POST /api/v1/masterkeys` | Создаёт ключ. Тело `{ label, device_limit?, servers? }` (лимит 1–100, по умолчанию 3; без `servers` — весь набор API-ключа). `201` с `{ id, label, device_limit, devices, servers, created_at, link, tls }`; `403` — сервер вне набора, `503` — подписка не настроена (ключ не создаётся) |
-| `GET /api/v1/masterkeys` | Список: `{ keys: [{ id, label, device_limit, devices, servers, created_at, deleting? }] }` |
+| `POST /api/v1/masterkeys` | Создаёт ключ. Тело `{ label, device_limit?, servers? }` (лимит 1–100, по умолчанию 3; без `servers` — весь набор API-ключа). `201` с `{ id, uuid, label, device_limit, devices, servers, created_at, link, tls }`; `403` — сервер вне набора, `503` — подписка не настроена (ключ не создаётся) |
+| `GET /api/v1/masterkeys` | Список: `{ keys: [{ id, uuid, label, device_limit, devices, servers, created_at, deleting? }] }`. `uuid` — постоянный идентификатор ключа: не меняется ни при перевыпуске ссылки, ни при правке метки. Везде, где в пути `:id`, можно передать и `uuid` |
 | `GET /api/v1/masterkeys/:id` | Ключ, ссылка и устройства одним запросом: те же поля + `link`, `tls`, `device_list` (`devices` — счётчик) |
 | `PATCH /api/v1/masterkeys/:id` | `{ label?, device_limit?, servers? }` — смена серверов сразу добавляет/снимает пиров устройств |
 | `POST /api/v1/masterkeys/:id/rotate` | Новая ссылка `{ id, link, tls }`; старая не принимает новые устройства, подключённые работают дальше |
@@ -196,7 +196,7 @@ base64url-декодировать, отбросить первые 4 байта
 
 | Метод | Что делает |
 |---|---|
-| `GET /ui/masterkeys` | `{ enabled, tls, keys: [{ id, label, device_limit, devices, servers, created_at, deleting? }] }` |
+| `GET /ui/masterkeys` | `{ enabled, tls, keys: [{ id, uuid, label, device_limit, devices, servers, created_at, deleting? }] }`; `:id` в путях — id или `uuid` |
 | `POST /ui/masterkeys` | `{ label, device_limit?, servers? }` → `201` |
 | `PATCH /ui/masterkeys/:id` | `{ label?, device_limit?, servers? }` |
 | `GET /ui/masterkeys/:id/link` | `{ link, tls }` — ссылка `sen://…` |
