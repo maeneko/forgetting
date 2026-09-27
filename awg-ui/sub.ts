@@ -47,6 +47,7 @@ export interface Servers {
     defaultId(): number;
     onOnline(cb: (id: number) => void): void;
     beforeDelete(cb: (id: number, force: boolean) => Promise<{ error: string; forcible: boolean } | null>): void;
+    afterDelete(cb: (id: number) => void): void;
 }
 
 interface MasterRow {
@@ -219,6 +220,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         // И отозванные: удалённый ключ висит в списке, пока все его серверы не подтвердят удаление.
         masters:      uidb.prepare("SELECT m.*, (SELECT COUNT(*) FROM devices d WHERE d.master_id = m.id) AS devices FROM master_keys m ORDER BY id"),
         masterById:   uidb.prepare<[number]>("SELECT * FROM master_keys WHERE id = ? AND revoked_at IS NULL"),
+        masterRow:    uidb.prepare<[number]>("SELECT m.*, (SELECT COUNT(*) FROM devices d WHERE d.master_id = m.id) AS devices FROM master_keys m WHERE id = ?"),
         masterBySecret: uidb.prepare<[Buffer]>("SELECT * FROM master_keys WHERE secret = ? AND revoked_at IS NULL"),
         masterInsert: uidb.prepare<[string, Buffer, number, number, number]>("INSERT INTO master_keys (label, secret, device_limit, server_id, created_at) VALUES (?, ?, ?, ?, ?)"),
         masterUpdate: uidb.prepare<[string, number, number]>("UPDATE master_keys SET label = ?, device_limit = ? WHERE id = ?"),
@@ -652,65 +654,96 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     // Битый JSON и т. п.: ответ всё равно подписан, чтобы клиент мог ему доверять.
     sub.use((_err: unknown, req: Request, res: Response, _next: NextFunction) => { send(req, res, 400, { error: "bad_request" }); });
 
-    // ── Админ-роуты панели (монтируются в server.ts за JWT) ─────────────────
-    const aw = (fn: (req: Request, res: Response) => Promise<void>) =>
-        (req: Request, res: Response) => { fn(req, res).catch(() => { res.status(502).json({ error: "awg-ctrl недоступен" }); }); };
-    const idOf = (req: Request) => Number(req.params.id);
+    // ── Мастер-ключи: общая логика панели и внешнего API ───────────────────
+    // Панель (/ui/masterkeys, /ui/devices, за JWT) видит всё. Внешний API (/api/v1/masterkeys,
+    // ключ awgk_) — только ключи, чьи серверы целиком входят в набор серверов API-ключа:
+    // иначе он мог бы удалить или перенастроить раздачу на сервере, которого не видит.
+    // Scope: null — панель, иначе набор серверов API-ключа.
+    type Scope = number[] | null;
+
+    class ApiError extends Error {
+        constructor(public status: number, message: string) { super(message); }
+    }
+    const fail = (status: number, message: string): never => { throw new ApiError(status, message); };
+
+    // ApiError — её статус; остальное (awg-ctrl не ответил посреди действия) — 502.
+    const aw = (fn: (req: Request, res: Response) => unknown) => (req: Request, res: Response) => {
+        Promise.resolve().then(() => fn(req, res)).catch(e => {
+            if (e instanceof ApiError) res.status(e.status).json({ error: e.message });
+            else res.status(502).json({ error: "awg-ctrl недоступен" });
+        });
+    };
+    const idOf = (v: string) => { const n = Number(v); return Number.isSafeInteger(n) ? n : -1; };   // -1 — не найдётся
     const LABEL = /^[^\r\n<>]{1,40}$/;
     const limitOk = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 100;
 
-    // Набор серверов из тела запроса: непустой, без повторов, только существующие.
-    function parseServers(v: unknown): number[] | string {
-        if (!Array.isArray(v) || v.length === 0) return "Нужен хотя бы один сервер";
-        if (v.length > MAX_SERVERS) return `Не больше ${MAX_SERVERS} серверов`;
-        const ids = [...new Set(v)];
-        if (!ids.every(id => Number.isInteger(id) && servers.exists(id as number))) return "Такого сервера нет";
+    const visible = (masterId: number, scope: Scope) =>
+        scope === null || serverIdsOf(masterId).every(id => scope.includes(id));
+
+    // Живой (не удаляемый) ключ в пределах области; чужой — как несуществующий.
+    function masterFor(id: number, scope: Scope): MasterRow {
+        const m = q.masterById.get(id) as MasterRow | undefined;
+        return m && visible(m.id, scope) ? m : fail(404, "Не найден");
+    }
+
+    // Устройство — только вместе со своим мастер-ключом (у внешнего API пути вложенные).
+    function deviceFor(id: number, master?: MasterRow): DeviceRow {
+        const d = q.deviceById.get(id) as DeviceRow | undefined;
+        return d && (!master || d.master_id === master.id) ? d : fail(404, "Не найдено");
+    }
+
+    // Набор серверов из тела запроса: непустой, без повторов, только существующие и — для
+    // внешнего API — только из области его ключа.
+    function parseServers(v: unknown, scope: Scope): number[] {
+        if (!Array.isArray(v) || v.length === 0) fail(400, "Нужен хотя бы один сервер");
+        const list = v as unknown[];
+        if (list.length > MAX_SERVERS) fail(400, `Не больше ${MAX_SERVERS} серверов`);
+        const ids = [...new Set(list)];
+        if (!ids.every(id => Number.isInteger(id) && servers.exists(id as number))) fail(400, "Такого сервера нет");
+        if (scope && !ids.every(id => scope.includes(id as number))) fail(403, "Сервер вне области API-ключа");
         return (ids as number[]).sort((a, b) => a - b);
     }
 
-    const masterKeys = Router();
+    // deleting — ключ удалён, но эти серверы ещё не подтвердили, что сняли его пиров.
+    function masterOut(m: MasterRow & { devices: number }) {
+        return {
+            id: m.id, label: m.label, device_limit: m.device_limit,
+            devices: m.devices, servers: serverIdsOf(m.id), created_at: m.created_at,
+            ...(m.revoked_at !== null ? { deleting: serverIdsOf(m.id) } : {}),
+        };
+    }
+    const masterOutById = (id: number) => masterOut(q.masterRow.get(id) as MasterRow & { devices: number });
 
-    masterKeys.get("/", (_req, res) => {
-        res.json({
-            enabled: signKey !== null,
-            tls: tlsPin !== null,
-            // deleting — ключ удалён, но эти серверы ещё не подтвердили, что сняли его пиров.
-            keys: (q.masters.all() as (MasterRow & { devices: number })[]).map(m => ({
-                id: m.id, label: m.label, device_limit: m.device_limit,
-                devices: m.devices, servers: serverIdsOf(m.id), created_at: m.created_at,
-                ...(m.revoked_at !== null ? { deleting: serverIdsOf(m.id) } : {}),
-            })),
-        });
-    });
+    const listMasters = (scope: Scope) =>
+        (q.masters.all() as (MasterRow & { devices: number })[]).filter(m => visible(m.id, scope)).map(masterOut);
 
-    masterKeys.post("/", (req, res) => {
-        const { label, device_limit, servers: wanted } = (req.body ?? {}) as { label?: string; device_limit?: number; servers?: unknown };
-        if (typeof label !== "string" || !LABEL.test(label)) { res.status(400).json({ error: "Метка: до 40 символов, без переводов строк и <>" }); return; }
+    // Серверы по умолчанию: у панели — сервер по умолчанию, у API-ключа — вся его область.
+    function createMaster(body: unknown, scope: Scope) {
+        const { label, device_limit, servers: wanted } = (body ?? {}) as { label?: unknown; device_limit?: unknown; servers?: unknown };
+        if (typeof label !== "string" || !LABEL.test(label)) fail(400, "Метка: до 40 символов, без переводов строк и <>");
         const limit = device_limit === undefined ? DEFAULT_LIMIT : device_limit;
-        if (!limitOk(limit)) { res.status(400).json({ error: "Лимит устройств: от 1 до 100" }); return; }
-        const ids = parseServers(wanted === undefined ? [servers.defaultId()] : wanted);
-        if (typeof ids === "string") { res.status(400).json({ error: wanted === undefined ? "Сначала добавьте сервер" : ids }); return; }
+        if (!limitOk(limit)) fail(400, "Лимит устройств: от 1 до 100");
+        let ids: number[];
+        try { ids = parseServers(wanted ?? scope ?? [servers.defaultId()], scope); }
+        catch (e) { throw wanted === undefined && scope === null ? new ApiError(400, "Сначала добавьте сервер") : e; }
         let id = 0;
         uidb.transaction(() => {
-            id = Number(q.masterInsert.run(label, crypto.randomBytes(16), limit, ids[0], now()).lastInsertRowid);
+            id = Number(q.masterInsert.run(label as string, crypto.randomBytes(16), limit as number, ids[0], now()).lastInsertRowid);
             for (const sid of ids) q.serverAdd.run(id, sid);
         })();
-        res.status(201).json({ id, label, device_limit: limit, devices: 0, servers: ids });
-    });
+        return masterOutById(id);
+    }
 
-    masterKeys.patch("/:id", aw(async (req, res) => {
-        const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
-        if (!m) { res.status(404).json({ error: "Не найден" }); return; }
-        const { label, device_limit, servers: wanted } = (req.body ?? {}) as { label?: string; device_limit?: number; servers?: unknown };
+    async function updateMaster(m: MasterRow, body: unknown, scope: Scope) {
+        const { label, device_limit, servers: wanted } = (body ?? {}) as { label?: unknown; device_limit?: unknown; servers?: unknown };
         const nl = label ?? m.label, nd = device_limit ?? m.device_limit;
-        if (typeof nl !== "string" || !LABEL.test(nl)) { res.status(400).json({ error: "Неверная метка" }); return; }
-        if (!limitOk(nd)) { res.status(400).json({ error: "Лимит устройств: от 1 до 100" }); return; }
+        if (typeof nl !== "string" || !LABEL.test(nl)) fail(400, "Неверная метка");
+        if (!limitOk(nd)) fail(400, "Лимит устройств: от 1 до 100");
 
         let ids = serverIdsOf(m.id);
         const affected: number[] = [];
         if (wanted !== undefined) {
-            const next = parseServers(wanted);
-            if (typeof next === "string") { res.status(400).json({ error: next }); return; }
+            const next = parseServers(wanted, scope);
             const added = next.filter(s => !ids.includes(s)), removed = ids.filter(s => !next.includes(s));
             const devices = q.devicesOf.all(m.id) as DeviceRow[];
             uidb.transaction(() => {
@@ -730,59 +763,49 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
             affected.push(...added, ...removed);
             ids = next;
         }
-        q.masterUpdate.run(nl, nd, m.id);
+        q.masterUpdate.run(nl as string, nd as number, m.id);
         await reconcileAll(affected);
-        res.json({ id: m.id, label: nl, device_limit: nd, servers: ids });
-    }));
+        return { id: m.id, label: nl as string, device_limit: nd as number, servers: ids };
+    }
 
-    masterKeys.post("/:id/rotate", (req, res) => {
-        const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
-        if (!m) { res.status(404).json({ error: "Не найден" }); return; }
-        q.masterSecret.run(crypto.randomBytes(16), m.id); // устройства продолжают работать: у них auth_pub
-        res.json({ id: m.id });
-    });
-
-    masterKeys.post("/:id/rekey", (req, res) => {
-        const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
-        if (!m) { res.status(404).json({ error: "Не найден" }); return; }
-        q.deviceFlag.run(-1, m.id);
-        res.json({ id: m.id });
-    });
+    // Новая ссылка; устройства продолжают работать: у них auth_pub, а не secret.
+    const rotateMaster = (m: MasterRow) => { q.masterSecret.run(crypto.randomBytes(16), m.id); };
+    const rekeyMaster  = (m: MasterRow) => { q.deviceFlag.run(-1, m.id); };
 
     // Ключ сразу перестаёт работать (ссылка, регистрация, устройства), но строка остаётся
     // отозванной, пока каждый его сервер не подтвердит, что снял пиров, — иначе панель
     // сказала бы «удалён», пока на офлайн-ноде устройства ещё подключаются.
-    masterKeys.delete("/:id", aw(async (req, res) => {
-        const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
-        if (!m) { res.status(404).json({ error: "Не найден" }); return; }
+    async function deleteMaster(m: MasterRow) {
         const affected = serverIdsOf(m.id);
         uidb.transaction(() => {
             for (const d of q.devicesOf.all(m.id) as DeviceRow[]) affected.push(...forgetDevice(d));
             q.masterRevoke.run(now(), m.id);
         })();
         await reconcileAll(affected);
-        res.json({ success: true, id: m.id, pending: serverIdsOf(m.id) });
-    }));
+        return { success: true, id: m.id, pending: serverIdsOf(m.id) };
+    }
 
-    masterKeys.get("/:id/link", (req, res) => {
-        const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
-        if (!m) { res.status(404).json({ error: "Не найден" }); return; }
-        if (!signKey || !signPub || !SUB_PORT) { res.status(503).json({ error: "Подписка не настроена на сервере" }); return; }
-        const host = subHost(req);
-        if (!host) { res.status(503).json({ error: "Не удалось определить адрес панели — задайте SUB_HOST" }); return; }
+    // Выдать ссылку можно, только если подписка настроена и известен адрес панели.
+    function linkProblem(req: Request): string | null {
+        if (!signKey || !signPub || !SUB_PORT) return "Подписка не настроена на сервере";
+        if (!subHost(req)) return "Не удалось определить адрес панели — задайте SUB_HOST";
+        return null;
+    }
+
+    function linkOf(m: MasterRow, req: Request) {
+        const problem = linkProblem(req);
+        if (problem) fail(503, problem);
         const link = encodeSenLink({
             tls: tlsPin !== null,
-            addrs: [{ host, port: SUB_PORT }],
-            secret: m.secret, signPub, tlsPin: tlsPin ?? undefined, name: m.label,
+            addrs: [{ host: subHost(req), port: SUB_PORT }],
+            secret: m.secret, signPub: signPub as Buffer, tlsPin: tlsPin ?? undefined, name: m.label,
         });
-        res.json({ link, tls: tlsPin !== null });
-    });
+        return { link, tls: tlsPin !== null };
+    }
 
     // Статистика устройства — по всем серверам ключа: онлайн, если есть свежий handshake хоть
     // на одном; трафик суммируется. servers_ok — на скольких серверах уже стоит его текущий ключ.
-    masterKeys.get("/:id/devices", aw(async (req, res) => {
-        const m = q.masterById.get(idOf(req)) as MasterRow | undefined;
-        if (!m) { res.status(404).json({ error: "Не найден" }); return; }
+    async function masterDevices(m: MasterRow) {
         const stats = new Map<string, { online: boolean; lastHandshake: number; rx: number; tx: number }>();
         await Promise.all(serverIdsOf(m.id).filter(id => servers.isOnline(id)).map(async id => {
             const r = await servers.ctrlFor(id)("GET", "/api/peers");
@@ -795,67 +818,107 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
                 });
             }
         }));
-        res.json({
-            devices: (q.devicesOf.all(m.id) as DeviceRow[]).map(d => {
-                const links = q.linksOf.all(d.id) as LinkRow[];
-                const s = stats.get(d.pub_key);
-                return {
-                    id: d.id, device_id: d.device_id, device_name: d.device_name, platform: d.platform, version: d.version, created_at: d.created_at,
-                    last_seen: d.last_seen, rekey_requested: d.rekey_requested === 1,
-                    online: s?.online ?? false, lastHandshake: s?.lastHandshake ?? 0, rx: s?.rx ?? 0, tx: s?.tx ?? 0,
-                    servers_total: links.length, servers_ok: links.filter(l => l.peer_pub === d.pub_key && l.ip).length,
-                };
-            }),
+        return (q.devicesOf.all(m.id) as DeviceRow[]).map(d => {
+            const links = q.linksOf.all(d.id) as LinkRow[];
+            const s = stats.get(d.pub_key);
+            return {
+                id: d.id, device_id: d.device_id, device_name: d.device_name, platform: d.platform, version: d.version, created_at: d.created_at,
+                last_seen: d.last_seen, rekey_requested: d.rekey_requested === 1,
+                online: s?.online ?? false, lastHandshake: s?.lastHandshake ?? 0, rx: s?.rx ?? 0, tx: s?.tx ?? 0,
+                servers_total: links.length, servers_ok: links.filter(l => l.peer_pub === d.pub_key && l.ip).length,
+            };
         });
-    }));
+    }
 
-    const devices = Router();
-
-    devices.delete("/:id", aw(async (req, res) => {
-        const d = q.deviceById.get(idOf(req)) as DeviceRow | undefined;
-        if (!d) { res.status(404).json({ error: "Не найдено" }); return; }
+    async function deleteDevice(d: DeviceRow) {
         await reconcileAll(forgetDevice(d));
-        res.json({ success: true, id: d.id });
-    }));
-
-    devices.post("/:id/rekey", (req, res) => {
-        const d = q.deviceById.get(idOf(req)) as DeviceRow | undefined;
-        if (!d) { res.status(404).json({ error: "Не найдено" }); return; }
-        q.deviceFlag.run(d.id, -1);
-        res.json({ id: d.id });
-    });
+        return { success: true, id: d.id };
+    }
+    const rekeyDevice = (d: DeviceRow) => { q.deviceFlag.run(d.id, -1); };
 
     // Новый PSK на каждом сервере; недоступные получат его, когда появятся.
-    devices.post("/:id/psk", aw(async (req, res) => {
-        const d = q.deviceById.get(idOf(req)) as DeviceRow | undefined;
-        if (!d) { res.status(404).json({ error: "Не найдено" }); return; }
+    async function rotatePsk(d: DeviceRow) {
         q.linkPskDue.run(d.id);
         await reconcileAll((q.linksOf.all(d.id) as LinkRow[]).map(l => l.server_id));
-        const pending = (q.linksOf.all(d.id) as LinkRow[]).filter(l => l.psk_pending === 1).length;
-        res.json({ id: d.id, pending });
-    }));
+        return { id: d.id, pending: (q.linksOf.all(d.id) as LinkRow[]).filter(l => l.psk_pending === 1).length };
+    }
+
+    // ── Роуты панели (монтируются в server.ts за JWT) ──────────────────────
+    const masterKeys = Router();
+    masterKeys.get("/", (_req, res) => {
+        res.json({ enabled: signKey !== null, tls: tlsPin !== null, keys: listMasters(null) });
+    });
+    masterKeys.post("/", aw((req, res) => { res.status(201).json(createMaster(req.body, null)); }));
+    masterKeys.patch("/:id", aw(async (req, res) => { res.json(await updateMaster(masterFor(idOf(req.params.id), null), req.body, null)); }));
+    masterKeys.post("/:id/rotate", aw((req, res) => { const m = masterFor(idOf(req.params.id), null); rotateMaster(m); res.json({ id: m.id }); }));
+    masterKeys.post("/:id/rekey", aw((req, res) => { const m = masterFor(idOf(req.params.id), null); rekeyMaster(m); res.json({ id: m.id }); }));
+    masterKeys.delete("/:id", aw(async (req, res) => { res.json(await deleteMaster(masterFor(idOf(req.params.id), null))); }));
+    masterKeys.get("/:id/link", aw((req, res) => { res.json(linkOf(masterFor(idOf(req.params.id), null), req)); }));
+    masterKeys.get("/:id/devices", aw(async (req, res) => { res.json({ devices: await masterDevices(masterFor(idOf(req.params.id), null)) }); }));
+
+    const devices = Router();
+    devices.delete("/:id", aw(async (req, res) => { res.json(await deleteDevice(deviceFor(idOf(req.params.id)))); }));
+    devices.post("/:id/rekey", aw((req, res) => { const d = deviceFor(idOf(req.params.id)); rekeyDevice(d); res.json({ id: d.id }); }));
+    devices.post("/:id/psk", aw(async (req, res) => { res.json(await rotatePsk(deviceFor(idOf(req.params.id)))); }));
+
+    // ── Внешний API: /api/v1/masterkeys (ключ awgk_, монтируется в server.ts) ─
+    // scopeOf — набор серверов API-ключа запроса. Устройства — вложенными путями, чтобы
+    // область проверялась через их мастер-ключ.
+    function apiRouter(scopeOf: (req: Request) => number[]) {
+        const r = Router();
+        const master = (req: Request) => masterFor(idOf(req.params.id), scopeOf(req));
+        const device = (req: Request) => deviceFor(idOf(req.params.device), master(req));
+
+        r.get("/", aw((req, res) => { res.json({ keys: listMasters(scopeOf(req)) }); }));
+        r.post("/", aw((req, res) => {
+            const problem = linkProblem(req);           // без ссылки ключ внешней программе бесполезен
+            if (problem) fail(503, problem);
+            const out = createMaster(req.body, scopeOf(req));
+            res.status(201).json({ ...out, ...linkOf(masterFor(out.id, null), req) });
+        }));
+        r.get("/:id", aw(async (req, res) => {
+            const m = master(req);
+            // devices — счётчик, как в списке; сами устройства — в device_list.
+            res.json({ ...masterOutById(m.id), ...(linkProblem(req) ? { link: null, tls: tlsPin !== null } : linkOf(m, req)), device_list: await masterDevices(m) });
+        }));
+        r.patch("/:id", aw(async (req, res) => { res.json(await updateMaster(master(req), req.body, scopeOf(req))); }));
+        r.post("/:id/rotate", aw((req, res) => {
+            const m = master(req);
+            rotateMaster(m);
+            res.json({ id: m.id, ...linkOf(masterFor(m.id, null), req) });
+        }));
+        r.post("/:id/rekey", aw((req, res) => { const m = master(req); rekeyMaster(m); res.json({ id: m.id }); }));
+        r.delete("/:id", aw(async (req, res) => { res.json(await deleteMaster(master(req))); }));
+        r.get("/:id/devices", aw(async (req, res) => { res.json({ devices: await masterDevices(master(req)) }); }));
+        r.delete("/:id/devices/:device", aw(async (req, res) => { res.json(await deleteDevice(device(req))); }));
+        r.post("/:id/devices/:device/rekey", aw((req, res) => { const d = device(req); rekeyDevice(d); res.json({ id: d.id }); }));
+        r.post("/:id/devices/:device/psk", aw(async (req, res) => { res.json(await rotatePsk(device(req))); }));
+        return r;
+    }
 
     // ── Листенер и фоновое сведение ────────────────────────────────────────
     servers.onOnline(id => { void reconcile(id); });
 
     // Сервер удаляют из реестра: пока им пользуется живой мастер-ключ — нельзя. Иначе сперва
     // сводим его (ключи его не используют, значит, список пуст и пиры панели снимутся) — после
-    // удаления до него уже не дотянуться. Не вышло (нода не в сети) — удалять только с force.
+    // удаления до него уже не дотянуться. Не вышло (нода не в сети) — удалять только с force;
+    // тогда отозванные ключи перестают его ждать уже после удаления (afterDelete).
     servers.beforeDelete(async (id, force) => {
         const live = (q.liveOnServer.all(id) as { label: string }[]).map(r => r.label);
         if (live.length) return { error: `Сервер в мастер-ключах: ${live.join(", ")} — сначала уберите его оттуда`, forcible: false };
         if (servers.isOnline(id)) await reconcile(id);
         const waiting = (q.revokedOnServer.all(id) as { label: string }[]).map(r => r.label);
         const tombs = (q.tombCount.get(id) as { n: number }).n;
-        if (!waiting.length && !tombs) return null;
-        if (!force) return {
+        if (!waiting.length && !tombs || force) return null;
+        return {
             error: "Сервер не подтвердил, что снял пиров" + (waiting.length ? ` удалённых мастер-ключей (${waiting.join(", ")})` : "") +
                 ". Дождитесь, пока он выйдет на связь, или удалите принудительно — тогда пиры могут остаться на нём (снять: awg-ctrl peers drop)",
             forcible: true,
         };
+    });
+    servers.afterDelete(id => {
         q.serverRelease.run(id);
         q.revokedGone.run();
-        return null;
     });
 
     function start() {
@@ -872,5 +935,5 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         });
     }
 
-    return { masterKeys, devices, start };
+    return { masterKeys, devices, apiRouter, start };
 }

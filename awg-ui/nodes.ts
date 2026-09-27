@@ -148,12 +148,15 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
     const onlineHandlers: ((id: number) => void)[] = [];
     const onOnline = (cb: (id: number) => void) => { onlineHandlers.push(cb); };
 
-    // Подписчики на «сервер удаляют»: подписка сперва снимает с него своих пиров и может
-    // запретить удаление. forcible — запрет снимается подтверждением оператора (force):
-    // сервер просто не всё успел подтвердить, а не используется.
+    // Подписчики на «сервер удаляют». beforeDelete — проверка: может запретить удаление и не
+    // меняет ui.db (запретить может и следующий подписчик). forcible — запрет снимается
+    // подтверждением оператора (force): сервер не всё успел подтвердить, а не используется.
+    // afterDelete — уборка своих ссылок на сервер, когда он уже удалён.
     type DeleteVeto = { error: string; forcible: boolean } | null;
     const deleteHandlers: ((id: number, force: boolean) => Promise<DeleteVeto>)[] = [];
     const beforeDelete = (cb: (id: number, force: boolean) => Promise<DeleteVeto>) => { deleteHandlers.push(cb); };
+    const afterHandlers: ((id: number) => void)[] = [];
+    const afterDelete = (cb: (id: number) => void) => { afterHandlers.push(cb); };
 
     /** Сервер по умолчанию: локальный, а без него — первая нода. */
     function defaultId(): number {
@@ -350,12 +353,7 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         const id = idOf(req);
         const n = validId(id) ? q.byId.get(id) as NodeRow | undefined : undefined;
         if (!n) { res.status(404).json({ error: "Не найден" }); return; }
-        // Ключи API ссылаются на server_id — не оставляем их висеть в воздухе. Мастер-ключи
-        // проверяет подписка в своём обработчике.
-        let used = false;
-        try { used = (uidb.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE server_id = ?").get(id) as { n: number }).n > 0; }
-        catch { /* таблицы ещё нет */ }
-        if (used) { res.status(409).json({ error: "К серверу привязаны ключи API — сначала удалите их" }); return; }
+        // Ключи API и мастер-ключи проверяют их владельцы в своих обработчиках (beforeDelete).
         const force = req.query.force === "1";
         for (const cb of deleteHandlers) {
             let veto: DeleteVeto;
@@ -370,8 +368,9 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         for (const t of ["peer_tombstones", "server_profiles"]) {
             try { uidb.prepare(`DELETE FROM ${t} WHERE server_id = ?`).run(id); } catch { /* таблицы ещё нет */ }
         }
+        for (const cb of afterHandlers) { try { cb(id); } catch (e) { console.warn(`nodes: уборка после удаления #${id}: ${(e as Error).message}`); } }
         res.json({ success: true, id });
     });
 
-    return { router, ctrlFor, exists, isOnline, ids, onOnline, beforeDelete, defaultId, start };
+    return { router, ctrlFor, exists, isOnline, ids, onOnline, beforeDelete, afterDelete, defaultId, start };
 }

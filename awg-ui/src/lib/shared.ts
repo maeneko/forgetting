@@ -32,7 +32,8 @@ export interface ApiKey {
     id:         number;
     label:      string;
     prefix:     string;
-    server_id:  number;
+    server_id:  number;        // сервер по умолчанию для /api/v1/users
+    servers:    number[];      // какие серверы видит ключ
     created_at: number;
     last_used:  number | null;
 }

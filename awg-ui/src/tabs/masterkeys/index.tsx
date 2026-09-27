@@ -3,8 +3,9 @@
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback } from 'react';
 import QRCode from 'qrcode';
-import { apiFetch, copyText, bytes, timeAgo, genLabel, type NodeInfo, type PageProps } from '../../lib/shared';
+import { apiFetch, copyText, bytes, timeAgo, type NodeInfo, type PageProps } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings } from '../../components/icons';
+import ServerPicker, { serverName } from '../../components/ServerPicker';
 import './masterkeys.css';
 
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
@@ -72,8 +73,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         }, 'Мастер-ключ создан');
     }, [label, limit, nodes, token, act]);
 
-    const serverNames = useCallback((ids: number[]) =>
-        ids.map(id => nodes.find(n => n.id === id)?.name ?? `#${id}`).join(', '), [nodes]);
+    const serverNames = useCallback((ids: number[]) => ids.map(id => serverName(nodes, id)).join(', '), [nodes]);
 
     const remove = useCallback(async (k: MasterKey) => {
         if (!confirm(`Удалить «${k.label}»? Все ${k.devices} устройств потеряют доступ.`)) return;
@@ -182,27 +182,9 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 пиры его устройств с этого сервера удалятся; поставить — добавятся. Последний не снимается. */}
             <section className="mk-box">
                 <h4 className="mk-box-title">Серверы ключа</h4>
-                {nodes.map(n => {
-                    const on = k.servers.includes(n.id);
-                    const last = on && k.servers.length === 1;
-                    const h = n.health;
-                    return (
-                        <label className={`mk-server${last ? ' mk-server--locked' : ''}`} key={n.id}>
-                            <input type="checkbox" checked={on} disabled={last}
-                                onChange={() => {
-                                    const next = on ? k.servers.filter(id => id !== n.id) : [...k.servers, n.id];
-                                    act(() => apiFetch('PATCH', `/ui/masterkeys/${k.id}`, token, { servers: next }),
-                                        on ? `«${h?.server || n.name}» убран из ключа` : `«${h?.server || n.name}» добавлен в ключ`);
-                                }} />
-                            <span className={`chip chip--${n.online ? 'online' : 'offline'} mk-server-dot`} title={n.online ? 'В сети' : 'Нет связи'}>
-                                <span className="chip-dot" />
-                            </span>
-                            <span className="mk-server-name">{h?.server || n.name}</span>
-                            {h?.ip && <code className="mk-server-ip">{h.ip}</code>}
-                            {h?.gen && <span className="mk-server-gen">{genLabel(h.gen)}</span>}
-                        </label>
-                    );
-                })}
+                <ServerPicker nodes={nodes} selected={k.servers} onChange={(next, n, added) =>
+                    act(() => apiFetch('PATCH', `/ui/masterkeys/${k.id}`, token, { servers: next }),
+                        added ? `«${serverName(nodes, n.id)}» добавлен в ключ` : `«${serverName(nodes, n.id)}» убран из ключа`)} />
                 <p className="mk-setting-hint">Новые серверы добавляются кнопкой «Добавить сервер» над вкладкой.</p>
             </section>
         </div>

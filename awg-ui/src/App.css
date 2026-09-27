@@ -732,3 +732,23 @@ tbody td:last-child  { padding-right: 20px; }
     }
     .qr-img { width: 100%; height: auto; aspect-ratio: 1; }
 }
+
+/* Выбор набора серверов галочками (components/ServerPicker): серверы мастер-ключа,
+   видимость API-ключа */
+.server-pick {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface-container);
+    border-radius: 12px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--on-surface);
+    cursor: pointer;
+}
+.server-pick input { accent-color: var(--primary); margin: 0; }
+.server-pick:hover { background: var(--state-primary); }
+.server-pick--locked { cursor: default; }
+.server-pick--locked:hover { background: var(--surface-container); }
+.server-pick-dot { padding: 0; background: none; }
+.server-pick-name { font-weight: 500; }
+.server-pick-ip, .server-pick-gen { font-size: 12px; color: var(--neutral-text); }
+.server-pick-ip { font-family: var(--mono); margin-left: auto; }

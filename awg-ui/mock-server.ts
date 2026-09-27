@@ -43,7 +43,7 @@ let nodeId = 2;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
 
 // ── API-ключи ──
-const apiKeys = [{ id: 1, label: "ci-bot", prefix: "awgk_Xk2mQ9aB…", server_id: 0, created_at: now() - 86400 * 5, last_used: now() - 3600 as number | null }];
+const apiKeys = [{ id: 1, label: "ci-bot", prefix: "awgk_Xk2mQ9aB…", server_id: 0, servers: [0], created_at: now() - 86400 * 5, last_used: now() - 3600 as number | null }];
 let apiId = 1;
 
 // ── мастер-ключи sen:// ──
@@ -108,7 +108,13 @@ app.post("/api/users/:name", (q, r) => { const u = U_(q).find(x => x.name === q.
 app.delete("/api/users/:name", (q, r) => { const users = U_(q); const i = users.findIndex(x => x.name === q.params.name); if (i >= 0) users.splice(i, 1); r.json({ success: true }); });
 
 app.get("/ui/apikeys", (_q, r) => r.json({ keys: apiKeys }));
-app.post("/ui/apikeys", (q, r) => { const k = { id: ++apiId, label: q.body.label, prefix: "awgk_" + crypto.randomBytes(4).toString("hex") + "…", server_id: 0, created_at: now(), last_used: null }; apiKeys.push(k); r.status(201).json({ ...k, key: "awgk_" + crypto.randomBytes(24).toString("base64url") }); });
+app.post("/ui/apikeys", (q, r) => { const sid = Number(q.body.server_id ?? 0); const k = { id: ++apiId, label: q.body.label, prefix: "awgk_" + crypto.randomBytes(4).toString("hex") + "…", server_id: sid, servers: q.body.servers ?? [sid], created_at: now(), last_used: null }; apiKeys.push(k); r.status(201).json({ ...k, key: "awgk_" + crypto.randomBytes(24).toString("base64url") }); });
+app.patch("/ui/apikeys/:id", (q, r) => {
+    const k = apiKeys.find(x => x.id === Number(q.params.id)); if (!k) return r.status(404).json({ error: "Не найден" });
+    if (!Array.isArray(q.body.servers) || !q.body.servers.length) return r.status(400).json({ error: "Нужен хотя бы один сервер" });
+    k.servers = [...q.body.servers].sort(); if (!k.servers.includes(k.server_id)) k.server_id = k.servers[0];
+    r.json({ id: k.id, server_id: k.server_id, servers: k.servers });
+});
 app.delete("/ui/apikeys/:id", (q, r) => { const i = apiKeys.findIndex(k => k.id === Number(q.params.id)); if (i >= 0) apiKeys.splice(i, 1); r.json({ success: true }); });
 
 app.get("/ui/masterkeys", (_q, r) => r.json({ enabled: true, tls: false, keys: masters.map(mkOut) }));

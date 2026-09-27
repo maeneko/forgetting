@@ -83,6 +83,39 @@ curl -s -X POST http://HOST:PORT/api/v1/users \
 `"3.1"`). Операции только CRD: у пира нет изменяемых полей, «перевыпустить»
 ключ = удалить и создать заново.
 
+У ключа — **набор серверов**, которые он видит (панель → «API-ключи» → шестерёнка;
+`0` — сервер самой панели, остальные — подключённые ноды). Пользователи `vpn://`
+заводятся на сервере ключа по умолчанию; другой сервер из набора выбирается
+заголовком `X-Server-Id: <id>`, сервер вне набора → `404`.
+
+#### Мастер-ключи `sen://`
+
+Мастер-ключ — ссылка `sen://…` для приложения SenAWG с лимитом устройств: каждое
+устройство само регистрируется по ссылке и получает пира на всех серверах ключа,
+его приватный ключ сервер не видит. API-ключ видит и меняет мастер-ключ, только
+если **все** его серверы входят в набор API-ключа; остальные для него не
+существуют (`404`).
+
+```bash
+curl -s -X POST http://HOST:PORT/api/v1/masterkeys \
+  -H "X-Api-Key: awgk_xxx" -H "Content-Type: application/json" \
+  -d '{"label":"Семья","device_limit":3}' | jq -r .link
+```
+
+| Метод | Что делает |
+|---|---|
+| `POST /api/v1/masterkeys` | Создаёт ключ. Тело `{ label, device_limit?, servers? }` (лимит 1–100, по умолчанию 3; без `servers` — весь набор API-ключа). `201` с `{ id, label, device_limit, devices, servers, created_at, link, tls }`; `403` — сервер вне набора, `503` — подписка не настроена (ключ не создаётся) |
+| `GET /api/v1/masterkeys` | Список: `{ keys: [{ id, label, device_limit, devices, servers, created_at, deleting? }] }` |
+| `GET /api/v1/masterkeys/:id` | Ключ, ссылка и устройства одним запросом: те же поля + `link`, `tls`, `device_list` (`devices` — счётчик) |
+| `PATCH /api/v1/masterkeys/:id` | `{ label?, device_limit?, servers? }` — смена серверов сразу добавляет/снимает пиров устройств |
+| `POST /api/v1/masterkeys/:id/rotate` | Новая ссылка `{ id, link, tls }`; старая не принимает новые устройства, подключённые работают дальше |
+| `POST /api/v1/masterkeys/:id/rekey` | Все устройства сменят ключи WireGuard при следующем опросе (IP и PSK сохраняются) |
+| `DELETE /api/v1/masterkeys/:id` | `{ success, id, pending }` — ключ и устройства отключаются сразу; `pending` — серверы (ноды не в сети), которые ещё не сняли пиров, до тех пор ключ в списке с `deleting` |
+| `GET /api/v1/masterkeys/:id/devices` | `{ devices: [{ id, device_name, platform, version, online, lastHandshake, rx, tx, last_seen, servers_ok, servers_total, … }] }` — статистика по всем серверам ключа |
+| `DELETE /api/v1/masterkeys/:id/devices/:device` | Отвязывает устройство, место освобождается |
+| `POST /api/v1/masterkeys/:id/devices/:device/rekey` | Устройство сменит ключ при следующем опросе |
+| `POST /api/v1/masterkeys/:id/devices/:device/psk` | Новый PSK: `{ id, pending }` — `pending` серверов ждут ноду |
+
 | Код | Когда |
 |---|---|
 | `401 {"error":"API key required"}` | заголовка нет или он не начинается с `awgk_` |
@@ -92,8 +125,9 @@ curl -s -X POST http://HOST:PORT/api/v1/users \
 Ключи лежат в собственной БД панели (`/etc/amnezia/amneziawg/ui.db`) — вне
 каталога установки, поэтому переустановка их не трогает. Сама awg-ctrl про
 внешние ключи ничего не знает: awg-ui ходит к ней своей внутренней авторизацией.
-Управлять ключами можно и без панели, по JWT: `GET/POST /ui/apikeys` и
-`DELETE /ui/apikeys/:id`.
+Управлять ключами можно и без панели, по JWT: `GET/POST /ui/apikeys` (с полем
+`servers`), `PATCH /ui/apikeys/:id` `{ "servers": [0, 2] }` — сменить набор, не
+перевыпуская ключ, и `DELETE /ui/apikeys/:id`. Подробно — `awg-ui/API.md`.
 
 ### Авторизация панели
 
@@ -155,6 +189,22 @@ base64url-декодировать, отбросить первые 4 байта
 3.x или ядро старше 5.5, и `500` с текстом причины, если ядро не приняло
 3.1-конфиг — в этом случае прежний конфиг возвращается из копии, а интерфейс
 поднимается обратно на 2.0.
+
+### Мастер-ключи
+
+Те же операции, что в `/api/v1/masterkeys`, но без ограничения набором серверов.
+
+| Метод | Что делает |
+|---|---|
+| `GET /ui/masterkeys` | `{ enabled, tls, keys: [{ id, label, device_limit, devices, servers, created_at, deleting? }] }` |
+| `POST /ui/masterkeys` | `{ label, device_limit?, servers? }` → `201` |
+| `PATCH /ui/masterkeys/:id` | `{ label?, device_limit?, servers? }` |
+| `GET /ui/masterkeys/:id/link` | `{ link, tls }` — ссылка `sen://…` |
+| `GET /ui/masterkeys/:id/devices` | Устройства со статусом и трафиком |
+| `POST /ui/masterkeys/:id/rotate`, `/rekey` | Новая ссылка / смена ключей у всех устройств |
+| `DELETE /ui/masterkeys/:id` | `{ success, id, pending }` |
+| `DELETE /ui/devices/:id` | Отвязать устройство |
+| `POST /ui/devices/:id/rekey`, `/psk` | Смена ключа / PSK у устройства |
 
 ## Управление
 

@@ -73,16 +73,55 @@ uidb.exec(`
         server_id  INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         last_used  INTEGER
-    )
+    );
+    -- Какие серверы видит ключ: на них он заводит vpn://-пользователей и в их пределах
+    -- управляет мастер-ключами. api_keys.server_id — сервер по умолчанию для /api/v1/users,
+    -- всегда входит в набор.
+    CREATE TABLE IF NOT EXISTS api_key_servers (
+        key_id    INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+        server_id INTEGER NOT NULL,
+        PRIMARY KEY (key_id, server_id)
+    );
+    -- Ключи со времён одного сервера: набор — их server_id.
+    INSERT OR IGNORE INTO api_key_servers (key_id, server_id)
+        SELECT id, server_id FROM api_keys WHERE id NOT IN (SELECT key_id FROM api_key_servers);
 `);
 
 const keyStmts = {
     list:   uidb.prepare("SELECT id, label, prefix, server_id, created_at, last_used FROM api_keys ORDER BY id"),
     insert: uidb.prepare("INSERT INTO api_keys (label, key_hash, prefix, server_id, created_at) VALUES (?, ?, ?, ?, ?)"),
     delete: uidb.prepare<[number]>("DELETE FROM api_keys WHERE id = ?"),
+    byId:   uidb.prepare<[number]>("SELECT * FROM api_keys WHERE id = ?"),
+    setDefault: uidb.prepare<[number, number]>("UPDATE api_keys SET server_id = ? WHERE id = ?"),
+    serversOf:  uidb.prepare<[number]>("SELECT server_id FROM api_key_servers WHERE key_id = ? ORDER BY server_id"),
+    serverAdd:  uidb.prepare<[number, number]>("INSERT OR IGNORE INTO api_key_servers (key_id, server_id) VALUES (?, ?)"),
+    serversClear: uidb.prepare<[number]>("DELETE FROM api_key_servers WHERE key_id = ?"),
+    keysOnServer: uidb.prepare<[number]>(
+        "SELECT k.id, k.label, k.server_id, (SELECT COUNT(*) FROM api_key_servers x WHERE x.key_id = k.id) AS n FROM api_keys k JOIN api_key_servers s ON s.key_id = k.id WHERE s.server_id = ?"),
     byHash: uidb.prepare<[string]>("SELECT * FROM api_keys WHERE key_hash = ?"),
     touch:  uidb.prepare<[number, number]>("UPDATE api_keys SET last_used = ? WHERE id = ?"),
 };
+
+const keyServers = (id: number) => (keyStmts.serversOf.all(id) as { server_id: number }[]).map(r => r.server_id);
+
+// Набор серверов ключа целиком. Сервер по умолчанию остаётся, если он в наборе, иначе —
+// наименьший из набора.
+function setKeyServers(id: number, ids: number[]) {
+    const row = keyStmts.byId.get(id) as ApiKeyRow;
+    uidb.transaction(() => {
+        keyStmts.serversClear.run(id);
+        for (const sid of ids) keyStmts.serverAdd.run(id, sid);
+        if (!ids.includes(row.server_id)) keyStmts.setDefault.run(ids[0], id);
+    })();
+}
+
+// Набор серверов из тела запроса: непустой, без повторов, только существующие.
+function parseKeyServers(v: unknown): number[] | string {
+    if (!Array.isArray(v) || v.length === 0) return "Нужен хотя бы один сервер";
+    const ids = [...new Set(v)];
+    if (!ids.every(id => Number.isInteger(id) && nodes.exists(id as number))) return "Такого сервера нет";
+    return (ids as number[]).sort((a, b) => a - b);
+}
 
 function hashKey(key: string): string {
     return crypto.createHash("sha256").update(key).digest("hex");
@@ -173,26 +212,43 @@ app.get("/ui/brand", (_req: Request, res: Response) => {
 
 // Управление ключами внешнего API — роуты самой awg-ui, в awg-ctrl не идут.
 app.get("/ui/apikeys", requireAuth, (_req: Request, res: Response) => {
-    res.json({ keys: keyStmts.list.all() });
+    res.json({ keys: (keyStmts.list.all() as ApiKeyRow[]).map(k => ({ ...k, servers: keyServers(k.id) })) });
 });
 
+// servers — набор серверов ключа; без него — server_id (по-старому) или сервер по умолчанию.
 app.post("/ui/apikeys", requireAuth, (req: Request, res: Response) => {
-    const { label, server_id } = req.body as { label?: string; server_id?: number };
+    const { label, server_id, servers } = req.body as { label?: string; server_id?: number; servers?: unknown };
     if (!label || !/^[\w \-]{1,40}$/.test(label)) {
         res.status(400).json({ error: "Метка: буквы, цифры, пробел, _ и -, до 40 символов" }); return;
     }
-    const sid = server_id === undefined ? nodes.defaultId() : Number(server_id);
-    if (!Number.isInteger(sid) || !nodes.exists(sid)) { res.status(400).json({ error: "Такого сервера нет" }); return; }
+    const ids = parseKeyServers(servers ?? [server_id === undefined ? nodes.defaultId() : Number(server_id)]);
+    if (typeof ids === "string") { res.status(400).json({ error: ids }); return; }
+    const sid = server_id !== undefined && ids.includes(Number(server_id)) ? Number(server_id) : ids[0];
     const { key, hash, prefix } = genApiKey();
-    const info = keyStmts.insert.run(label, hash, prefix, sid, Math.floor(Date.now() / 1000));
+    let id = 0;
+    uidb.transaction(() => {
+        id = Number(keyStmts.insert.run(label, hash, prefix, sid, Math.floor(Date.now() / 1000)).lastInsertRowid);
+        for (const s of ids) keyStmts.serverAdd.run(id, s);
+    })();
     // Открытое значение отдаётся один раз — дальше в БД только хэш.
-    res.status(201).json({ id: info.lastInsertRowid, label, prefix, key });
+    res.status(201).json({ id, label, prefix, key, server_id: sid, servers: ids });
+});
+
+// Сменить набор серверов, не перевыпуская ключ.
+app.patch("/ui/apikeys/:id", requireAuth, (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || !keyStmts.byId.get(id)) { res.status(404).json({ error: "Не найден" }); return; }
+    const ids = parseKeyServers((req.body as { servers?: unknown } | undefined)?.servers);
+    if (typeof ids === "string") { res.status(400).json({ error: ids }); return; }
+    setKeyServers(id, ids);
+    const row = keyStmts.byId.get(id) as ApiKeyRow;
+    res.json({ id, server_id: row.server_id, servers: ids });
 });
 
 app.delete("/ui/apikeys/:id", requireAuth, (req: Request, res: Response) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) { res.status(400).json({ error: "Неверный id" }); return; }
-    keyStmts.delete.run(id);
+    uidb.transaction(() => { keyStmts.serversClear.run(id); keyStmts.delete.run(id); })();
     res.json({ success: true, id });
 });
 
@@ -214,7 +270,7 @@ async function proxy(req: Request, res: Response) {
     }
 }
 
-interface ExtRequest extends Request { apiKey?: ApiKeyRow; }
+interface ExtRequest extends Request { apiKey?: ApiKeyRow; servers?: number[]; serverId?: number; }
 
 function requireApiKey(req: Request, res: Response, next: NextFunction) {
     const key = (req.headers["x-api-key"] as string) ?? "";
@@ -223,6 +279,18 @@ function requireApiKey(req: Request, res: Response, next: NextFunction) {
     if (!row) { res.status(401).json({ error: "Invalid API key" }); return; }
     keyStmts.touch.run(Math.floor(Date.now() / 1000), row.id);
     (req as ExtRequest).apiKey = row;
+    (req as ExtRequest).servers = keyServers(row.id);
+    next();
+}
+
+// Сервер для /api/v1/users: X-Server-Id из набора ключа, без заголовка — сервер ключа по
+// умолчанию. Сервер вне набора — как несуществующий.
+function pickKeyServer(req: Request, res: Response, next: NextFunction) {
+    const r = req as ExtRequest;
+    const raw = req.headers["x-server-id"];
+    const id = raw === undefined ? r.apiKey!.server_id : Number(raw);
+    if (!Number.isInteger(id) || !r.servers!.includes(id)) { res.status(404).json({ error: "Сервер не найден" }); return; }
+    r.serverId = id;
     next();
 }
 
@@ -243,8 +311,9 @@ interface ExtUser { name: string; ip: string; vpn_key: string; key_gen: string }
 const ext = express.Router();
 ext.use(requireApiKey);
 
-// Ключ привязан к server_id — все вызовы уходят на его сервер.
-const ctrlOf = (req: Request) => nodes.ctrlFor((req as ExtRequest).apiKey?.server_id ?? 0);
+// vpn://-пользователи живут на одном сервере — на выбранном pickKeyServer.
+ext.use("/users", pickKeyServer);
+const ctrlOf = (req: Request) => nodes.ctrlFor((req as ExtRequest).serverId ?? 0);
 
 // Express 4 не ловит отказы async-обработчиков: незакрытый reject (awg-ctrl не
 // отвечает, внутренний ключ не загружен) уронил бы весь процесс панели. Ответ
@@ -293,6 +362,22 @@ app.use("/ui/nodes", requireAuth, nodes.router);
 const sub = createSub({ uidb, servers: nodes, baseDir: __dirname });
 app.use("/ui/masterkeys", requireAuth, sub.masterKeys);
 app.use("/ui/devices",    requireAuth, sub.devices);
+// Мастер-ключи во внешнем API — в пределах набора серверов API-ключа. ext уже смонтирован
+// на /api/v1 до JWT-прокси, роуты в нём можно добавлять и позже.
+ext.use("/masterkeys", sub.apiRouter(req => (req as ExtRequest).servers ?? []));
+
+// Сервер удаляют из реестра: ключ API, для которого он единственный, — повод отказать
+// (ключ остался бы без серверов); у остальных он убирается из набора, когда сервер удалён.
+type KeyOnServer = { id: number; label: string; server_id: number; n: number };
+nodes.beforeDelete(async id => {
+    const only = (keyStmts.keysOnServer.all(id) as KeyOnServer[]).filter(k => k.n === 1).map(k => k.label);
+    return only.length
+        ? { error: `Это единственный сервер ключей API: ${only.join(", ")} — сначала удалите их или добавьте им другой сервер`, forcible: false }
+        : null;
+});
+nodes.afterDelete(id => {
+    for (const k of keyStmts.keysOnServer.all(id) as KeyOnServer[]) setKeyServers(k.id, keyServers(k.id).filter(s => s !== id));
+});
 
 app.use(["/api", "/health", "/awg"], requireAuth, proxy);
 
