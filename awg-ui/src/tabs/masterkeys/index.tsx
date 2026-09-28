@@ -103,6 +103,25 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         catch (e) { showMsg(errText(e)); }
     }, [fetchLink, showMsg]);
 
+    // Лимит ниже числа устройств: сервер сразу отвяжет лишних, начиная с подключившихся последними, —
+    // поэтому сперва спросить и назвать, кого именно.
+    const saveLimit = useCallback(async (k: MasterKey) => {
+        const limit = Number(limitEdit);
+        const list = devs[k.id] ?? [];
+        const extra = list.length - limit;
+        if (Number.isInteger(limit) && extra > 0) {
+            const names = [...list].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, extra)
+                .map(d => `«${d.device_name || d.id}»`).join(', ');
+            if (!confirm(`Лимит ${limit} меньше, чем устройств (${list.length}). Будут отвязаны подключившиеся последними: ${names}. Продолжить?`)) return;
+        }
+        try {
+            const r = await apiFetch('PATCH', `/ui/masterkeys/${k.id}`, token, { device_limit: limit });
+            const n: number = r.unbound?.length ?? 0;
+            showMsg(n ? `Лимит сохранён, отвязано устройств: ${n}` : 'Лимит сохранён');
+            await load();
+        } catch (e) { showMsg(errText(e)); }
+    }, [limitEdit, devs, token, load, showMsg]);
+
     const fold = (id: number) => setFolded(prev => {
         const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
     });
@@ -159,8 +178,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                     <div className="mk-setting-ctl">
                         <input id={`mk-limit-${k.id}`} className="field mk-limit-input" type="number" min={1} max={100}
                             value={limitEdit} onChange={e => setLimitEdit(e.target.value)} />
-                        <button className="btn btn--tonal" onClick={() =>
-                            act(() => apiFetch('PATCH', `/ui/masterkeys/${k.id}`, token, { device_limit: Number(limitEdit) }), 'Лимит сохранён')}>
+                        <button className="btn btn--tonal" onClick={() => saveLimit(k)}>
                             Сохранить
                         </button>
                     </div>

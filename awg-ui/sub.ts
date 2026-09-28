@@ -781,8 +781,19 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
             ids = next;
         }
         q.masterUpdate.run(nl as string, nd as number, m.id);
+        // Лимит стал меньше, чем устройств: лишние отвязываются, начиная с подключившихся последними, —
+        // первые, кто занял места, их сохраняют. Как отзыв в панели: пиры снимаются, устройство получит 410.
+        const unbound: number[] = [];
+        const devices = q.devicesOf.all(m.id) as DeviceRow[];
+        if (devices.length > (nd as number)) {
+            const newest = [...devices].sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+            for (const d of newest.slice(0, devices.length - (nd as number))) {
+                affected.push(...forgetDevice(d));
+                unbound.push(d.id);
+            }
+        }
         await reconcileAll(affected);
-        return { id: m.id, label: nl as string, device_limit: nd as number, servers: ids };
+        return { id: m.id, label: nl as string, device_limit: nd as number, servers: ids, unbound };
     }
 
     // Новая ссылка; устройства продолжают работать: у них auth_pub, а не secret.

@@ -129,7 +129,11 @@ app.post("/ui/masterkeys", (q, r) => {
 app.patch("/ui/masterkeys/:id", (q, r) => {
     const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
     if (q.body.servers !== undefined) { if (!Array.isArray(q.body.servers) || !q.body.servers.length) return r.status(400).json({ error: "Нужен хотя бы один сервер" }); m.servers = [...q.body.servers].sort(); }
-    if (q.body.label) m.label = q.body.label; if (q.body.device_limit) m.device_limit = q.body.device_limit; r.json(mkOut(m));
+    if (q.body.label) m.label = q.body.label; if (q.body.device_limit) m.device_limit = q.body.device_limit;
+    // Как sub.ts: лишние устройства сверх лимита — отвязать, начиная с подключившихся последними.
+    const unbound = [...m.devs].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, Math.max(0, m.devs.length - m.device_limit)).map(d => d.id);
+    m.devs = m.devs.filter(d => !unbound.includes(d.id));
+    r.json({ ...mkOut(m), unbound });
 });
 app.post("/ui/masterkeys/:id/rotate", (q, r) => { const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" }); m.secret = crypto.randomBytes(16); r.json({ id: m.id }); });
 app.post("/ui/masterkeys/:id/rekey", (q, r) => { const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" }); m.devs.forEach(d => d.rekey_requested = true); r.json({ id: m.id }); });
