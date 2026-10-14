@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  # Ручной запуск: тег создаётся при публикации на коммите, с которого запущен workflow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Тег релиза, например v0.4.0'
+        required: true
 
 permissions:
   contents: write
@@ -11,6 +17,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,12 +38,12 @@ jobs:
 
       # Архив на архитектуру: Go-бинарник awg-control + собранный фронтенд + .env.
       - name: Package archives
-        run: sh tools/release/package.sh "${GITHUB_REF_NAME#v}"
+        run: sh tools/release/package.sh "${TAG#v}"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "${GITHUB_REF_NAME}" awgcontrol-"${VERSION}"-linux-*.tar.gz \
-            --title "${GITHUB_REF_NAME}" --generate-notes --prerelease
+          VERSION="${TAG#v}"
+          gh release create "${TAG}" awgcontrol-"${VERSION}"-linux-*.tar.gz \
+            --target "${GITHUB_SHA}" --title "${TAG}" --generate-notes --prerelease
