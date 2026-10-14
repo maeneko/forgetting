@@ -9,14 +9,16 @@ import (
 	"syscall"
 
 	"github.com/maeneko/forgetting/internal/agent"
+	"github.com/maeneko/forgetting/internal/cli"
 	"github.com/maeneko/forgetting/internal/ctrl"
 	"github.com/maeneko/forgetting/internal/ui"
 )
 
 func main() {
+	// Без аргументов или с командой оператора — CLI (меню, start/stop/…), как прежний awg-ctrl.
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: awg-control <ctrl|ui|agent|start|stop|restart|status|…>")
-		os.Exit(1)
+		cli.Main(nil)
+		return
 	}
 	switch os.Args[1] {
 	case "ctrl":
@@ -54,7 +56,6 @@ func main() {
 		defer stop()
 		a.Run(ctx)
 	default:
-		fmt.Fprintf(os.Stderr, "awg-control: неизвестная команда %q\n", os.Args[1])
-		os.Exit(1)
+		cli.Main(os.Args[1:])
 	}
 }
