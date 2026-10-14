@@ -57,7 +57,7 @@ const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семь
 const signPub = crypto.randomBytes(32);
 const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
 // Мок: устройство «догнано» на всех серверах ключа, кроме Tokyo (id 2 — ещё не подключалась).
-const devOut = (m: MK, d: Dev) => ({ ...d, servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
+const devOut = (m: MK, d: Dev) => ({ ...d, priority: shapingOf[0]?.enabled && d.id === masters[0]?.devs[0]?.id ? "background" : "normal", servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
 const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
 
 app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: MOCK_VERSION }));
@@ -95,8 +95,91 @@ app.delete("/ui/nodes/:id", (q, r) => {
 app.post("/awg/restart", (_q, r) => r.json({ up: true }));
 app.get("/awg/status", (_q, r) => r.json({ up: true, peers: users.length }));
 
+// Монитор: «установка» и «удаление» Prometheus с ходом процесса (как лог CLI на реальном сервере).
+const MON_LOGS = {
+    install: ["1/4  установка пакета prometheus", "Reading package lists…", "Setting up prometheus (2.45.0)…", "2/4  токен и конфиг", "3/4  слушаем только 127.0.0.1:9090, хранение 15d", "4/4  запуск", "✓ Prometheus работает на 127.0.0.1:9090, метрики панели скрейпятся каждые 15 с."],
+    remove:  ["1/3  остановка сервиса", "2/3  токен", "3/3  удаление пакета и накопленных данных", "Removing prometheus (2.45.0)…", "Purging configuration files…", "✓ Prometheus удалён вместе с накопленными графиками."],
+};
+let monJob: { action: "install" | "remove"; start: number } | null = null;
+let monReady = false;
+const MON_MS = 6000;
+const monRunning = () => !!monJob && Date.now() - monJob.start < MON_MS;
+app.get("/ui/monitor", (_q, r) => {
+    if (monJob && !monRunning()) monReady = monJob.action === "install";
+    let job = null;
+    if (monJob) {
+        const lines = MON_LOGS[monJob.action];
+        const n = monRunning() ? Math.max(1, Math.floor(((Date.now() - monJob.start) / MON_MS) * lines.length)) : lines.length;
+        job = { action: monJob.action, running: monRunning(), exit: monRunning() ? null : 0, log: lines.slice(0, n).join("\n") };
+    }
+    r.json({ ready: monReady, can_install: true, command: "awg-ctrl monitor install", job });
+});
+for (const action of ["install", "remove"] as const) {
+    app.post(`/ui/monitor/${action}`, (_q, r) => { if (!monRunning()) monJob = { action, start: Date.now() }; r.status(202).json({ running: true, action }); });
+}
+app.get("/ui/monitor/overview", (q, r) => {
+    const R: Record<string, [number, number]> = { "1h": [3600, 15], "6h": [21600, 60], "24h": [86400, 300] };
+    const [sec, step] = R[String(q.query.range ?? "1h")] ?? R["1h"];
+    const to = Math.floor(Date.now() / step) * step, from = to - sec;
+    const pts = (f: (i: number, t: number) => number): [number, number][] => Array.from({ length: Math.floor(sec / step) + 1 }, (_, i) => [from + i * step, Math.max(0, f(i, from + i * step))]);
+    const wave = (t: number, per: number, ph = 0) => Math.sin((t / per) * 2 * Math.PI + ph);
+    const per = sec / 3;
+    const down = pts((_, t) => 110e6 + 70e6 * wave(t, per) + 25e6 * wave(t, per / 7) + rnd(12e6));
+    const up   = pts((_, t) => 14e6 + 7e6 * wave(t, per, 1) + rnd(3e6));
+    const online = pts((_, t) => Math.round(9 + 3 * wave(t, per * 1.6) + (rnd(100) > 90 ? 1 : 0)));
+    const heavy  = pts((_, t) => (wave(t, per) > 0.55 ? 1 : 0));
+    const drops  = pts((_, t) => (wave(t, per) > 0.55 ? 3 + rnd(6) : rnd(10) > 8 ? 0.4 : 0));
+    const cpu = pts((_, t) => 38 + 22 * wave(t, per * 0.8, 2) + 12 * wave(t, per / 5) + rnd(6));
+    const mem = pts((_, t) => 54 + 6 * wave(t, per * 3) + rnd(2));
+    const scale = (a: [number, number][], k: number) => a.map(([t, v]) => [t, v * k] as [number, number]);
+    // Один сервер — тот, что выбран в сервер-баре (?server=<id>): ядро (0) или нода
+    const id = Number(q.query.server ?? 0);
+    const k = id === 0 ? 0.7 : 0.3;
+    const down1 = scale(down, k), up1 = scale(up, k);
+    if (id === 3) return r.json({ range: q.query.range ?? "1h", step, from, to, servers: [], total: { down: [], up: [], online: [], heavy: [], drops: [], cpu: [], mem: [] } });
+    r.json({ range: q.query.range ?? "1h", step, from, to,
+        servers: [{ id, name: id === 0 ? "VPN (mock)" : "Frankfurt", ok: true, down: down1.at(-1)![1], up: up1.at(-1)![1], online: id === 0 ? 7 : 3,
+            heavy: id === 0 ? heavy.at(-1)![1] : 0, congested: id === 0 && heavy.at(-1)![1] > 0,
+            cpu: id === 0 ? cpu.at(-1)![1] : cpu.at(-1)![1] * 0.5, mem: id === 0 ? mem.at(-1)![1] : 31, cores: id === 0 ? 4 : 2, mem_total: (id === 0 ? 4 : 2) * 2 ** 30 }],
+        total: { down: down1, up: up1, online: scale(online, k), heavy: id === 0 ? heavy : scale(heavy, 0), drops: id === 0 ? drops : scale(drops, 0),
+            cpu: id === 0 ? cpu : scale(cpu, 0.5), mem: id === 0 ? mem : scale(mem, 0.55) } });
+});
+
+// Prometheus: токен метрик и сам /metrics (без проверки токена — мок).
+let promTok: { prefix: string; created_at: number; last_used: number | null } | null = null;
+const promView = () => promTok ? { exists: true, ...promTok, per_peer: false } : { exists: false, per_peer: false };
+app.get("/ui/metrics-token", (_q, r) => r.json(promView()));
+app.post("/ui/metrics-token", (_q, r) => {
+    const token = "awgm_" + crypto.randomBytes(24).toString("base64url");
+    promTok = { prefix: token.slice(0, 13) + "…", created_at: now(), last_used: null };
+    r.status(201).json({ ...promView(), token });
+});
+app.delete("/ui/metrics-token", (_q, r) => { promTok = null; r.json(promView()); });
+app.get("/metrics", (_q, r) => r.type("text/plain").send('awg_panel_info{version="mock"} 1\nawg_servers 4\n'));
+
+// Деление канала: состояние по серверам; usersOf[1] играет «старую ноду» без маршрута (404 → «обнови сервер»).
+const shapingOf: Record<number, { enabled: boolean; downMbit: number; upMbit: number; auto: boolean }> = {};
+const shapingView = (id: number) => {
+    const settings = shapingOf[id] ?? { enabled: false, downMbit: 0, upMbit: 0, auto: true };
+    const on = settings.enabled;
+    return {
+        settings, active: on, congested: on && id === 0, heavy: on && id === 0 ? ["10.9.0.2"] : [],
+        devices: on ? 7 : 0, rateDown: on ? Math.round(settings.downMbit * 0.9 * 10) / 10 : 0, rateUp: on ? 12.4 : 0,
+    };
+};
+app.get("/api/shaping", (q, r) => srv(q) === 1 ? r.status(404).json({ error: "Not found" }) : r.json(shapingView(srv(q))));
+app.put("/api/shaping", (q, r) => {
+    const id = srv(q), b = q.body ?? {};
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    if (b.enabled && !(b.downMbit >= 1 && b.upMbit >= 1)) return r.status(400).json({ error: "Для включения укажите ширину канала в обе стороны" });
+    shapingOf[id] = { enabled: !!b.enabled, downMbit: Number(b.downMbit) || 0, upMbit: Number(b.upMbit) || 0, auto: !!b.auto };
+    r.json(shapingView(id));
+});
+
 app.get("/api/users", (q, r) => r.json({ users: U_(q) }));
-app.get("/api/users/stats", (q, r) => r.json({ users: U_(q).map(({ vpn_key, pub_key, ...u }) => u) }));
+// Приоритет в моке: пока на сервере 0 включено деление канала, первый пользователь «фоновый».
+const prioOf = (q: express.Request, ip: string) => (srv(q) === 0 && shapingOf[0]?.enabled && ip === "10.9.0.2" ? "background" : "normal");
+app.get("/api/users/stats", (q, r) => r.json({ users: U_(q).map(({ vpn_key, pub_key, ...u }) => ({ ...u, priority: prioOf(q, u.ip) })) }));
 app.post("/api/users/reissue", (q, r) => r.json({ total: U_(q).length, reissued: U_(q).length, regenerated: [], backup: "" }));
 app.post("/api/users", (q, r) => {
     const users = U_(q);
@@ -119,6 +202,19 @@ app.patch("/ui/apikeys/:id", (q, r) => {
 });
 app.delete("/ui/apikeys/:id", (q, r) => { const i = apiKeys.findIndex(k => k.id === Number(q.params.id)); if (i >= 0) apiKeys.splice(i, 1); r.json({ success: true }); });
 
+let mockAuditSettings = { clean: false, every_h: 1, max: 10 };
+let mockCleaned: unknown[] = [];
+let mockGhost = true;
+const mockAudit = () => ({ enabled: true, settings: mockAuditSettings, cleaned: mockCleaned, report: { at: Math.floor(Date.now() / 1000) - 600, servers: [
+    { server_id: 0, status: "ok", ghosts_checked: true, foreign: 0, orphans: [], ghosts: mockGhost ? [
+        { pub_key: "Zm9yZ2V0dGluZy16b21iaWUta2V5LTAwMDAwMDAwMDA=", online: true, lastHandshake: Math.floor(Date.now() / 1000) - 30, seen_before: true } ] : [] } ] } });
+app.get("/ui/masterkeys/audit", (_q, r) => r.json(mockAudit()));
+app.post("/ui/masterkeys/audit", (_q, r) => r.json(mockAudit()));
+app.post("/ui/masterkeys/audit/clean", (_q, r) => {
+    if (mockGhost) mockCleaned = [{ at: Math.floor(Date.now() / 1000), server_id: 0, pub_key: "Zm9yZ2V0dGluZy16b21iaWUta2V5LTAwMDAwMDAwMDA=", kind: "ghost", auto: false }, ...mockCleaned];
+    mockGhost = false; r.json(mockAudit());
+});
+app.put("/ui/masterkeys/audit/settings", (q, r) => { mockAuditSettings = { ...mockAuditSettings, ...q.body }; r.json(mockAudit()); });
 app.get("/ui/masterkeys", (_q, r) => r.json({ enabled: true, tls: false, keys: masters.map(mkOut) }));
 app.post("/ui/masterkeys", (q, r) => {
     const limit = q.body.device_limit ?? 3;

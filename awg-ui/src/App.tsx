@@ -11,7 +11,8 @@ import {
 import { IcoMenu, IcoLogout, IcoSun, IcoMoon, IcoRefresh } from './components/icons';
 import ServerBar from './components/ServerBar';
 import AddServerModal from './components/AddServerModal';
-import { TABS } from './tabs';
+import ServerSettingsModal from './components/ServerSettingsModal';
+import { TABS, TABS_BY_GROUP } from './tabs';
 
 // Оболочка приложения: логин, тема, drawer/сайдбар, общая сессия (token,
 // список серверов и выбранный сервер, снэкбар) и переключение вкладок. Контент каждой вкладки приходит
@@ -26,6 +27,7 @@ export default function App() {
     const [panelVersion, setPanelVersion] = useState<string | null>(null);
     const [serverId, setServerIdState] = useState<number | null>(null);
     const [modal, setModal]           = useState<{ node?: NodeInfo } | null>(null);
+    const [settingsFor, setSettingsFor] = useState<NodeInfo | null>(null);
     const [msg, setMsg]               = useState('');
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [activeTab, setActiveTab]   = useState(TABS[0].id);
@@ -288,14 +290,19 @@ export default function App() {
                                 </span>
                             </div>
                             <hr className="drawer-divider" />
-                            {TABS.map(t => (
-                                <div
-                                    key={t.id}
-                                    className={`nav-item${t.id === activeTab ? ' nav-item--active' : ''}`}
-                                    onClick={() => { setActiveTab(t.id); setDrawerOpen(false); }}
-                                >
-                                    <t.Icon /> {t.label}
-                                </div>
+                            {TABS_BY_GROUP.map(g => (
+                                <nav key={g.id} className="nav-group" aria-label={g.label}>
+                                    <span className="nav-group-title">{g.label}</span>
+                                    {g.tabs.map(t => (
+                                        <div
+                                            key={t.id}
+                                            className={`nav-item${t.id === activeTab ? ' nav-item--active' : ''}`}
+                                            onClick={() => { setActiveTab(t.id); setDrawerOpen(false); }}
+                                        >
+                                            <t.Icon /> {t.label}
+                                        </div>
+                                    ))}
+                                </nav>
                             ))}
 
                             <div className="sidebar-spacer" />
@@ -318,6 +325,8 @@ export default function App() {
                                     onAdd={() => setModal({})}
                                     onJoin={n => setModal({ node: n })}
                                     onDelete={deleteNode}
+                                    // Сначала выбираем сервер: запросы модалки идут с X-Server-Id выбранного
+                                    onSettings={n => { pickServer(n.id); setSettingsFor(n); }}
                                     onRestartAwg={restartAwg}
                                     restarting={restarting}
                                     showRestart={showRestart}
@@ -342,6 +351,15 @@ export default function App() {
                     node={modal.node}
                     onClose={() => setModal(null)}
                     onChanged={() => { loadNodes(token).catch(() => { /* следующий тик */ }); }}
+                    showMsg={showMsg}
+                />
+            )}
+
+            {settingsFor && (
+                <ServerSettingsModal
+                    token={token}
+                    node={settingsFor}
+                    onClose={() => setSettingsFor(null)}
                     showMsg={showMsg}
                 />
             )}

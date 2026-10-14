@@ -1,0 +1,11 @@
+{
+  "id": "monitor",
+  "label": "Монитор",
+  "icon": "pulse",
+  "group": "server",
+  "order": 1.7,
+  "chrome": {
+    "serverBar": false,
+    "restart": false
+  }
+}

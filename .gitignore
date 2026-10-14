@@ -21,3 +21,6 @@ yarn-error.log*
 # Все markdown, кроме README.md
 *.md
 !README.md
+# Go: бинарники и прогоны дифференциального стенда
+tools/diffbench/bin/
+tools/diffbench/out/

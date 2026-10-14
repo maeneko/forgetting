@@ -9,6 +9,8 @@ import axios    from "axios";
 import Database from "better-sqlite3";
 import { createSub } from "./sub";
 import { createNodes } from "./nodes";
+import { createMetrics } from "./metrics";
+import { createMonitor } from "./monitor";
 
 const app  = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -362,6 +364,15 @@ app.use("/ui/nodes", requireAuth, nodes.router);
 const sub = createSub({ uidb, servers: nodes, baseDir: __dirname });
 app.use("/ui/masterkeys", requireAuth, sub.masterKeys);
 app.use("/ui/devices",    requireAuth, sub.devices);
+
+// Prometheus: /metrics за отдельным токеном «только метрики» (не JWT и не ключ API), токеном
+// управляет панель. Регистрируется до SPA-фолбэка внизу, иначе его перехватит `*`.
+const metrics = createMetrics({ uidb, version: VERSION, servers: nodes });
+app.use("/ui/metrics-token", requireAuth, metrics.router);
+app.get("/metrics", metrics.requireToken, metrics.handler);
+// Монитор: встроенный Prometheus и графики во вкладке. Ставит его не панель, а awg-ctrl от root.
+const monitor = createMonitor({ ctrlLocal: ctrl, localEnabled: (process.env.LOCAL_NODE ?? "on").toLowerCase() !== "off" });
+app.use("/ui/monitor", requireAuth, monitor.router);
 // Мастер-ключи во внешнем API — в пределах набора серверов API-ключа. ext уже смонтирован
 // на /api/v1 до JWT-прокси, роуты в нём можно добавлять и позже.
 ext.use("/masterkeys", sub.apiRouter(req => (req as ExtRequest).servers ?? []));

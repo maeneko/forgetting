@@ -8,6 +8,7 @@ import {
     type User, type PageProps, type AwgGen,
 } from '../../lib/shared';
 import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe } from '../../components/icons';
+import PriorityChip from '../../components/PriorityChip';
 import './users.css';
 
 // Вкладка «Пользователи»: форма создания + таблица (десктоп) / карточки (мобильный)
@@ -28,7 +29,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
             const data = await apiFetch('GET', '/api/users/stats', tok);
             setUsers(prev => prev.map(u => {
                 const s = (data.users as User[] ?? []).find(x => x.name === u.name);
-                return s ? { ...u, online: s.online, lastHandshake: s.lastHandshake, rx: s.rx, tx: s.tx } : u;
+                return s ? { ...u, online: s.online, lastHandshake: s.lastHandshake, rx: s.rx, tx: s.tx, priority: s.priority } : u;
             }));
         } catch { /* silent */ }
     }, []);
@@ -162,6 +163,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                         <tr>
                             <th>#</th>
                             <th>Статус</th>
+                            <th>Приоритет</th>
                             <th>Имя</th>
                             <th>IP</th>
                             <th>↓ rx</th>
@@ -171,7 +173,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                     </thead>
                     <tbody>
                         {users.length === 0 ? (
-                            <tr><td colSpan={7} className="empty">Нет пользователей</td></tr>
+                            <tr><td colSpan={8} className="empty">Нет пользователей</td></tr>
                         ) : users.map((u, i) => (
                             <tr key={u.name}>
                                 <td className="td-num">{i + 1}</td>
@@ -185,6 +187,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                                 : 'никогда'}
                                     </span>
                                 </td>
+                                <td><PriorityChip priority={u.priority} /></td>
                                 <td>
                                     {u.name}
                                     {u.key_gen !== serverGen && (
@@ -251,6 +254,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                         <div className="user-card-ip">
                             <IcoGlobe />
                             <span className="user-card-ip-text">{u.ip}</span>
+                            <PriorityChip priority={u.priority} />
                         </div>
                         <div className="user-card-metrics">
                             <div className="metric-block">

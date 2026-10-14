@@ -332,6 +332,8 @@ body {
     cursor: default;
     user-select: none;
 }
+.nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.nav-group-title { padding: 8px 12px 4px; font-size: 12px; color: var(--neutral-text); user-select: none; }
 .nav-item--active {
     background: var(--primary-container);
     color: var(--on-primary-container);
@@ -433,6 +435,19 @@ body {
     user-select: all;
 }
 .node-modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* Настройки сервера: деление канала */
+.ss-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
+.ss-setting-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ss-setting-name { font-size: 14px; color: var(--on-surface); }
+.ss-setting input[type="checkbox"] { width: 20px; height: 20px; flex: none; accent-color: var(--primary); }
+.ss-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ss-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ss-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; background: var(--surface-container); border-radius: var(--r-table); padding: 12px; }
+.ss-mono { font-family: var(--mono); font-size: 12px; color: var(--neutral-text); word-break: break-all; }
+/* Тёплый чип «внимание»: канал занят, фоновый приоритет */
+.chip--warm { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.chip--warm .chip-dot { background: var(--on-tertiary-container); }
 .server-card-info {
     display: flex;
     flex-direction: column;

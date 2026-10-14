@@ -1,0 +1,142 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Стили вкладки «Монитор». Общая дизайн-система — в App.css. */
+.mon-card {
+    display: flex; flex-direction: column; gap: 12px;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--r-card);
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.mon-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.mon-title { margin: 0; font-size: 16px; font-weight: 500; color: var(--on-surface); }
+.mon-hint { margin: 0; font-size: 12px; color: var(--neutral-text); }
+.mon-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.mon-code {
+    display: block; word-break: break-all; user-select: all;
+    font-family: var(--mono); font-size: 12px; color: var(--on-surface);
+    background: var(--surface-container);
+    border-radius: var(--r-table);
+    padding: 12px;
+}
+
+@media (max-width: 640px) {
+    .mon-actions .btn { flex: 1; }
+}
+
+/* ───── Графики ─────
+   Цвета рядов — токены темы. Проверено validate_palette: светлая #6a45b8 / #c4620a на #fdfaf6,
+   тёмная #8f6be0 / #d9772a на #2b251d (CVD ΔE ≥ 19, контраст ≥ 3:1). Подписи и значения цветом ряда не красим. */
+:root { --series-1: #6a45b8; --series-2: #c4620a; }
+:root[data-theme="dark"] { --series-1: #8f6be0; --series-2: #d9772a; }
+
+.mon-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.mon-range {
+    min-height: 44px; padding: 0 18px;
+    font: inherit; font-size: 14px; color: var(--on-surface);
+    background: var(--surface-bright);
+    border: 1px solid var(--outline); border-radius: var(--r-pill);
+    cursor: pointer;
+}
+.mon-range:hover { background: var(--state-primary); }
+.mon-range--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: 500; }
+
+.mon-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.mon-tile {
+    display: flex; flex-direction: column; gap: 4px;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant); border-radius: var(--r-table);
+    padding: 14px 16px;
+}
+.mon-tile-label { font-size: 12px; color: var(--neutral-text); }
+.mon-tile-value { font-size: 20px; font-weight: 500; color: var(--on-surface); }
+.mon-tile-sub   { font-size: 12px; color: var(--neutral-text); }
+
+.mon-charts { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 16px; }
+@media (min-width: 1000px) {
+    .mon-charts { grid-template-columns: 1fr 1fr; }
+    .mon-charts .mon-chart:first-child { grid-column: 1 / -1; }
+}
+.mon-chart {
+    margin: 0; min-width: 0;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant); border-radius: var(--r-card);
+    padding: 16px;
+    transition: opacity .15s;
+}
+.mon-chart--dim { opacity: .6; }
+.mon-chart-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 4px; }
+.mon-chart-title { font-size: 15px; font-weight: 500; color: var(--on-surface); }
+.mon-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--neutral-text); }
+.mon-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.mon-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; flex: none; }
+.mon-chart-toggle {
+    margin-left: auto; min-height: 44px; padding: 0 12px;
+    font: inherit; font-size: 13px; color: var(--on-primary-container);
+    background: none; border: 0; border-radius: var(--r-pill); cursor: pointer;
+}
+.mon-chart-toggle:hover { background: var(--state-primary); }
+
+.mon-plot { position: relative; }
+.mon-plot svg { display: block; max-width: 100%; }
+.mon-plot svg:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 8px; }
+.mon-grid  { stroke: var(--outline-variant); stroke-width: 1; }
+.mon-tick  { fill: var(--neutral-text); font-size: 12px; font-family: var(--font); }
+.mon-cross { stroke: var(--outline); stroke-width: 1; }
+.mon-end   { stroke: var(--surface-bright); stroke-width: 2px; }
+.mon-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 0 24px; text-align: center; font-size: 13px; color: var(--neutral-text); }
+.mon-tip {
+    position: absolute; pointer-events: none; z-index: 2;
+    display: flex; flex-direction: column; gap: 4px;
+    background: var(--surface-container);
+    border: 1px solid var(--outline-variant); border-radius: 12px;
+    padding: 8px 10px; font-size: 12px; color: var(--neutral-text);
+}
+.mon-tip-time { color: var(--neutral-text); }
+.mon-tip-row { display: flex; align-items: center; gap: 8px; }
+.mon-tip-row b { font-weight: 500; font-size: 13px; color: var(--on-surface); }
+
+.mon-table-wrap { overflow-x: auto; }
+.mon-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mon-table th { text-align: left; font-weight: 500; color: var(--label); padding: 8px 10px; white-space: nowrap; }
+.mon-table td { padding: 8px 10px; color: var(--on-surface); border-top: .5px solid var(--outline-variant); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.mon-log {
+    margin: 0; max-height: 240px; overflow: auto;
+    font-family: var(--mono); font-size: 12px; color: var(--on-surface);
+    background: var(--surface-container); border-radius: var(--r-table);
+    padding: 12px; white-space: pre-wrap; word-break: break-word;
+}
+
+.mon-notice { margin-bottom: 12px; }
+
+/* Полоски процессора и памяти в плитках */
+.mon-bar { display: block; width: 100%; height: 8px; border-radius: 4px; overflow: hidden; background: var(--primary-container); margin: 2px 0; }
+.mon-bar i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); transition: width .3s; }
+.mon-bar i.mon-bar--warn { background: var(--warn-dot); }
+.mon-bar i.mon-bar--bad  { background: var(--error-dot); }
+
+/* Какой сервер показан (выбирается в других вкладках) */
+.mon-server { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; font-size: 16px; color: var(--on-surface); }
+.mon-server b { font-weight: 500; }
+.mon-server-label { font-size: 12px; color: var(--neutral-text); }
+
+
+/* Прогресс операции рядом с кнопкой */
+.mon-actions { align-items: center; }
+.mon-progress { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 6px; }
+.mon-progress-label { font-size: 12px; color: var(--neutral-text); }
+.mon-pbar { display: block; width: 100%; height: 8px; border-radius: 4px; overflow: hidden; background: var(--primary-container); }
+.mon-pbar i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); transition: width .4s ease; }
+.mon-pbar--ok i  { background: var(--success-dot); }
+.mon-pbar--bad i { background: var(--error-dot); }
+/* Шага ещё нет — ход неизвестен: бегущий отрезок вместо ложных процентов */
+.mon-pbar--wait i { width: 35% !important; animation: mon-wait 1.2s ease-in-out infinite; }
+@keyframes mon-wait { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) { .mon-pbar--wait i { animation: none; } .mon-pbar i { transition: none; } }
+

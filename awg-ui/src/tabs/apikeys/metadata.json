@@ -2,5 +2,6 @@
   "id": "apikeys",
   "label": "API-ключи",
   "icon": "key",
+  "group": "main",
   "order": 2
 }
