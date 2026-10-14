@@ -10,6 +10,7 @@ import (
 
 	"github.com/maeneko/forgetting/internal/agent"
 	"github.com/maeneko/forgetting/internal/ctrl"
+	"github.com/maeneko/forgetting/internal/ui"
 )
 
 func main() {
@@ -25,6 +26,16 @@ func main() {
 			os.Exit(1)
 		}
 		if err := s.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "ui":
+		a, err := ui.New()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := a.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

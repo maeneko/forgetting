@@ -1,0 +1,323 @@
+{
+ "sign_seed": "0b6f395ca14ac202374d5cff678b71157d0bef7e00c3045e9b80aab4ffb85276",
+ "sign_pub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+ "crc32": [
+  {
+   "in": "",
+   "out": 0
+  },
+  {
+   "in": "a",
+   "out": 3904355907
+  },
+  {
+   "in": "hello",
+   "out": 907060870
+  },
+  {
+   "in": "кириллица",
+   "out": 2804376611
+  }
+ ],
+ "encode": [
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "203.0.113.7",
+     "port": 8443
+    }
+   ],
+   "secret": "e8bc163c82eee18733288c7d4ac636db",
+   "name": "Семья",
+   "out": "sen://AQABBMsAcQcg--i8FjyC7uGHMyiMfUrGNturhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8ArQodC10LzRjNGPnrdgwg"
+  },
+  {
+   "tls": true,
+   "addrs": [
+    {
+     "host": "vpn.example.com",
+     "port": 443
+    }
+   ],
+   "secret": "ad328846aa18b32a335816374511cac1",
+   "tlsPin": "64f46a7526a186d2346552453ae478ca51244674f5b21ba150bd483b39f7c812",
+   "name": "",
+   "out": "sen://AQEBRA92cG4uZXhhbXBsZS5jb20Bu60yiEaqGLMqM1gWN0URysGrhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8GT0anUmoYbSNGVSRTrkeMpRJEZ09bIboVC9SDs598gSAO9JOXk"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "2001:db8::1",
+     "port": 1
+    },
+    {
+     "host": "::",
+     "port": 65535
+    },
+    {
+     "host": "fe80:0:0:1:0:0:0:1",
+     "port": 80
+    }
+   ],
+   "secret": "41242b9fae56fad4e6e77dfe33cb18d1",
+   "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "out": "sen://AQADBiABDbgAAAAAAAAAAAAAAAEAAQYAAAAAAAAAAAAAAAAAAAAA__8G_oAAAAAAAAEAAAAAAAAAAQBQQSQrn65W-tTm533-M8sY0auEMnNtF8YBXD8UTU7398FgRU4NbbHNni55pp4LqVXwQHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHhMjeF6"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "1:2:3:4:5:6:7:8",
+     "port": 2
+    }
+   ],
+   "secret": "5b840157e7e86aef3b3fd0fc24f3add3",
+   "name": "emoji 😀 & <>",
+   "out": "sen://AQABBgABAAIAAwAEAAUABgAHAAgAAluEAVfn6GrvOz_Q_CTzrdOrhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8A9lbW9qaSDwn5iAICYgPD6UZmVs"
+  }
+ ],
+ "encode_errors": [
+  {
+   "tls": false,
+   "addrs": [],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "",
+   "error": "Адресов должно быть от 1 до 3"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "256.1.1.1",
+     "port": 1
+    }
+   ],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "",
+   "error": "Неверный IPv4: 256.1.1.1"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "1::2::3",
+     "port": 1
+    }
+   ],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "",
+   "error": "Неверный IPv6: 1::2::3"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "bad_host",
+     "port": 1
+    }
+   ],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "",
+   "error": "Неверный домен: bad_host"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "a.b",
+     "port": 0
+    }
+   ],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "",
+   "error": "Неверный порт: 0"
+  },
+  {
+   "tls": false,
+   "addrs": [
+    {
+     "host": "a.b",
+     "port": 1
+    }
+   ],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "яяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя",
+   "error": "Имя: до 64 байт"
+  },
+  {
+   "tls": true,
+   "addrs": [
+    {
+     "host": "a.b",
+     "port": 1
+    }
+   ],
+   "secret": "ca978112ca1bbdcafac231b39a23dc4d",
+   "name": "",
+   "error": "tlsPin: 32 байта при TLS"
+  }
+ ],
+ "decode": [
+  {
+   "in": "sen://AQABBMsAcQcg--i8FjyC7uGHMyiMfUrGNturhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8ArQodC10LzRjNGPnrdgwg",
+   "tls": false,
+   "addrs": [
+    {
+     "host": "203.0.113.7",
+     "port": 8443
+    }
+   ],
+   "secret": "e8bc163c82eee18733288c7d4ac636db",
+   "signPub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+   "tlsPin": null,
+   "name": "Семья"
+  },
+  {
+   "in": "sen://AQEBRA92cG4uZXhhbXBsZS5jb20Bu60yiEaqGLMqM1gWN0URysGrhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8GT0anUmoYbSNGVSRTrkeMpRJEZ09bIboVC9SDs598gSAO9JOXk",
+   "tls": true,
+   "addrs": [
+    {
+     "host": "vpn.example.com",
+     "port": 443
+    }
+   ],
+   "secret": "ad328846aa18b32a335816374511cac1",
+   "signPub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+   "tlsPin": "64f46a7526a186d2346552453ae478ca51244674f5b21ba150bd483b39f7c812",
+   "name": ""
+  },
+  {
+   "in": "sen://AQADBiABDbgAAAAAAAAAAAAAAAEAAQYAAAAAAAAAAAAAAAAAAAAA__8G_oAAAAAAAAEAAAAAAAAAAQBQQSQrn65W-tTm533-M8sY0auEMnNtF8YBXD8UTU7398FgRU4NbbHNni55pp4LqVXwQHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHhMjeF6",
+   "tls": false,
+   "addrs": [
+    {
+     "host": "2001:db8::1",
+     "port": 1
+    },
+    {
+     "host": "::",
+     "port": 65535
+    },
+    {
+     "host": "fe80:0:0:1::1",
+     "port": 80
+    }
+   ],
+   "secret": "41242b9fae56fad4e6e77dfe33cb18d1",
+   "signPub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+   "tlsPin": null,
+   "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "in": "sen://AQABBgABAAIAAwAEAAUABgAHAAgAAluEAVfn6GrvOz_Q_CTzrdOrhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8A9lbW9qaSDwn5iAICYgPD6UZmVs",
+   "tls": false,
+   "addrs": [
+    {
+     "host": "1:2:3:4:5:6:7:8",
+     "port": 2
+    }
+   ],
+   "secret": "5b840157e7e86aef3b3fd0fc24f3add3",
+   "signPub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+   "tlsPin": null,
+   "name": "emoji 😀 & <>"
+  },
+  {
+   "in": "  SEN://AQABBMsAcQcg--i8FjyC7uGHMyiMfUrGNturhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8ArQodC10LzRjNGPnrdgwg \n",
+   "tls": false,
+   "addrs": [
+    {
+     "host": "203.0.113.7",
+     "port": 8443
+    }
+   ],
+   "secret": "e8bc163c82eee18733288c7d4ac636db",
+   "signPub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+   "tlsPin": null,
+   "name": "Семья"
+  },
+  {
+   "in": "sen://AQEBRA92cG4uZX\nhhbXBsZS5jb20Bu60yiEaqGLMqM1gWN0URysGrhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8GT0anUmoYbSNGVSRTrkeMpRJEZ09bIboVC9SDs598gSAO9JOXk",
+   "tls": true,
+   "addrs": [
+    {
+     "host": "vpn.example.com",
+     "port": 443
+    }
+   ],
+   "secret": "ad328846aa18b32a335816374511cac1",
+   "signPub": "ab8432736d17c6015c3f144d4ef7f7c160454e0d6db1cd9e2e79a69e0ba955f0",
+   "tlsPin": "64f46a7526a186d2346552453ae478ca51244674f5b21ba150bd483b39f7c812",
+   "name": ""
+  },
+  {
+   "in": "http://x",
+   "error": "Ссылка должна начинаться с sen://"
+  },
+  {
+   "in": "sen://",
+   "error": "Ссылка повреждена: недопустимые символы"
+  },
+  {
+   "in": "sen://AAAA",
+   "error": "Ссылка слишком короткая"
+  },
+  {
+   "in": "sen://a+b",
+   "error": "Ссылка повреждена: недопустимые символы"
+  },
+  {
+   "in": "sen://AQABBMsAcQcg--i8FjyC7uGHMyiMfUrGNturhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8ArQodC10LzRjNGPnrdg",
+   "error": "Ссылка повреждена: не сошлась контрольная сумма"
+  },
+  {
+   "in": "sen://AQABBMsAcQcg--i8FjyC7uGHMyiMfUrGNturhDJzbRfGAVw_FE1O9_fBYEVODW2xzZ4ueaaeC6lV8ArQodC10LzRjNGPnrdgwA",
+   "error": "Ссылка повреждена: не сошлась контрольная сумма"
+  }
+ ],
+ "sig_string": [
+  {
+   "method": "post",
+   "path": "/sub/v1/register",
+   "ts": 1700000000,
+   "body": "{\"a\":1}",
+   "out": "POST\n/sub/v1/register\n1700000000\n015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862",
+   "sig": "CHqkcC2BwATFKxopbQlDvSDNKCRzAxKaynJ0SDWuj-ht2L5tFcDmIsjFL2vnKiaDuNSCr-ABbWR_uzgIj7mfCw"
+  },
+  {
+   "method": "GET",
+   "path": "/sub/v1/config",
+   "ts": 1,
+   "body": "",
+   "out": "GET\n/sub/v1/config\n1\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "sig": "9p4dzFWv-JeWYVzxxdhjeEMIz1uH_XDVAea94YwQmYTE3j9-9hGRR6mVRs9T4szHvBUExnyXXiApOXEDkd3zCQ"
+  }
+ ],
+ "sign_response": [
+  {
+   "in": {
+    "config": {
+     "rev": "ab",
+     "servers": []
+    },
+    "device": 3,
+    "ts": 5
+   },
+   "out": {
+    "body": "{\"config\":{\"rev\":\"ab\",\"servers\":[]},\"device\":3,\"ts\":5}",
+    "sig": "jcH9kAuxkvyBKJFLR-uSbaQgEh6dede75PLezg0v7yATUQojATafYKbQ8-aJAjvlHbv4G04j1eMD5owW9tQZDw"
+   }
+  },
+  {
+   "in": {
+    "error": "revoked"
+   },
+   "out": {
+    "body": "{\"error\":\"revoked\"}",
+    "sig": "Eb9F2GY-lyqk7ZxxKYHxSTl-goq7oUCYxBwguLpSw1oQmrXVFpUehQdd6_02UfjtDX1Rtth4-uf8-t4XFuciAA"
+   }
+  }
+ ]
+}
