@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/maeneko/forgetting/internal/jsjson"
 )
 
 // Метрики для Prometheus. awg-ctrl отдаёт JSON, а текстовый формат собирает awg-ui: на ноде
@@ -32,9 +34,9 @@ type metricsPeer struct {
 }
 
 type metricsHost struct {
-	CPU   map[string]float64 `json:"cpu"`
-	Cores int                `json:"cores"`
-	Load  []float64          `json:"load"`
+	CPU   jsjson.Object `json:"cpu"` // порядок режимов как в /proc/stat (и в Node-версии)
+	Cores int           `json:"cores"`
+	Load  []float64     `json:"load"`
 	Mem   struct {
 		Total     float64 `json:"total"`
 		Available float64 `json:"available"`
@@ -89,13 +91,13 @@ func readHost() *metricsHost {
 	if len(first) < 2 {
 		return nil
 	}
-	h := &metricsHost{CPU: map[string]float64{}, Cores: runtime.NumCPU()}
+	h := &metricsHost{Cores: runtime.NumCPU()}
 	for i, m := range cpuModes {
 		v := 0.0
 		if i+1 < len(first) {
 			v = orZero(jsNumber(first[i+1]))
 		}
-		h.CPU[m] = v / 100 // USER_HZ = 100 на всех обычных ядрах
+		h.CPU = append(h.CPU, jsjson.KV{Key: m, Val: v / 100}) // USER_HZ = 100 на всех обычных ядрах
 	}
 	mem, err := os.ReadFile("/proc/meminfo")
 	if err != nil {

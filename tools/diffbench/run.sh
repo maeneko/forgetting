@@ -17,6 +17,8 @@ i=0; until curl -s -o /dev/null http://127.0.0.1:3005/health; do i=$((i+1)); [ $
 sleep 1   # стартовый apply шейпинга асинхронный — даём ему отработать до сценария
 cd /bench
 node scenario-ctrl.mjs "/out/$NAME.json"
+# фоновый apply шейпинга после restart/upgrade должен доработать, иначе журнал заглушек обрежется
+sleep 3
 kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true
 node collect.mjs "/out/$NAME.json"
 cp /run/bench/ctrl.log "/out/$NAME.log"
