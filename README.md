@@ -30,7 +30,7 @@
 На сервере, от root:
 
 ```bash
-bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branch/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
 ```
 
 Установщик по умолчанию ставит сервер на AmneziaWG 3.1. Если модуль в ядре
@@ -38,7 +38,7 @@ bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branch/main/instal
 на 2.0 можно так:
 
 ```bash
-AWG_GEN=auto bash <(curl -Ls https://git.ma7neko.ru/maeneko/forgetting/raw/branch/main/install.sh)
+AWG_GEN=auto bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
 ```
 
 Перевести такой сервер на 3.1 позже можно кнопкой «Перейти на AWG 3.1» в панели —
@@ -151,7 +151,7 @@ TOKEN=$(curl -s -X POST http://HOST:PORT/login \
 
 | Метод | Ответ |
 |---|---|
-| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.3.4" }` — **без авторизации**, панель берёт отсюда вордмарк на экране логина |
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.4.0" }` — **без авторизации**, панель берёт отсюда вордмарк на экране логина |
 | `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
 | `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
 

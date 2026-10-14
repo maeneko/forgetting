@@ -100,22 +100,22 @@ trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true' EXIT
 # ⚠️ Дублирует .env из репозитория: установщик собирает URL релиза и печатает
 # баннер ДО того, как архив с .env скачан, поэтому взять их оттуда не может.
 # При бампе версии правь оба места.
-VERSION="0.3.4"
+VERSION="0.4.0"
 CHANNEL="${CHANNEL:-Beta}"
 
-# Откуда брать архив и как называется продукт — задаётся окружением, в коде
-# ничего не зашито. У Gitea и GitHub путь релиза одинаковый
-# (<repo>/releases/download/v<VERSION>/<file>), поэтому одна схема покрывает оба.
-#   REPO_BASE     — основной источник (своё зеркало);
-#   REPO_FALLBACK — запасной, если в основном релиза ещё нет;
+# Откуда брать архив и как называется продукт. По умолчанию — релизы на GitHub; источник
+# переопределяется окружением. Путь релиза — <repo>/releases/download/v<VERSION>/<file>
+# (такой же у Gitea, так что подойдёт и своё зеркало).
+#   REPO_BASE     — основной источник;
+#   REPO_FALLBACK — запасной, если в основном релиза нет (по умолчанию не задан);
 #   ARCHIVE_URL   — полный URL архива, перекрывает оба варианта;
 #   BRAND         — имя продукта в баннерах, systemd-юните и панели; по
 #                   умолчанию берётся из .env в архиве, здесь только запасное
 #                   значение для баннера самого установщика.
 BRAND_OVERRIDE="${BRAND:-}"
 BRAND="${BRAND:-Forgetting}"
-REPO_BASE="${REPO_BASE:-https://git.ma7neko.ru/maeneko/forgetting}"
-REPO_FALLBACK="${REPO_FALLBACK:-https://github.com/maeneko/forgetting}"
+REPO_BASE="${REPO_BASE:-https://github.com/maeneko/forgetting}"
+REPO_FALLBACK="${REPO_FALLBACK:-$REPO_BASE}"
 # Архив — под архитектуру: в нём готовый бинарник awg-control (Go, статический).
 case "$(uname -m)" in
     x86_64|amd64)  GOARCH="amd64" ;;
