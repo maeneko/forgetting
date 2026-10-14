@@ -21,7 +21,7 @@ fail() { trap - ERR; echo -e "\n  ${RED}✗${NC}  $*" >&2; exit 1; }
 info() { echo -e "  ${DIM}→  $*${NC}"; }
 skip() { echo -e "  ${DIM}–  $*${NC}"; }
 rule() { echo -e "  ${DIM}────────────────────────────────────────────────────────${NC}"; }
-# Заголовок шага: step "1/7  AmneziaWG" → «▍ AmneziaWG   1 из 7»; без номера — просто заголовок.
+# Заголовок шага: step "1/6  AmneziaWG" → «▍ AmneziaWG   1 из 6»; без номера — просто заголовок.
 step() {
     if [[ "$1" =~ ^([0-9]+)/([0-9]+)\ +(.*)$ ]]; then
         echo -e "\n${ACC}▍${NC}${BLD} ${BASH_REMATCH[3]}${NC}  ${DIM}${BASH_REMATCH[1]} из ${BASH_REMATCH[2]}${NC}"
@@ -84,7 +84,7 @@ trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  с
 [[ -z "${BASH_VERSION:-}" ]] && fail "Нужен bash: bash install.sh"
 
 # Лог установки — с первой строки: всё, что видно на экране (шапка, проверки, вопросы с
-# ответами, вывод apt/DKMS/npm), плюс то, что установщик раньше глушил. В файле — без цветов
+# ответами, вывод apt/DKMS), плюс то, что установщик раньше глушил. В файле — без цветов
 # и без перерисовок строк (ESC-последовательности и всё до последнего \r вырезаются).
 # Права 600: в итоге печатается пароль панели. LOGFILE — глобал, на него ссылается ERR-трап.
 LOGFILE="/var/log/awg-install-$(date +%Y%m%d-%H%M%S).log"
@@ -116,7 +116,13 @@ BRAND_OVERRIDE="${BRAND:-}"
 BRAND="${BRAND:-Forgetting}"
 REPO_BASE="${REPO_BASE:-https://git.ma7neko.ru/maeneko/forgetting}"
 REPO_FALLBACK="${REPO_FALLBACK:-https://github.com/maeneko/forgetting}"
-ARCHIVE_NAME="awgcontrol-${VERSION}.tar.gz"
+# Архив — под архитектуру: в нём готовый бинарник awg-control (Go, статический).
+case "$(uname -m)" in
+    x86_64|amd64)  GOARCH="amd64" ;;
+    aarch64|arm64) GOARCH="arm64" ;;
+    *)             GOARCH="" ;;
+esac
+ARCHIVE_NAME="awgcontrol-${VERSION}-linux-${GOARCH:-unknown}.tar.gz"
 ARCHIVE_URL="${ARCHIVE_URL:-}"
 url_host() { sed -E 's#^https?://([^/]+).*#\1#' <<< "$1"; }
 PROJECT="/opt/awg-control"
@@ -147,10 +153,9 @@ AWG_PORT="47619"
 SUBNET="10.9"
 MTU="1376"
 
-# Запуск CLI: tsx напрямую из node_modules (не npx) — чтобы PID был реальным
-# (та же причина, что у обёртки /usr/local/bin/awg-ctrl). Нужно обоим режимам.
-TSX="$PROJECT/cli/node_modules/.bin/tsx"
-CLI="$PROJECT/cli/src/index.ts"
+# Единый бинарник: сервисы (ctrl/ui/agent) и CLI (start/stop/status/…). Команда awg-ctrl —
+# ссылка на него.
+BIN="$PROJECT/awg-control"
 
 echo
 echo -e "  ${ACC}◆${NC} ${BLD}${BRAND}${NC}  ${DIM}${CHANNEL} · ${VERSION}${NC}"
@@ -270,8 +275,14 @@ echo -e "  ${DIM}${OS_NAME:-$(lsb_release -ds 2>/dev/null || echo unknown)} · �
 # Считаем все пункты, НЕ падая на первом, — чтобы показать полный чеклист
 # со статусом по каждому. Если хоть один не прошёл — печатаем причины и выходим
 # с кодом 0 (чистый выход, без вида «упало с ошибкой»).
-OS_OK=1; VIRT_OK=1; HDR_OK=1; NET_OK=1
-OS_WHY=""; VIRT_WHY=""; HDR_WHY=""; NET_WHY=""
+OS_OK=1; ARCH_OK=1; VIRT_OK=1; HDR_OK=1; NET_OK=1
+OS_WHY=""; ARCH_WHY=""; VIRT_WHY=""; HDR_WHY=""; NET_WHY=""
+
+# Архитектура: релиз собирается под amd64 и arm64.
+if [[ -z "$GOARCH" ]]; then
+    ARCH_OK=0
+    ARCH_WHY="архитектура '$(uname -m)' не поддерживается — сборки есть для x86_64 и aarch64"
+fi
 
 # 0) Дистрибутив: установщик умеет только apt-семейство Ubuntu/Debian.
 if [[ -z "$OS_FAMILY" ]]; then
@@ -304,7 +315,7 @@ if [[ "$ROLE" != "core" ]]; then
     fi
 fi
 
-# 3) Доступ в интернет: нужен для архива, Node и пакетов AWG. Без -f: любой
+# 3) Доступ в интернет: нужен для архива и пакетов AWG. Без -f: любой
 #    HTTP-ответ = связь есть; ненулевой код только при сбое соединения/DNS.
 #    Проверяем хосты, с которых реально качаем: хватает любого из двух —
 #    download_extract() умеет откатываться на запасной.
@@ -321,16 +332,18 @@ done
 # Чеклист: ✓ — пройдено, ✗ — нет.
 mark() { if [[ "$1" == 1 ]]; then echo -e "  ${GRN}✓${NC}  $2"; else echo -e "  ${RED}✗${NC}  $2"; fi; }
 mark "$OS_OK"   "Дистрибутив"
+mark "$ARCH_OK" "Архитектура"
 if [[ "$ROLE" != "core" ]]; then
     mark "$VIRT_OK" "Виртуализация"
     mark "$HDR_OK"  "Заголовки ядра"
 fi
 mark "$NET_OK"  "Доступ в интернет"
 
-if [[ "$OS_OK" == 0 || "$VIRT_OK" == 0 || "$HDR_OK" == 0 || "$NET_OK" == 0 ]]; then
+if [[ "$OS_OK" == 0 || "$ARCH_OK" == 0 || "$VIRT_OK" == 0 || "$HDR_OK" == 0 || "$NET_OK" == 0 ]]; then
     echo
     warn "Установка невозможна — не пройдены проверки:"
     [[ "$OS_OK"   == 0 ]] && echo -e "    ${RED}•${NC} $OS_WHY"
+    [[ "$ARCH_OK" == 0 ]] && echo -e "    ${RED}•${NC} $ARCH_WHY"
     [[ "$VIRT_OK" == 0 ]] && echo -e "    ${RED}•${NC} $VIRT_WHY"
     [[ "$HDR_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $HDR_WHY"
     [[ "$NET_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $NET_WHY"
@@ -388,14 +401,19 @@ NET_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
 
 # Сначала корректно через CLI (по PID-файлам), затем добиваем всё, что ещё
 # держит файлы проекта: осиротевшие процессы, ручной запуск или stale PID,
-# которые `stop all` не находит. Вызывать ДО `rm -rf $PROJECT` — иначе node
-# продолжит работать с уже удалёнными файлами и порт/интерфейс останутся занятыми.
+# которые `stop all` не находит. Вызывать ДО `rm -rf $PROJECT` — иначе сервисы
+# продолжат работать с уже удалёнными файлами и порт/интерфейс останутся занятыми.
 kill_related() {
-    local _tsx="$PROJECT/cli/node_modules/.bin/tsx"
-    local _cli="$PROJECT/cli/src/index.ts"
-    [[ -x "$_tsx" && -f "$_cli" ]] && "$_tsx" "$_cli" stop all 2>/dev/null || true
+    if [[ -x "$BIN" ]]; then
+        "$BIN" stop all 2>/dev/null || true
+    else
+        # Установка до Go-версии: её CLI на tsx.
+        local _tsx="$PROJECT/cli/node_modules/.bin/tsx"
+        local _cli="$PROJECT/cli/src/index.ts"
+        [[ -x "$_tsx" && -f "$_cli" ]] && "$_tsx" "$_cli" stop all 2>/dev/null || true
+    fi
 
-    # cmdline всех сервисов (tsx awg-ctrl/awg-ui/cli) содержит путь проекта.
+    # cmdline всех сервисов (awg-control <роль>, у старых — tsx …) содержит путь проекта.
     if command -v pkill &>/dev/null; then
         pkill -TERM -f "$PROJECT/" 2>/dev/null || true
         sleep 1
@@ -420,7 +438,7 @@ download_extract() {
 
     # AWG_LOCAL_TARBALL — поставить сборку, которой ещё нет в релизах (или
     # встать без сети). Архив должен быть той же формы, что делает CI:
-    # awg-ctrl/ + awg-ui/ (с готовым dist/) + cli/ + .env, без node_modules.
+    # awg-control (бинарник под эту архитектуру) + awg-ui/dist/ + .env.
     if [[ -n "${AWG_LOCAL_TARBALL:-}" ]]; then
         [[ -f "$AWG_LOCAL_TARBALL" ]] \
             || fail "AWG_LOCAL_TARBALL указан, но файл не найден: $AWG_LOCAL_TARBALL"
@@ -451,40 +469,38 @@ $(printf '    %s\n' "${urls[@]}")
     fi
 
     mkdir -p "$PROJECT"
+    remove_legacy
     run tar -xzf "$tmp" -C "$PROJECT" --strip-components=1 \
         || fail "Не удалось распаковать архив"
     [[ "$keep_tarball" == 1 ]] || rm -f "$tmp"
     ok "Распакован → $PROJECT"
 
     local f
-    for f in \
-        "$PROJECT/awg-ctrl/index.ts" \
-        "$PROJECT/awg-ctrl/package.json" \
-        "$PROJECT/awg-ui/public/index.html" \
-        "$PROJECT/awg-ui/server.ts" \
-        "$PROJECT/awg-ui/package.json" \
-        "$PROJECT/awg-agent/index.ts" \
-        "$PROJECT/awg-agent/package.json" \
-        "$PROJECT/cli/src/index.ts" \
-        "$PROJECT/cli/package.json"
-    do
+    for f in "$BIN" "$PROJECT/awg-ui/dist/index.html" "$PROJECT/.env"; do
         [[ -f "$f" ]] || fail "Файл не найден после распаковки: $f"
     done
+    # Рабочие каталоги сервисов: в них живут panel.id, логи awg-ctrl, cli.env.
+    mkdir -p "$PROJECT/awg-ctrl" "$PROJECT/awg-ui" "$PROJECT/awg-agent" "$PROJECT/cli" "$PROJECT/logs"
+    chmod 755 "$BIN"
+    "$BIN" version >/dev/null 2>&1 || fail "Бинарник $BIN не запускается (архив не под эту архитектуру?)"
     ok "Архив проверен"
 }
 
-# npm install во всех сервисах.
-npm_install_all() {
-    local SVC
-    for SVC in awg-ctrl awg-ui awg-agent cli; do
-        if [[ -f "$PROJECT/$SVC/package.json" ]]; then
-            info "npm install · $SVC"
-            (cd "$PROJECT/$SVC" && run npm install) \
-                || fail "npm install в $SVC завершился ошибкой"
-        else
-            warn "$PROJECT/$SVC/package.json не найден — пропуск"
-        fi
+# remove_legacy — при обновлении убрать код прежней версии: TS-исходники, node_modules и старую
+# сборку фронтенда. Данные остаются: cli/cli.env, awg-ui/panel.id, логи (базы и ключи — в /etc).
+remove_legacy() {
+    local d
+    for d in awg-ctrl awg-ui awg-agent cli; do
+        [[ -d "$PROJECT/$d" ]] || continue
+        rm -rf "$PROJECT/$d/node_modules" "$PROJECT/$d/src" "$PROJECT/$d/public" "$PROJECT/$d/dist"
+        rm -f "$PROJECT/$d"/*.ts "$PROJECT/$d"/package*.json "$PROJECT/$d"/tsconfig*.json "$PROJECT/$d/index.html"
     done
+}
+
+# Команда awg-ctrl — ссылка на бинарник: CLI находит корень установки по её цели.
+install_command() {
+    ln -sfn "$BIN" /usr/local/bin/awg-ctrl
+    ok "awg-ctrl → $BIN"
 }
 
 # systemd-юнит: автозапуск awg-control на загрузке. Модель CLI — детач-процессы
@@ -494,12 +510,8 @@ npm_install_all() {
 # вручную не выполняется — поднимаем интерфейс в ExecStartPre (если ещё не поднят).
 SERVICE_UNIT="/etc/systemd/system/awg-control.service"
 setup_service() {
-    # node может стоять вне дефолтного PATH systemd (nvm и т.п.), а tsx
-    # запускается через shebang `#!/usr/bin/env node` — иначе ExecStart падает с
-    # кодом 127 «node not found». Прописываем реальный каталог node в PATH юнита;
-    # sbin тоже включаем (awg-quick зовёт iptables/ip/sysctl).
-    local node_dir pre="" what
-    node_dir=$(dirname "$(command -v node 2>/dev/null || echo /usr/bin/node)")
+    # sbin в PATH юнита: awg-quick зовёт iptables/ip/sysctl.
+    local pre="" what
     # Панели без VPN (core) интерфейс не нужен — ExecStartPre только там, где есть awg-ctrl.
     [[ "$ROLE" != "core" ]] && pre="ExecStartPre=/bin/sh -c 'awg show ${IFACE} >/dev/null 2>&1 || awg-quick up ${IFACE}'"
     case "$ROLE" in
@@ -516,7 +528,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=PATH=${node_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ${pre}
 ExecStart=/usr/local/bin/awg-ctrl start all
 ExecStop=/usr/local/bin/awg-ctrl stop all
@@ -539,10 +551,10 @@ start_and_status() {
             || fail "systemctl restart awg-control завершился ошибкой"
     else
         warn "systemd не найден — запускаю напрямую через CLI (без автозапуска)"
-        run "$TSX" "$CLI" start all
+        run "$BIN" start all
     fi
     sleep 2
-    "$TSX" "$CLI" status
+    "$BIN" status
 }
 
 if [[ "$INSTALL_MODE" == "update" ]]; then
@@ -552,7 +564,7 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     kill_related
 
     download_extract
-    npm_install_all
+    install_command
     start_and_status
 
     rule
@@ -792,7 +804,7 @@ ask YN "Продолжить? [Y/n]: "
 
 # Совместимость (виртуализация, заголовки ядра, интернет) проверена выше в
 # секции «Проверка совместимости»; $KERNEL задан там же.
-step "1/7  AmneziaWG"
+step "1/6  AmneziaWG"
 
 if [[ "$ROLE" == "core" ]]; then
     skip "пропущено — у панели без VPN AmneziaWG не нужен"
@@ -1022,24 +1034,11 @@ else
     fi
 fi
 
-step "2/7  Node.js"
-
-if command -v node &>/dev/null; then
-    ok "Node.js уже установлен: $(node --version)"
-else
-    info "установка Node.js 20.x (nodesource)"
-    run bash -c 'set -o pipefail; curl -fsSL https://deb.nodesource.com/setup_20.x | bash -' \
-        || fail "Не удалось подключить репозиторий Node.js (deb.nodesource.com)"
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-        run apt-get install -y nodejs || fail "Не удалось установить Node.js"
-    ok "Node.js установлен: $(node --version)"
-fi
-
-step "3/7  Файлы проекта"
+step "2/6  Файлы проекта"
 
 download_extract
 
-step "4/7  Ключи и конфиг AWG"
+step "3/6  Ключи и конфиг AWG"
 
 mkdir -p "$AWG_DIR" "$AMNEZIA_DIR"
 
@@ -1196,7 +1195,7 @@ CONF
     fi
 fi
 
-step "5/7  Запуск AWG"
+step "4/6  Запуск AWG"
 
 if [[ "$ROLE" == "core" ]]; then
     skip "пропущено — у панели без VPN интерфейса нет"
@@ -1307,21 +1306,11 @@ else
     info "UFW не активен, правила фаервола не трогаем"
 fi
 
-step "6/7  npm install"
+step "5/6  Команда awg-ctrl"
 
-npm_install_all
+install_command
 
-# Глобальный бинарник — используем tsx напрямую из node_modules (не npx)
-# чтобы child.pid в cli был реальным PID процесса
-cat > /usr/local/bin/awg-ctrl << 'WRAPPER'
-#!/usr/bin/env bash
-exec /opt/awg-control/cli/node_modules/.bin/tsx \
-     /opt/awg-control/cli/src/index.ts "$@"
-WRAPPER
-chmod +x /usr/local/bin/awg-ctrl
-ok "awg-ctrl → /usr/local/bin/awg-ctrl"
-
-step "7/7  Запуск сервисов"
+step "6/6  Запуск сервисов"
 
 # cli.env по роли. Роль CLI узнаёт отсюда же: CORE_HOST → нода (awg-ctrl + awg-agent),
 # LOCAL_NODE=off → панель без VPN (только awg-ui), иначе — awg-ctrl + awg-ui.

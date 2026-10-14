@@ -14,6 +14,9 @@ import (
 	"github.com/maeneko/forgetting/internal/ui"
 )
 
+// version — из сборки релиза (-ldflags "-X main.version=…").
+var version = "dev"
+
 func main() {
 	// Без аргументов или с командой оператора — CLI (меню, start/stop/…), как прежний awg-ctrl.
 	if len(os.Args) < 2 {
@@ -21,6 +24,8 @@ func main() {
 		return
 	}
 	switch os.Args[1] {
+	case "version":
+		fmt.Println(version)
 	case "ctrl":
 		s, err := ctrl.New()
 		if err != nil {
