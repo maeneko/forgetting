@@ -72,6 +72,8 @@ const TS_WINDOW    = 300;           // секунд, ±
 const DEFAULT_LIMIT = 3;
 const MAX_SERVERS   = 32;           // серверов в одном мастер-ключе
 const SYNC_EVERY    = 60_000;       // фоновое сведение серверов
+const AUDIT_HOUR    = 3_600_000;
+const AUDIT_FIRST   = 120_000;      // первый аудит — вскоре после старта, когда ноды подключились
 const B64_PUB       = /^[A-Za-z0-9+/]{43}=$/;
 const CLIENT_VERSION = /^[\w.+-]{1,32}$/;   // версия приложения, чисто информационная
 
@@ -406,6 +408,161 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         q.revokedServerDone.run(id);
         q.revokedGone.run();
     }
+
+    // ── Аудит серверов ─────────────────────────────────────────────────────
+    // Периодически (по умолчанию раз в час) core обходит все серверы и ищет «мёртвых»: пиров, которые живы на сервере, хотя
+    // панель про них не знает. Сообщает и — если включена очистка (настройки аудита) или оператор нажал кнопку — снимает подтверждённых: мёртвых два прохода подряд.
+    //   ghosts  — есть в ядре (awg show), но неизвестны awg-ctrl: строку удалили, а `awg set … remove`
+    //             не сработал, и никто про такого пира уже не вспомнит;
+    //   orphans — есть у awg-ctrl в области этой панели, но панели не нужны (sync их не снял);
+    //             key — мастер-ключ пира, если он отозван или удалён.
+    // Пиры чужой области (другая панель, пиры до областей) в отчёт не попадают — считаются в foreign.
+    // seen_before — «мёртвый» и в прошлом проходе тоже: только такие снимает очистка (пир, которого
+    // прямо сейчас добавляют или удаляют, за два прохода подряд мёртвым не окажется).
+    interface AuditPeer { pub_key: string; owner?: string; key?: string | null; online: boolean; lastHandshake: number; seen_before?: boolean }
+    interface AuditEntry {
+        server_id: number; status: "ok" | "offline" | "error";
+        ghosts_checked: boolean;        // false — awg-ctrl старше /api/audit, «призраков» не видно
+        ghosts: AuditPeer[]; orphans: AuditPeer[]; foreign: number;
+        blocked?: number;               // очистка отказалась снимать столько пиров разом (предохранитель)
+    }
+    interface AuditReport { at: number; servers: AuditEntry[] }
+    interface CleanedPeer { at: number; server_id: number; pub_key: string; kind: "ghost" | "orphan"; key?: string | null; auto: boolean }
+    // Настройки аудита (панель, вкладка «Аудит»). clean — снимать «мёртвых» сами; every_h — период;
+    // max — предохранитель: больше пиров на сервере за проход не снимаем, только сообщаем.
+    interface AuditSettings { clean: boolean; every_h: number; max: number }
+    const AUDIT_DEFAULTS: AuditSettings = { clean: false, every_h: 1, max: 10 };
+
+    const AUDIT_ON = (process.env.AUDIT ?? "on").toLowerCase() !== "off";   // выключен у ноды со своей панелью
+    const metaGet = <T,>(key: string, dflt: T): T => {
+        try {
+            const row = uidb.prepare("SELECT value FROM sub_meta WHERE key = ?").get(key) as { value: string } | undefined;
+            return row ? JSON.parse(row.value) as T : dflt;
+        } catch { return dflt; }
+    };
+    const metaSet = (key: string, v: unknown) =>
+        uidb.prepare("INSERT INTO sub_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, JSON.stringify(v));
+    let lastAudit: AuditReport | null = metaGet<AuditReport | null>("audit", null);
+    let auditSettings: AuditSettings = { ...AUDIT_DEFAULTS, ...metaGet<Partial<AuditSettings>>("audit_settings", {}) };
+    let cleanedLog: CleanedPeer[] = metaGet<CleanedPeer[]>("audit_cleaned", []);
+
+    async function auditNow(id: number): Promise<AuditEntry> {
+        const entry: AuditEntry = { server_id: id, status: "ok", ghosts_checked: true, ghosts: [], orphans: [], foreign: 0 };
+        if (!servers.exists(id) || !servers.isOnline(id)) return { ...entry, status: "offline", ghosts_checked: false };
+        const ctrl = servers.ctrlFor(id);
+        // Сначала обычное сведение: отчёт — про то, что не снялось само.
+        await reconcileNow(id);
+        const [a, p] = [await ctrl("GET", "/api/audit"), await ctrl("GET", "/api/peers")];
+        if (!hasCtrlOk(p.status)) return { ...entry, status: "error", ghosts_checked: false };
+        if (hasCtrlOk(a.status)) entry.ghosts = (a.data.ghosts as AuditPeer[]).map(g => ({
+            pub_key: g.pub_key, online: g.online, lastHandshake: g.lastHandshake,
+        }));
+        else if (a.status === 404) entry.ghosts_checked = false;
+        else return { ...entry, status: "error", ghosts_checked: false };
+
+        const keep = new Set((q.keepOf.all(id, id) as { pub: string }[]).map(r => r.pub));
+        const prefix = panelId + "/";
+        for (const peer of p.data.peers as { pub_key: string; owner: string; online: boolean; lastHandshake: number }[]) {
+            if (!peer.owner.startsWith(prefix)) { if (peer.owner.includes("/")) entry.foreign++; continue; }
+            if (keep.has(peer.pub_key)) continue;
+            const mid = Number(peer.owner.match(/^[^/]+\/m(\d+)\//)?.[1]);
+            const m = Number.isSafeInteger(mid) ? q.masterRow.get(mid) as MasterRow | undefined : undefined;
+            entry.orphans.push({
+                pub_key: peer.pub_key, owner: peer.owner, online: peer.online, lastHandshake: peer.lastHandshake,
+                key: m ? (m.revoked_at !== null ? `${m.label} (удалён)` : m.label) : "(нет в ui.db)",
+            });
+        }
+        return entry;
+    }
+
+    // Под той же блокировкой, что и сведение: пир, которого прямо сейчас добавляет проход, не «призрак».
+    function audit(id: number): Promise<AuditEntry> {
+        const run = (locks.get(id) ?? Promise.resolve()).then(() => auditNow(id));
+        locks.set(id, run.then(() => {}, () => {}));
+        return run.catch((): AuditEntry => ({ server_id: id, status: "error", ghosts_checked: false, ghosts: [], orphans: [], foreign: 0 }));
+    }
+
+    // Снять «мёртвых» этого сервера: только подтверждённых (seen_before), не больше max за проход.
+    // «Призраки» — через awg-ctrl (он сам перепроверяет ключи), лишние — обычным DELETE.
+    async function cleanEntry(e: AuditEntry, auto: boolean): Promise<void> {
+        const ghosts  = e.ghosts.filter(p => p.seen_before);
+        const orphans = e.orphans.filter(p => p.seen_before);
+        if (ghosts.length + orphans.length === 0 || e.status !== "ok") return;
+        if (auto && ghosts.length + orphans.length > auditSettings.max) {
+            e.blocked = ghosts.length + orphans.length;
+            console.warn(`sub: очистка сервера #${e.server_id} пропущена: ${e.blocked} пиров больше предела ${auditSettings.max}`);
+            return;
+        }
+        const ctrl = servers.ctrlFor(e.server_id);
+        const done: CleanedPeer[] = [];
+        const log = (p: AuditPeer, kind: CleanedPeer["kind"]) =>
+            done.push({ at: now(), server_id: e.server_id, pub_key: p.pub_key, kind, key: p.key, auto });
+        if (ghosts.length) {
+            const r = await ctrl("POST", "/api/audit/clean", { pub_keys: ghosts.map(g => g.pub_key) });
+            if (hasCtrlOk(r.status)) {
+                const gone = new Set(r.data.removed as string[]);
+                for (const g of ghosts) if (gone.has(g.pub_key)) log(g, "ghost");
+            }
+        }
+        for (const p of orphans) {
+            const r = await ctrl("DELETE", `/api/peers/${pubParam(p.pub_key)}`);
+            if (hasCtrlOk(r.status) || r.status === 404) log(p, "orphan");
+            else if (gone502(r.status)) break;
+        }
+        if (!done.length) return;
+        const cleaned = new Set(done.map(d => d.pub_key));
+        e.ghosts  = e.ghosts.filter(p => !cleaned.has(p.pub_key));
+        e.orphans = e.orphans.filter(p => !cleaned.has(p.pub_key));
+        cleanedLog = [...done, ...cleanedLog].slice(0, 100);
+        metaSet("audit_cleaned", cleanedLog);
+        console.warn(`sub: ${auto ? "автоочистка" : "очистка"} сервера #${e.server_id}: снято ${done.length} (${done.map(d => d.pub_key.slice(0, 8)).join(", ")})`);
+    }
+    const gone502 = (s: number) => s === 502 || s === 504;
+
+    let auditing: Promise<AuditReport> | null = null;
+    // auto — плановый проход: очищает сам, если включено. Ручной только смотрит и обновляет «видели раньше».
+    function auditAll(auto = false): Promise<AuditReport> {
+        auditing ??= (async () => {
+            const prev = lastAudit;
+            const report: AuditReport = { at: now(), servers: await Promise.all(servers.ids().map(audit)) };
+            for (const e of report.servers) {
+                const before = prev?.servers.find(x => x.server_id === e.server_id);
+                const was = new Set([...(before?.ghosts ?? []), ...(before?.orphans ?? [])].map(p => p.pub_key));
+                for (const p of [...e.ghosts, ...e.orphans]) p.seen_before = was.has(p.pub_key);
+                if (auto && auditSettings.clean) await audit_clean(e);
+            }
+            lastAudit = report;
+            metaSet("audit", report);
+            for (const e of report.servers) {
+                if (e.status === "error") console.warn(`sub: аудит сервера #${e.server_id} не удался`);
+                if (e.ghosts.length || e.orphans.length)
+                    console.warn(`sub: аудит сервера #${e.server_id}: мёртвых пиров ${e.ghosts.length + e.orphans.length} ` +
+                        `(в ядре без записи: ${e.ghosts.length}, лишних у awg-ctrl: ${e.orphans.length}, онлайн: ` +
+                        `${[...e.ghosts, ...e.orphans].filter(x => x.online).length})`);
+            }
+            return report;
+        })().finally(() => { auditing = null; });
+        return auditing;
+    }
+    // Очистка под блокировкой сервера — как и сам аудит.
+    function audit_clean(e: AuditEntry): Promise<void> {
+        const run = (locks.get(e.server_id) ?? Promise.resolve()).then(() => cleanEntry(e, true));
+        locks.set(e.server_id, run.then(() => {}, () => {}));
+        return run.catch(err => { console.warn(`sub: очистка сервера #${e.server_id} не удалась: ${(err as Error).message}`); });
+    }
+
+    // Ручная очистка подтверждённых «мёртвых» по последнему отчёту (кнопка на вкладке «Аудит»).
+    async function cleanNow(): Promise<AuditReport | null> {
+        if (!lastAudit) return null;
+        for (const e of lastAudit.servers) {
+            const run = (locks.get(e.server_id) ?? Promise.resolve()).then(() => cleanEntry(e, false));
+            locks.set(e.server_id, run.then(() => {}, () => {}));
+            await run.catch(() => {});
+        }
+        metaSet("audit", lastAudit);
+        return lastAudit;
+    }
+    const auditState = () => ({ enabled: AUDIT_ON, settings: auditSettings, report: lastAudit, cleaned: cleanedLog });
 
     /** Устройство удаляется: его пиров — в список на удаление, строку — из реестра. */
     function forgetDevice(dev: DeviceRow): number[] {
@@ -834,15 +991,17 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     // Статистика устройства — по всем серверам ключа: онлайн, если есть свежий handshake хоть
     // на одном; трафик суммируется. servers_ok — на скольких серверах уже стоит его текущий ключ.
     async function masterDevices(m: MasterRow) {
-        const stats = new Map<string, { online: boolean; lastHandshake: number; rx: number; tx: number }>();
+        const stats = new Map<string, { online: boolean; lastHandshake: number; rx: number; tx: number; background: boolean }>();
         await Promise.all(serverIdsOf(m.id).filter(id => servers.isOnline(id)).map(async id => {
             const r = await servers.ctrlFor(id)("GET", "/api/peers");
             if (!hasCtrlOk(r.status)) return;
-            for (const p of r.data.peers as { pub_key: string; online: boolean; lastHandshake: number; rx: number; tx: number }[]) {
-                const s = stats.get(p.pub_key) ?? { online: false, lastHandshake: 0, rx: 0, tx: 0 };
+            for (const p of r.data.peers as { pub_key: string; online: boolean; lastHandshake: number; rx: number; tx: number; priority?: string }[]) {
+                const s = stats.get(p.pub_key) ?? { online: false, lastHandshake: 0, rx: 0, tx: 0, background: false };
                 stats.set(p.pub_key, {
                     online: s.online || p.online, lastHandshake: Math.max(s.lastHandshake, p.lastHandshake),
                     rx: s.rx + p.rx, tx: s.tx + p.tx,
+                    // Устройство стоит на каждом сервере со своим IP; фоновым его делает любой из них.
+                    background: s.background || p.priority === "background",
                 });
             }
         }));
@@ -853,6 +1012,7 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
                 id: d.id, device_id: d.device_id, device_name: d.device_name, platform: d.platform, version: d.version, created_at: d.created_at,
                 last_seen: d.last_seen, rekey_requested: d.rekey_requested === 1,
                 online: s?.online ?? false, lastHandshake: s?.lastHandshake ?? 0, rx: s?.rx ?? 0, tx: s?.tx ?? 0,
+                priority: s?.background ? "background" : "normal",
                 servers_total: links.length, servers_ok: links.filter(l => l.peer_pub === d.pub_key && l.ip).length,
             };
         });
@@ -876,6 +1036,35 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
     masterKeys.get("/", (_req, res) => {
         res.json({ enabled: signKey !== null, tls: tlsPin !== null, keys: listMasters(null) });
     });
+    // Аудит серверов (только core): отчёт, внеочередной проход, ручная очистка, настройки.
+    masterKeys.get("/audit", (_req, res) => { res.json(auditState()); });
+    masterKeys.post("/audit", aw(async (_req, res) => {
+        if (!AUDIT_ON) fail(409, "Аудит выключен на этой панели");
+        await auditAll();
+        res.json(auditState());
+    }));
+    masterKeys.post("/audit/clean", aw(async (_req, res) => {
+        if (!AUDIT_ON) fail(409, "Аудит выключен на этой панели");
+        await cleanNow();
+        res.json(auditState());
+    }));
+    masterKeys.put("/audit/settings", aw((req, res) => {
+        if (!AUDIT_ON) fail(409, "Аудит выключен на этой панели");
+        const b = (req.body ?? {}) as Partial<AuditSettings>;
+        const next = { ...auditSettings };
+        if (b.clean !== undefined) { if (typeof b.clean !== "boolean") fail(400, "clean: true или false"); next.clean = b.clean; }
+        if (b.every_h !== undefined) {
+            if (!Number.isInteger(b.every_h) || b.every_h < 1 || b.every_h > 168) fail(400, "Период: от 1 до 168 часов");
+            next.every_h = b.every_h;
+        }
+        if (b.max !== undefined) {
+            if (!Number.isInteger(b.max) || b.max < 1 || b.max > 1000) fail(400, "Предел: от 1 до 1000");
+            next.max = b.max;
+        }
+        auditSettings = next;
+        metaSet("audit_settings", next);
+        res.json(auditState());
+    }));
     masterKeys.post("/", aw((req, res) => { res.status(201).json(createMaster(req.body, null)); }));
     masterKeys.patch("/:id", aw(async (req, res) => { res.json(await updateMaster(masterFor(masterIdOf(req.params.id), null), req.body, null)); }));
     masterKeys.post("/:id/rotate", aw((req, res) => { const m = masterFor(masterIdOf(req.params.id), null); rotateMaster(m); res.json({ id: m.id }); }));
@@ -954,6 +1143,15 @@ export function createSub(deps: { uidb: Database.Database; servers: Servers; bas
         setInterval(() => {
             void reconcileAll((q.usedServers.all() as { server_id: number }[]).map(r => r.server_id));
         }, SYNC_EVERY).unref();
+
+        if (AUDIT_ON) {
+            // Период читается из настроек каждый раз: смена в панели действует без рестарта.
+            const next = (ms: number) => setTimeout(() => {
+                auditAll(true).catch(e => console.warn(`sub: аудит не удался: ${(e as Error).message}`))
+                    .finally(() => next(auditSettings.every_h * AUDIT_HOUR));
+            }, ms).unref();
+            next(AUDIT_FIRST);
+        }
 
         if (!signKey) return;
         if (!SUB_PORT) { console.warn("sub: SUB_PORT не задан — подписка отключена"); signKey = null; return; }

@@ -1,15 +1,16 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import fs, { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import fs, { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "fs";
 import path  from "path";
 import os   from "os";
 import crypto from "crypto";
-import { execSync, spawnSync } from "child_process";
+import { execSync, spawnSync, execFile, spawn } from "child_process";
 import * as zlib from "zlib";
 import express, { Request, Response, NextFunction } from "express";
 import Database from "better-sqlite3";
 import winston from "winston";
+import { createShaping } from "./shaping";
 
 const logsDir = path.join(process.cwd(), "logs");
 if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
@@ -575,6 +576,26 @@ function getPeersData(): Record<string, { online: boolean; lastHandshake: number
     } catch (e) { logger.warn("getPeersData failed", { error: e }); return {}; }
 }
 
+// Шейпинг (CAKE) и сэмплер тяжёлых устройств. Счётчики читаем асинхронно: цикл
+// не должен блокировать event loop, как это делают остальные вызовы awg.
+const shaping = createShaping({
+    iface:  CONFIG.interface,
+    getCfg, setCfg, logger,
+    // CAKE видит только внутренний IP-пакет, на проводе к нему добавляются
+    // IPv4 (20) + UDP (8) + заголовок WG (32) = 60 байт и случайный префикс S4.
+    // Формулу сверять iperf3-замером на стенде (SHAPE_OVERHEAD перекрывает её).
+    overhead: () => 60 + (Number(CONFIG.awgParams.S4) || 0),
+    peers: () => new Promise((resolve, reject) => {
+        execFile("awg", ["show", CONFIG.interface, "dump"], { encoding: "utf8", timeout: 10_000 }, (err, out) => {
+            if (err) { reject(err); return; }
+            const rows = out.split("\n").slice(1).map(l => l.split("\t"))
+                .filter(f => f[0] && f[3])
+                .map(f => ({ ip: f[3].split(",")[0].split("/")[0], rx: Number(f[5]) || 0, tx: Number(f[6]) || 0 }));
+            resolve(rows);
+        });
+    }),
+});
+
 function rebuildConf() {
     const users    = db.prepare("SELECT name, ip, pub_key, psk_key FROM users").all() as UserRow[];
     const devices  = stmts.peersAll.all();
@@ -680,6 +701,7 @@ function restartAwg() {
     // в [Peer]-блоки, которые rebuildConf() пересобирает прямо сейчас.
     const gen = reloadAwgParams();
     syncPeers();
+    void shaping.apply();   // tc-правила жили на интерфейсе, который мы только что пересоздали
     const versions = readAwgVersions();
     CONFIG.awgModule = versions.module;
     CONFIG.awgTools  = versions.tools;
@@ -803,6 +825,7 @@ function startInterface() {
     const r = spawnSync("awg-quick", ["up", CONFIG.interface]);
     if (r.status !== 0) throw new Error(`awg-quick up failed: ${r.stderr?.toString()}`);
     syncPeers();
+    void shaping.apply();
     return getInterfaceStatus();
 }
 
@@ -849,12 +872,30 @@ function addUser(username: string): UserRow {
     };
 }
 
+// Снять пира с интерфейса и убедиться, что его там нет. Раньше результат `awg set … remove`
+// не проверялся: строку из базы удаляли, а пир в ядре оставался живым, и про него уже никто не
+// знал. Теперь порядок такой: сначала ядро, потом база — при отказе строка остаётся, и
+// повторная попытка (надгробие панели, следующий sync) найдёт пира.
+function kernelPeers(): Set<string> | null {
+    const r = spawnSync("awg", ["show", CONFIG.interface, "peers"]);
+    return r.status === 0 ? new Set(r.stdout.toString().split("\n").map(l => l.trim()).filter(Boolean)) : null;
+}
+
+function dropFromKernel(pub: string): boolean {
+    const r = spawnSync("awg", ["set", CONFIG.interface, "peer", pub, "remove"]);
+    if (r.status === 0) return true;
+    const left = kernelPeers();
+    if (left && !left.has(pub)) return true;     // ответ странный, но пира уже нет
+    logger.error("peer remove from kernel failed", { pub, stderr: r.stderr?.toString() });
+    return false;
+}
+
 function removeUser(username: string) {
     const user = stmts.get.get(username);
     if (!user) throw new Error("Пользователь не найден");
 
+    if (!dropFromKernel(user.pub_key)) throw new Error("Не удалось снять пира с интерфейса");
     stmts.delete.run(username);
-    spawnSync("awg", ["set", CONFIG.interface, "peer", user.pub_key, "remove"]);
     rebuildConf();
 
     for (const ext of [".conf", ".key"]) {
@@ -920,7 +961,9 @@ function replacePeer(oldPub: string, newPub: string): { ip: string; psk_key: str
         stmts.peerRekey.run(oldPub, newPub);
         throw new Error(`awg set failed: ${r.stderr?.toString()}`);
     }
-    spawnSync("awg", ["set", CONFIG.interface, "peer", oldPub, "remove"]);
+    // Старый ключ не снялся — пир остаётся «призраком» в ядре до аудита панели; смену ключа не откатываем:
+    // новый уже стоит, а клиент к этому моменту получил бы ошибку.
+    if (!dropFromKernel(oldPub)) logger.error("peer rekey: старый ключ остался в ядре", { owner: old.owner });
     rebuildConf();
     logger.info("peer rekeyed", { owner: old.owner, ip: old.ip });
     return { ip: old.ip, psk_key: old.psk_key };
@@ -941,8 +984,8 @@ function rotatePeerPsk(pub: string): { ip: string; psk_key: string } {
 function removePeer(pub: string) {
     const peer = stmts.peerGet.get(pub);
     if (!peer) throw new HttpError(404, "Пир не найден");
+    if (!dropFromKernel(pub)) throw new Error("Не удалось снять пира с интерфейса");
     stmts.peerDelete.run(pub);
-    spawnSync("awg", ["set", CONFIG.interface, "peer", pub, "remove"]);
     rebuildConf();
     logger.info("peer removed", { owner: peer.owner });
 }
@@ -964,18 +1007,15 @@ function syncOwnedPeers(panel: string, keep: string[]): {
     const prefix = panel + "/";
     const removed: PeerRow[] = [];
     let claimed = 0;
-    db.transaction(() => {
-        for (const p of stmts.peersAll.all()) {
-            if (p.owner.startsWith(prefix)) {
-                if (!want.has(p.pub_key)) { stmts.peerDelete.run(p.pub_key); removed.push(p); }
-            } else if (LEGACY_OWNER.test(p.owner) && want.has(p.pub_key)) {
-                stmts.peerOwner.run(prefix + p.owner, p.pub_key);
-                claimed++;
-            }
+    for (const p of stmts.peersAll.all()) {
+        if (p.owner.startsWith(prefix)) {
+            // Ядро первым: не снялся — строка остаётся, следующий sync попробует снова.
+            if (!want.has(p.pub_key) && dropFromKernel(p.pub_key)) { stmts.peerDelete.run(p.pub_key); removed.push(p); }
+        } else if (LEGACY_OWNER.test(p.owner) && want.has(p.pub_key)) {
+            stmts.peerOwner.run(prefix + p.owner, p.pub_key);
+            claimed++;
         }
-    })();
-
-    for (const p of removed) spawnSync("awg", ["set", CONFIG.interface, "peer", p.pub_key, "remove"]);
+    }
     if (removed.length || claimed) rebuildConf();
     if (removed.length) logger.info("peers synced out", { panel, removed: removed.map(p => p.owner) });
 
@@ -992,7 +1032,9 @@ const app = express();
 const SYNC_PATH = "/api/peers/sync";
 const jsonSmall = express.json({ limit: "1kb" });
 const jsonSync  = express.json({ limit: "512kb" });
-app.use((req, res, next) => (req.path === SYNC_PATH ? jsonSync : jsonSmall)(req, res, next));
+// /api/audit/clean тоже несёт до SYNC_MAX ключей — под 1kb он принимал бы около двадцати.
+const BIG_BODY_PATHS = new Set([SYNC_PATH, "/api/audit/clean"]);
+app.use((req, res, next) => (BIG_BODY_PATHS.has(req.path) ? jsonSync : jsonSmall)(req, res, next));
 
 function verifyInternalToken(token: string): boolean {
     try {
@@ -1075,6 +1117,8 @@ app.get("/api/users/stats", auth, handler((_req, res) => {
             lastHandshake: peers[u.pub_key]?.lastHandshake ?? 0,
             rx:            peers[u.pub_key]?.rx            ?? 0,
             tx:            peers[u.pub_key]?.tx            ?? 0,
+            // «normal» | «background»: фоновый — пока канал занят, а устройство давно качает больше своей доли
+            priority:      shaping.priorityOf(u.ip),
         })),
     });
 }));
@@ -1111,8 +1155,41 @@ app.get("/api/peers", auth, handler((_req, res) => {
             lastHandshake: stats[p.pub_key]?.lastHandshake ?? 0,
             rx:            stats[p.pub_key]?.rx            ?? 0,
             tx:            stats[p.pub_key]?.tx            ?? 0,
+            priority:      shaping.priorityOf(p.ip),
         })),
     });
+}));
+
+// Пиры, которые стоят в ядре, но неизвестны awg-ctrl (нет ни в users, ни в peers): снять их
+// после сбоя `awg set … remove` некому. Только чтение — панель (core) сама решает, что делать.
+app.get("/api/audit", auth, handler((_req, res) => {
+    const r = spawnSync("awg", ["show", CONFIG.interface, "dump"]);
+    if (r.status !== 0) throw new HttpError(503, "awg show не ответил");
+    const known = new Set<string>([
+        ...(db.prepare("SELECT pub_key FROM users").all() as { pub_key: string }[]).map(u => u.pub_key),
+        ...stmts.peersAll.all().map(p => p.pub_key),
+    ]);
+    const now = Math.floor(Date.now() / 1000);
+    const ghosts = r.stdout.toString().split("\n").slice(1).map(l => l.split("\t")).filter(f => f[0] && !known.has(f[0])).map(f => {
+        const lastHandshake = Number(f[4]) || 0;
+        return { pub_key: f[0], lastHandshake, online: lastHandshake > 0 && now - lastHandshake < 180, rx: Number(f[5]) || 0, tx: Number(f[6]) || 0 };
+    });
+    res.json({ ghosts });
+}));
+
+// Снять «призраков» из ядра. Ключи присылает панель, но здесь каждый перепроверяется: пир, который
+// успел появиться в users/peers, не трогаем. Строк в базе у «призраков» нет — снимается только ядро.
+app.post("/api/audit/clean", auth, handler((req, res) => {
+    const { pub_keys } = (req.body ?? {}) as { pub_keys?: unknown };
+    if (!Array.isArray(pub_keys) || pub_keys.length > SYNC_MAX) throw new HttpError(400, "Неверный список ключей");
+    const removed: string[] = [], skipped: string[] = [];
+    for (const k of pub_keys.map(checkPubKey)) {
+        const known = stmts.peerGet.get(k) || (db.prepare("SELECT 1 FROM users WHERE pub_key = ?").get(k));
+        if (known || k === getServerPublicKey() || !kernelPeers()?.has(k)) { skipped.push(k); continue; }
+        (dropFromKernel(k) ? removed : skipped).push(k);
+    }
+    if (removed.length) logger.warn("ghost peers removed from kernel", { count: removed.length, removed });
+    res.json({ removed, skipped });
 }));
 
 // Должен стоять ДО PUT /api/peers/:pub — иначе тот примет «sync» за ключ.
@@ -1175,6 +1252,148 @@ app.post("/awg/upgrade", auth, handler((_req, res) => {
     }
 }));
 
+// Деление канала между устройствами. Путь под /api/ — иначе awg-agent на ноде его не пропустит
+// (и без PATCH: агент отвечает на него 400).
+app.get("/api/shaping", auth, handler(async (_req, res) => {
+    res.json(await shaping.status());
+}));
+
+app.put("/api/shaping", auth, handler(async (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const mbit = (v: unknown, what: string): number => {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 100_000) throw new HttpError(400, `${what}: целое число Мбит/с от 1 до 100000`);
+        return n;
+    };
+    if (typeof b.enabled !== "boolean" || typeof b.auto !== "boolean")
+        throw new HttpError(400, "enabled и auto должны быть true/false");
+    const downMbit = mbit(b.downMbit ?? 0, "Загрузка");
+    const upMbit   = mbit(b.upMbit   ?? 0, "Отдача");
+    if (b.enabled && (downMbit < 1 || upMbit < 1))
+        throw new HttpError(400, "Для включения укажите ширину канала в обе стороны");
+    try {
+        await shaping.update({ enabled: b.enabled, auto: b.auto, downMbit, upMbit });
+    } catch (e) {
+        // tc/nft/модуль не нашлись или ядро отказало: оператору нужна причина, а не 500.
+        throw new HttpError(500, e instanceof Error ? e.message : "Не удалось применить шейпинг");
+    }
+    res.json(await shaping.status());
+}));
+
+// Метрики для Prometheus. awg-ctrl отдаёт JSON, а текстовый формат собирает awg-ui: на ноде
+// агент пропускает только /api/*, и один формат на ядре и нодах проще сверять. Кэш на 5 с —
+// несколько скрейперов не должны гонять `awg show` чаще.
+const METRICS_TTL_MS = 5_000;
+let metricsCache: { at: number; data: Promise<unknown> } | null = null;
+
+function linkCounter(name: string): number {
+    try { return Number(readFileSync(`/sys/class/net/${CONFIG.interface}/statistics/${name}`, "utf8")) || 0; }
+    catch { return 0; }
+}
+
+// Нагрузка хоста из /proc. Счётчики CPU кумулятивные (секунды по режимам, как у node_exporter): долю считает
+// Prometheus через rate(), здесь мгновенного «процента» нет. Память — MemAvailable, а не MemFree: кэш ядра свободен.
+const CPU_MODES = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"] as const;
+function readHost() {
+    try {
+        const first = readFileSync("/proc/stat", "utf8").split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
+        const cpu: Record<string, number> = {};
+        CPU_MODES.forEach((m, i) => { cpu[m] = (first[i] || 0) / 100; });     // USER_HZ = 100 на всех обычных ядрах
+        const mem = readFileSync("/proc/meminfo", "utf8");
+        const kb = (k: string) => Number(mem.match(new RegExp(`^${k}:\\s+(\\d+) kB`, "m"))?.[1] ?? 0) * 1024;
+        return {
+            cpu, cores: os.cpus().length, load: os.loadavg(),
+            mem: { total: kb("MemTotal"), available: kb("MemAvailable") },
+        };
+    } catch { return null; }
+}
+
+async function collectMetrics() {
+    const st    = getInterfaceStatus();
+    const stats = st.up ? getPeersData() : {};
+    const list: { kind: "user" | "device"; name: string; ip: string; online: boolean; rx: number; tx: number; priority: string }[] = [
+        ...(db.prepare("SELECT name, ip, pub_key FROM users WHERE vpn_key != ''").all() as UserRow[]).map(u => ({
+            kind: "user" as const, name: u.name, ip: u.ip,
+            online: stats[u.pub_key]?.online ?? false, rx: stats[u.pub_key]?.rx ?? 0, tx: stats[u.pub_key]?.tx ?? 0,
+            priority: shaping.priorityOf(u.ip),
+        })),
+        ...stmts.peersAll.all().map(p => ({
+            kind: "device" as const, name: "", ip: p.ip,
+            online: stats[p.pub_key]?.online ?? false, rx: stats[p.pub_key]?.rx ?? 0, tx: stats[p.pub_key]?.tx ?? 0,
+            priority: shaping.priorityOf(p.ip),
+        })),
+    ];
+    const all = Object.values(stats);
+    return {
+        up:    st.up,
+        gen:   CONFIG.gen,
+        peers: { total: st.peers, online: all.filter(p => p.online).length },
+        // С точки зрения сервера: rx — принято от клиентов (их отдача), tx — отправлено клиентам (их загрузка).
+        rx_bytes: all.reduce((a, p) => a + p.rx, 0),
+        tx_bytes: all.reduce((a, p) => a + p.tx, 0),
+        link: {
+            rx_bytes: linkCounter("rx_bytes"), tx_bytes: linkCounter("tx_bytes"),
+            rx_packets: linkCounter("rx_packets"), tx_packets: linkCounter("tx_packets"),
+            rx_dropped: linkCounter("rx_dropped"), tx_dropped: linkCounter("tx_dropped"),
+            rx_errors: linkCounter("rx_errors"), tx_errors: linkCounter("tx_errors"),
+        },
+        shaping: await shaping.status(),
+        host:    readHost(),
+        list,
+    };
+}
+
+app.get("/api/metrics", auth, handler(async (_req, res) => {
+    if (!metricsCache || Date.now() - metricsCache.at > METRICS_TTL_MS) {
+        const data = collectMetrics();
+        metricsCache = { at: Date.now(), data };
+        data.catch(() => { metricsCache = null; });      // ошибку не кэшируем
+    }
+    res.json(await metricsCache.data);
+}));
+
+// Установка и удаление встроенного мониторинга (Prometheus) по кнопке в панели. Действие одно из двух и без
+// параметров: awg-ctrl запускает ту же команду, что оператор набрал бы руками (`awg-ctrl monitor install|remove`,
+// root), так что код один. Панель сама пакетов не ставит и не удаляет — она только просит об этом здесь.
+const MONITOR_CLI = process.env.AWG_CLI ?? "/usr/local/bin/awg-ctrl";
+const MONITOR_LOG = process.env.MONITOR_LOG ?? path.resolve(process.cwd(), "..", "logs", "monitor-job.log");
+type MonitorAction = "install" | "remove";
+let monitorJob: { action: MonitorAction; startedAt: number; exit: number | null } | null = null;
+
+const logTail = (): string => {
+    try {
+        const t = readFileSync(MONITOR_LOG, "utf8").slice(-4000);
+        // apt рисует прогресс возвратом каретки и цветами — в панели это мусор
+        return t.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "\n");
+    } catch { return ""; }
+};
+
+function startMonitorJob(action: MonitorAction, res: Response) {
+    if (monitorJob && monitorJob.exit === null) { res.status(409).json({ error: "Операция уже идёт" }); return; }
+    if (!existsSync(MONITOR_CLI)) throw new HttpError(501, `CLI не найден (${MONITOR_CLI}): выполните на сервере awg-ctrl monitor ${action}`);
+    mkdirSync(path.dirname(MONITOR_LOG), { recursive: true });
+    const fd  = openSync(MONITOR_LOG, "w");
+    const job = { action, startedAt: Date.now(), exit: null as number | null };
+    monitorJob = job;
+    const done = (code: number) => { job.exit = code; try { closeSync(fd); } catch { /* уже закрыт */ } };
+    const child = spawn(MONITOR_CLI, ["monitor", action], { stdio: ["ignore", fd, fd] });
+    child.on("error", e => { logger.error("monitor: не запустился", { action, error: e.message }); done(127); });
+    child.on("exit", code => { logger.info("monitor: завершён", { action, code }); done(code ?? 1); });
+    res.status(202).json({ running: true, action });
+}
+
+app.post("/api/monitor/install", auth, handler((_req, res) => { startMonitorJob("install", res); }));
+app.post("/api/monitor/remove",  auth, handler((_req, res) => { startMonitorJob("remove", res); }));
+
+app.get("/api/monitor/job", auth, handler((_req, res) => {
+    res.json({
+        action: monitorJob?.action ?? null,
+        running: !!monitorJob && monitorJob.exit === null,
+        exit: monitorJob?.exit ?? null,
+        log: monitorJob ? logTail() : "",
+    });
+}));
+
 app.get("/awg/status", auth, handler((_req, res) => {
     res.json(getInterfaceStatus());
 }));
@@ -1188,3 +1407,7 @@ app.listen(SERVER.port, "127.0.0.1", () => {
 });
 ensureInterfaceUp();
 syncPeers();
+// Обязательно и на старте: при загрузке интерфейс поднимает systemd (ExecStartPre),
+// ни один из путей awg-quick up внутри awg-ctrl тогда не срабатывает.
+void shaping.apply();
+shaping.start();

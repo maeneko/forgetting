@@ -2,7 +2,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { type NodeInfo, genLabel, cmpVersion } from '../lib/shared';
-import { IcoRefresh, IcoPlus, IcoTrash, IcoCopy } from './icons';
+import { IcoRefresh, IcoPlus, IcoTrash, IcoCopy, IcoSettings } from './icons';
 
 // Сервер-бар: карточки серверов (core-локальный и ноды) + «Добавить сервер» и
 // (на мобильной) перезапуск AWG под ними. Общий для вкладок — показывает
@@ -29,7 +29,7 @@ function versionChip(n: NodeInfo, panel: string | null) {
 }
 
 export default function ServerBar({
-    nodes, serverId, hubEnabled, panelVersion, onSelect, onAdd, onJoin, onDelete,
+    nodes, serverId, hubEnabled, panelVersion, onSelect, onAdd, onJoin, onDelete, onSettings,
     onRestartAwg, restarting, showRestart = true,
 }: {
     nodes: NodeInfo[];
@@ -40,6 +40,7 @@ export default function ServerBar({
     onAdd: () => void;
     onJoin: (n: NodeInfo) => void;
     onDelete: (n: NodeInfo) => void;
+    onSettings: (n: NodeInfo) => void;
     onRestartAwg: () => void;
     restarting: boolean;
     showRestart?: boolean;
@@ -101,6 +102,16 @@ export default function ServerBar({
                                 onClick={e => { e.stopPropagation(); onJoin(n); }}
                             >
                                 <IcoCopy />
+                            </button>
+                        )}
+                        {/* Настройки сервера: у ноды, которая ещё не подключалась, настраивать нечего */}
+                        {!n.pending && n.online && (
+                            <button
+                                className="btn-icon btn-icon--neutral"
+                                aria-label={`Настройки сервера ${n.name}`}
+                                onClick={e => { e.stopPropagation(); onSettings(n); }}
+                            >
+                                <IcoSettings />
                             </button>
                         )}
                         {!n.local && (

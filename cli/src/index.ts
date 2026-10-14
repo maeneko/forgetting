@@ -9,6 +9,7 @@ import * as readline                            from "readline";
 import * as crypto                              from "crypto";
 import * as http                                from "http";
 import path                                     from "path";
+import { monitorCmd }                           from "./monitor";
 
 const ROOT = path.resolve(__dirname, "../..");
 const LOGS = path.join(ROOT, "logs");
@@ -107,6 +108,10 @@ const SERVICES = {
             // join-строки, живёт как sub_tls.*). Без NODE_PORT хаб выключен. LOCAL_NODE=off —
             // core без собственного VPN: awg-ctrl рядом не нужен.
             NODE_PORT:          process.env.NODE_PORT          ?? "",
+            // Часовой аудит «мёртвых» пиров на всех серверах — только у core (у ноды со своей панелью выключен).
+            AUDIT:              process.env.CORE_HOST ? "off" : (process.env.AUDIT ?? "on"),
+            // Пер-пировые серии в /metrics: только по явному согласию оператора (cli.env).
+            METRICS_PEERS:      process.env.METRICS_PEERS ?? "off",
             LOCAL_NODE:         process.env.LOCAL_NODE         ?? "on",
             NODE_TLS_KEY_FILE:  process.env.NODE_TLS_KEY_FILE  ?? "/etc/amnezia/amneziawg/node_tls.key",
             NODE_TLS_CERT_FILE: process.env.NODE_TLS_CERT_FILE ?? "/etc/amnezia/amneziawg/node_tls.crt",
@@ -640,7 +645,7 @@ async function main() {
         return;
     }
 
-    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|peers [drop <область>]>";
+    const USAGE = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|peers [drop <область>]|monitor <install|status|remove>>";
 
     const [,,, sub, arg] = process.argv;
 
@@ -657,6 +662,7 @@ async function main() {
         case "join":        await joinCore(sub, arg);                          break;
         case "unjoin":      await unjoinCore();                                break;
         case "peers":       await peersCmd(sub, arg);                          break;
+        case "monitor":     await monitorCmd(sub);                             break;
         default: console.log(USAGE); process.exit(1);
     }
 }

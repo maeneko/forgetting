@@ -18,6 +18,7 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
     const [label, setLabel]     = useState('');
     const [created, setCreated] = useState<{ label: string; key: string } | null>(null);
     const [tools, setTools]     = useState<number | null>(null);   // ключ с открытыми настройками
+    const [picked, setPicked]   = useState<number[] | null>(null);   // серверы нового ключа; null — только выбранный в сервер-баре
 
     const load = useCallback(async () => {
         try {
@@ -54,12 +55,15 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
 
     const createKey = useCallback(async () => {
         if (!label.trim()) return;
-        const r = await apiFetch('POST', '/ui/apikeys', token, { label: label.trim(), server_id: getServerId() ?? 0 });
+        const def = getServerId() ?? 0;
+        const servers = picked ?? [def];
+        const r = await apiFetch('POST', '/ui/apikeys', token, { label: label.trim(), server_id: servers.includes(def) ? def : servers[0], servers });
         if (r.error) { showMsg(r.error); return; }
         setLabel('');
+        setPicked(null);
         setCreated({ label: r.label, key: r.key });
         await load();
-    }, [label, token, load, showMsg]);
+    }, [label, picked, token, load, showMsg]);
 
     const deleteKey = useCallback(async (id: number, lbl: string) => {
         if (!confirm('Удалить ключ «' + lbl + '»? Клиенты с ним потеряют доступ.')) return;
@@ -69,6 +73,7 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
     }, [token, load, showMsg]);
 
     useEffect(() => { if (token) load(); }, [token, load]);
+
 
     return (
         <>
@@ -86,6 +91,11 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
                         <IcoPlus /> Создать ключ
                     </button>
                 </div>
+            </div>
+            <div className="apikey-new-servers">
+                <span className="apikey-tools-hint">Серверы нового ключа:</span>
+                <ServerPicker nodes={nodes} selected={picked ?? [getServerId() ?? 0]}
+                    onChange={next => setPicked(next)} />
             </div>
 
             <div className="table-card">

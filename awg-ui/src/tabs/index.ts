@@ -4,7 +4,7 @@
 // Автообнаружение вкладок. Каждая вкладка — самодостаточная папка tabs/<name>/:
 //   index.tsx      — компонент + логика
 //   <name>.css     — стили вкладки (импортит сам компонент)
-//   metadata.json  — { id, label, icon, order?, chrome? } (манифест: описание + порядок)
+//   metadata.json  — { id, label, icon, group?, order?, chrome? } (манифест: описание, группа меню, порядок)
 // Реестр сам находит все папки через import.meta.glob и собирает «живые» части
 // (Page-компонент, Icon по имени из ICONS) к метадате. Добавить вкладку = просто
 // создать папку с index.tsx и metadata.json — этот файл трогать НЕ нужно.
@@ -21,12 +21,20 @@ export interface TabChrome {
     restart?:   boolean;
 }
 
+// Группы меню: порядок здесь = порядок заголовков в сайдбаре. Новая группа — строка сюда.
+export const TAB_GROUPS = [
+    { id: 'main',   label: 'Основное' },
+    { id: 'server', label: 'О сервере' },
+] as const;
+export type TabGroupId = (typeof TAB_GROUPS)[number]['id'];
+
 // Сериализуемая часть из metadata.json.
 export interface TabMeta {
     id:      string;
     label:   string;
     icon:    string;     // имя иконки → ICONS
-    order?:  number;     // порядок в меню (по возрастанию; без него — 0)
+    group:   TabGroupId; // группа меню; без поля — 'main'
+    order?:  number;     // порядок внутри группы (по возрастанию; без него — 0)
     chrome?: TabChrome;
 }
 
@@ -58,10 +66,15 @@ function toMeta(name: string, raw: unknown): TabMeta {
     if (m.chrome !== undefined && (typeof m.chrome !== 'object' || m.chrome === null)) {
         throw new Error(`tabs/${name}/metadata.json: "chrome" должно быть объектом`);
     }
+    const group = (m.group ?? 'main') as string;
+    if (!TAB_GROUPS.some(g => g.id === group)) {
+        throw new Error(`tabs/${name}/metadata.json: "group" должно быть одним из: ${TAB_GROUPS.map(g => g.id).join(', ')}`);
+    }
     return {
         id:     str('id'),
         label:  str('label'),
         icon:   str('icon'),
+        group:  group as TabGroupId,
         order:  m.order as number | undefined,
         chrome: m.chrome as TabChrome | undefined,
     };
@@ -80,7 +93,15 @@ export const TABS: TabDef[] = Object.entries(metas)
         }
         return { ...meta, Icon: ICONS[meta.icon], Page: page };
     })
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    // сначала по группе (как в TAB_GROUPS), внутри группы — по order
+    .sort((a, b) =>
+        TAB_GROUPS.findIndex(g => g.id === a.group) - TAB_GROUPS.findIndex(g => g.id === b.group)
+        || (a.order ?? 0) - (b.order ?? 0));
+
+// Вкладки по группам для меню; пустые группы не показываем.
+export const TABS_BY_GROUP = TAB_GROUPS
+    .map(g => ({ ...g, tabs: TABS.filter(t => t.group === g.id) }))
+    .filter(g => g.tabs.length > 0);
 
 // id вкладок используются как ключ активной вкладки — дубли ломают переключение.
 const ids = TABS.map(t => t.id);

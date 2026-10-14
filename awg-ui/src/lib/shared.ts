@@ -5,6 +5,9 @@
 import axios from 'axios';
 // Поколение протокола AmneziaWG, на параметрах которого выдан vpn:// ключ.
 export type AwgGen = '2' | '3.1';
+// Текущая приоритетность ключа/устройства: «background» — канал занят, а он давно качает больше своей доли.
+export type Priority = 'normal' | 'background';
+
 export interface User {
     name:          string;
     ip:            string;
@@ -15,6 +18,7 @@ export interface User {
     lastHandshake: number;
     rx?:           number;
     tx?:           number;
+    priority?:     Priority;     // нет у awg-ctrl старше деления канала
 }
 export interface ServerInfo {
     name:  string;
@@ -62,6 +66,17 @@ export interface NodeInfo {
     last_seen: number | null;
     version:   string | null;  // версия Forgetting на сервере; null — нода ещё не подключалась или агент старше 0.3.4
     health:    { server: string; ip: string; gen: AwgGen; peers: number; awg_up: boolean; module: string; tools: string } | null;
+}
+
+// Деление канала (GET/PUT /api/shaping на awg-ctrl сервера).
+export interface ShapingStatus {
+    settings:  { enabled: boolean; downMbit: number; upMbit: number; auto: boolean };
+    active:    boolean;     // CAKE реально стоит на интерфейсе
+    congested: boolean;
+    heavy:     string[];    // IP устройств, переведённых в фоновый класс
+    devices:   number;      // активных устройств в окне
+    rateDown:  number;      // Мбит/с за последний тик
+    rateUp:    number;
 }
 
 // Сравнение версий вида 0.3.3 (хвост после «-» не учитывается): <0 — a старше b.

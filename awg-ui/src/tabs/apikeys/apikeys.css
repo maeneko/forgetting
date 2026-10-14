@@ -90,3 +90,5 @@ LICENSE file in the root directory of this source tree.
 .apikey-tools-hint { margin: 0; font-size: 12px; color: var(--neutral-text); }
 .apikey-card-btns { display: flex; gap: 8px; flex-shrink: 0; }
 .apikey-card-servers { font-size: 12px; color: var(--neutral-text); }
+
+.apikey-new-servers { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 16px; }

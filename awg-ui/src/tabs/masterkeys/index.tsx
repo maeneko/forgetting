@@ -3,9 +3,10 @@
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback } from 'react';
 import QRCode from 'qrcode';
-import { apiFetch, copyText, bytes, timeAgo, type NodeInfo, type PageProps } from '../../lib/shared';
+import { apiFetch, copyText, bytes, timeAgo, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings } from '../../components/icons';
 import ServerPicker, { serverName } from '../../components/ServerPicker';
+import PriorityChip from '../../components/PriorityChip';
 import './masterkeys.css';
 
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
@@ -15,7 +16,7 @@ import './masterkeys.css';
 interface MasterKey { id: number; uuid: string; label: string; device_limit: number; devices: number; servers: number[]; created_at: number; deleting?: number[] }
 interface Device {
     id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null;
-    rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number;
+    rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number; priority?: Priority;
     servers_total: number; servers_ok: number;   // на скольких серверах ключа уже стоит его текущий ключ
 }
 
@@ -283,6 +284,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
                     <span className="chip-dot" />{d.online ? 'Онлайн' : 'Офлайн'}
                 </span>
+                <PriorityChip priority={d.priority} />
                 <div className="mk-device-traffic">
                     <span className="mk-metric"><i className="mk-metric-name" data-sfx=" rx">↓</i><b>{bytes(d.rx)}</b></span>
                     <span className="mk-metric"><i className="mk-metric-name" data-sfx=" tx">↑</i><b>{bytes(d.tx)}</b></span>

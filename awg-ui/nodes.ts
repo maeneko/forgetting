@@ -305,9 +305,9 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
 
     const router = Router();
 
-    router.get("/", async (_req: Request, res: Response) => {
-        if (LOCAL) await refreshHealth(0);
-        const nodes: unknown[] = [];
+    // Серверы со всем, что известно без запросов (health — из кэша). Общий вид для GET / и для метрик.
+    const list = () => {
+        const nodes: { id: number; name: string; local: boolean; online: boolean; pending: boolean; last_seen: number | null; version: string | null; health: Health | null }[] = [];
         if (LOCAL) {
             const h = health.get(0) ?? null;
             nodes.push({ id: 0, name: h?.server ?? "VPN", local: true, online: h !== null, pending: false, last_seen: null, version: deps.version || null, health: h });
@@ -318,7 +318,12 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
                 pending: n.pub === null, last_seen: n.last_seen, version: n.version ?? null, health: health.get(n.id) ?? null,
             });
         }
-        res.json({ hub: hubReady(), local: LOCAL, version: deps.version || null, nodes });
+        return nodes;
+    };
+
+    router.get("/", async (_req: Request, res: Response) => {
+        if (LOCAL) await refreshHealth(0);
+        res.json({ hub: hubReady(), local: LOCAL, version: deps.version || null, nodes: list() });
     });
 
     router.post("/", (req: Request, res: Response) => {
@@ -379,5 +384,5 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         res.json({ success: true, id });
     });
 
-    return { router, ctrlFor, exists, isOnline, ids, onOnline, beforeDelete, afterDelete, defaultId, start };
+    return { router, ctrlFor, exists, isOnline, ids, list, onOnline, beforeDelete, afterDelete, defaultId, start };
 }

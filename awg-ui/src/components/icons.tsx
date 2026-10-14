@@ -90,7 +90,21 @@ export const IcoMoon = () => (
 
 // Карта «имя → иконка» для вкладок: metadata.json хранит имя строкой, реестр
 // (tabs/index.ts) резолвит его сюда. Новой вкладке — добавь сюда её иконку.
+export const IcoShield = () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3z"/><path d="m9 12 2 2 4-4"/>
+    </svg>
+);
+
+export const IcoPulse = () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>
+    </svg>
+);
+
 export const ICONS: Record<string, () => JSX.Element> = {
     users: IcoUsers,
     key:   IcoKey,
+    shield: IcoShield,
+    pulse:  IcoPulse,
 };
