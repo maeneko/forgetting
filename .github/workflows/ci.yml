@@ -23,6 +23,18 @@ jobs:
       - name: Installer syntax
         run: bash -n install.sh
 
+      # Go-переписывание (awg-control): сборка, vet и тесты. composites выключен —
+      # jsjson.KV{k, v} без имён полей написан так намеренно.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Go build, vet, test
+        run: |
+          go build ./...
+          go vet -composites=false ./...
+          go test -race ./...
+
       - name: awg-ctrl types
         working-directory: awg-ctrl
         run: |
