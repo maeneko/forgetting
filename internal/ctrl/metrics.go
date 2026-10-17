@@ -129,6 +129,7 @@ func (s *Server) collectMetrics() (*metricsBody, error) {
 	if st.Up {
 		stats = s.getPeersData()
 	}
+	torrent := s.torrent.SeenSet() // до запроса: внутри цикла по строкам — ни базы, ни nft
 	rows, err := s.db.Query("SELECT name, ip, pub_key FROM users WHERE vpn_key != ''")
 	if err != nil {
 		return nil, err
@@ -141,7 +142,7 @@ func (s *Server) collectMetrics() (*metricsBody, error) {
 			return nil, err
 		}
 		ps := stats[pub]
-		b.List = append(b.List, metricsPeer{"user", n, ip, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(ip), s.torrent.Seen(ip)})
+		b.List = append(b.List, metricsPeer{"user", n, ip, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(ip), torrent[ip]})
 	}
 	rows.Close()
 	devs, err := s.peersAll()
@@ -150,7 +151,7 @@ func (s *Server) collectMetrics() (*metricsBody, error) {
 	}
 	for _, p := range devs {
 		ps := stats[p.PubKey]
-		b.List = append(b.List, metricsPeer{"device", "", p.IP, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(p.IP), s.torrent.Seen(p.IP)})
+		b.List = append(b.List, metricsPeer{"device", "", p.IP, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(p.IP), torrent[p.IP]})
 	}
 	b.Peers.Total = st.Peers
 	for _, ps := range stats {

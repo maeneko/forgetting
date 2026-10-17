@@ -71,7 +71,9 @@ type Torrent struct {
 
 	opMu sync.Mutex // сериализует nft
 
-	mu        sync.Mutex
+	mu      sync.Mutex
+	enabled bool // копия настройки в памяти: cached() зовут внутри циклов по строкам users, а
+	//                   соединение с SQLite одно — запрос в базу оттуда ждал бы его вечно
 	tcp       bool
 	lastError string
 	cacheAt   time.Time
@@ -79,7 +81,11 @@ type Torrent struct {
 	cacheHits float64
 }
 
-func newTorrent(s *Server) *Torrent { return &Torrent{s: s} }
+func newTorrent(s *Server) *Torrent {
+	t := &Torrent{s: s}
+	t.enabled = t.Settings().Enabled
+	return t
+}
 
 func (t *Torrent) Settings() TorrentSettings {
 	return TorrentSettings{Enabled: t.s.getCfg("torrentBlock", "0") == "1"}
@@ -163,6 +169,9 @@ func (t *Torrent) Update(st TorrentSettings) error {
 		v = "1"
 	}
 	t.s.setCfg("torrentBlock", v)
+	t.mu.Lock()
+	t.enabled, t.cache = st.Enabled, nil
+	t.mu.Unlock()
 	t.opMu.Lock()
 	err := t.applyNow()
 	t.opMu.Unlock()
@@ -228,11 +237,13 @@ func (t *Torrent) read() (seen map[string]bool, hits float64, ok bool) {
 	return seen, hits, true
 }
 
+// cached не трогает базу (только память и nft) — его можно звать где угодно.
 func (t *Torrent) cached() (map[string]bool, float64, bool) {
-	if !t.Settings().Enabled {
+	t.mu.Lock()
+	if !t.enabled {
+		t.mu.Unlock()
 		return nil, 0, false
 	}
-	t.mu.Lock()
 	if t.cache != nil && time.Since(t.cacheAt) < torrentCacheS {
 		c, h := t.cache, t.cacheHits
 		t.mu.Unlock()
@@ -249,10 +260,15 @@ func (t *Torrent) cached() (map[string]bool, float64, bool) {
 	return seen, hits, true
 }
 
-// Seen — пытался ли этот IP открыть торрент-соединение за последние torrentSeenTTL.
-func (t *Torrent) Seen(ip string) bool {
+// SeenSet — кто пытался открыть торрент-соединение за последние torrentSeenTTL. Берите его до
+// запроса к базе, а не внутри цикла по строкам: так на открытом курсоре не висит вызов nft.
+func (t *Torrent) SeenSet() map[string]bool {
 	seen, _, _ := t.cached()
-	return seen[ip]
+	out := make(map[string]bool, len(seen))
+	for ip := range seen {
+		out[ip] = true
+	}
+	return out
 }
 
 // SeenList — IP с меткой «торренты», по порядку; шейпинг держит их в фоновом классе.

@@ -149,6 +149,24 @@ export default function App() {
         if (touchStartX.current - touchCurrentX.current > 40) setDrawerOpen(false);
     }, []);
 
+    // Токен протух (24 ч) или отозван, пока панель открыта: запросы вкладок падали с 401, а экран
+    // оставался прежним. Выходим только по 401 самой панели («Unauthorized» — её JWT не принят):
+    // 401 от awg-ctrl ноды (внутренняя авторизация) пересылается как есть и сессию не рвёт.
+    useEffect(() => {
+        const id = axios.interceptors.response.use(undefined, e => {
+            if (axios.isAxiosError(e) && e.response?.status === 401 && e.response.data?.error === 'Unauthorized') {
+                localStorage.removeItem(TOKEN_KEY);
+                setToken('');
+                setNodes([]);
+                setServerId(null);
+                setServerIdState(null);
+                showMsg('Сессия истекла — войдите снова');
+            }
+            return Promise.reject(e);
+        });
+        return () => axios.interceptors.response.eject(id);
+    }, [showMsg]);
+
     // Восстановить сессию из сохранённого токена
     useEffect(() => {
         const saved = localStorage.getItem(TOKEN_KEY);

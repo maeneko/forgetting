@@ -73,6 +73,7 @@ func (s *Server) routes() []route {
 		}),
 
 		R("GET", "/api/users/stats", true, a, func(c *rctx) (result, error) {
+			torrent := s.torrent.SeenSet()
 			rows, err := s.db.Query("SELECT name, ip, pub_key, key_gen FROM users WHERE vpn_key != ''")
 			if err != nil {
 				return result{}, err
@@ -88,7 +89,7 @@ func (s *Server) routes() []route {
 				ps := stats[pub]
 				list = append(list, ob{{"name", n}, {"ip", ip}, {"key_gen", kg}, {"online", ps.Online},
 					{"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx}, {"priority", s.shaping.PriorityOf(ip)},
-					{"torrent", s.torrent.Seen(ip)}})
+					{"torrent", torrent[ip]}})
 			}
 			rows.Close()
 			return ok(ob{{"users", list}})
@@ -138,6 +139,7 @@ func (s *Server) routes() []route {
 		}),
 
 		R("GET", "/api/peers", true, a, func(c *rctx) (result, error) {
+			torrent := s.torrent.SeenSet()
 			stats := s.getPeersData()
 			peers, err := s.peersAll()
 			if err != nil {
@@ -148,7 +150,7 @@ func (s *Server) routes() []route {
 				ps := stats[p.PubKey]
 				list = append(list, ob{{"pub_key", p.PubKey}, {"ip", p.IP}, {"psk_key", p.PskKey}, {"owner", p.Owner},
 					{"online", ps.Online}, {"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx},
-					{"priority", s.shaping.PriorityOf(p.IP)}, {"torrent", s.torrent.Seen(p.IP)}})
+					{"priority", s.shaping.PriorityOf(p.IP)}, {"torrent", torrent[p.IP]}})
 			}
 			return ok(ob{{"peers", list}})
 		}),
