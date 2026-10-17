@@ -21,12 +21,13 @@ interface Overview {
     servers: {
         id: number; name: string; ok: boolean; down: number | null; up: number | null; online: number | null; heavy: number | null; congested: boolean;
         cpu: number | null; mem: number | null; cores: number | null; mem_total: number | null;
+        used_down: number | null; used_up: number | null;   // байт за весь период
     }[];
     total: Series;
 }
 interface Series { down: Pts; up: Pts; online: Pts; heavy: Pts; drops: Pts; cpu: Pts; mem: Pts }
 
-const RANGES: [string, string][] = [['1h', '1 час'], ['6h', '6 часов'], ['24h', '24 часа']];
+const RANGES: [string, string][] = [['1h', '1 час'], ['6h', '6 часов'], ['24h', '24 часа'], ['7d', '7 дней'], ['30d', '30 дней']];
 
 const nf = (v: number, d = 1) => v.toLocaleString('ru-RU', { maximumFractionDigits: d });
 // Скорость в битах/с → «12,4 Мбит/с»
@@ -72,6 +73,12 @@ function JobProgress({ job, starting }: { job: Status['job']; starting: boolean 
     );
 }
 const gb = (b: number) => `${nf(b / 2 ** 30, 1)} ГБ`;
+// Объём трафика — десятичные единицы, как считают провайдеры: 1 ТБ = 10¹² байт
+function vol(b: number): string {
+    if (b >= 1e12) return `${nf(b / 1e12, 2)} ТБ`;
+    if (b >= 1e9)  return `${nf(b / 1e9, 1)} ГБ`;
+    return `${nf(b / 1e6, 0)} МБ`;
+}
 
 export default function MonitorPage({ token, showMsg }: PageProps) {
     const [status, setStatus]   = useState<Status | null>(null);
@@ -130,7 +137,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
     }, [pending, status?.job?.running, loadStatus]);
 
     const run = async (action: 'install' | 'remove') => {
-        if (action === 'remove' && !confirm('Удалить Prometheus? Он будет остановлен, а накопленные графики (до 15 дней) сотрутся. Панель продолжит отдавать /metrics.')) return;
+        if (action === 'remove' && !confirm('Удалить Prometheus? Он будет остановлен, а накопленные графики (до 31 дня) сотрутся. Панель продолжит отдавать /metrics.')) return;
         setPending(action);
         try { await apiFetch('POST', `/ui/monitor/${action}`, token); await loadStatus(); }
         catch (e: any) { setPending(null); showMsg(e?.response?.data?.error ?? (action === 'install' ? 'Не удалось запустить установку' : 'Не удалось запустить удаление')); }
@@ -203,7 +210,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                 <span className="chip chip--online"><span className="chip-dot" />работает</span>
             </div>
             <p className="mon-hint">
-                Стоит на этом сервере и слушает только 127.0.0.1:9090, графики хранит 15 дней. Удаление остановит его, снимет
+                Стоит на этом сервере и слушает только 127.0.0.1:9090, графики хранит 31 день. Удаление остановит его, снимет
                 пакет и сотрёт накопленные данные.
             </p>
             {status.can_install ? (
@@ -228,9 +235,11 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
     const one  = ov?.servers[0];
     const data = ov?.total ?? null;
     const cur  = data && {
-        down: lastOf(data.down), up: lastOf(data.up), online: lastOf(data.online), heavy: lastOf(data.heavy),
+        // Скорость «сейчас» — от сервера: на неделе/месяце последняя точка ряда — среднее за шаг, а не текущее
+        down: one?.down ?? lastOf(data.down), up: one?.up ?? lastOf(data.up), online: lastOf(data.online), heavy: lastOf(data.heavy),
         busy: !!one?.congested,
     };
+    const used = one?.used_down != null && one.used_up != null ? one.used_down + one.used_up : null;
     // Одна единица на всю ось (Мбит/с, а не «50 Мбит» у каждой риски): выбирается по максимуму ряда
     const peak = data ? Math.max(0, ...data.down.map(p => p[1]), ...data.up.map(p => p[1])) : 0;
     const unit = peak >= 1e9 ? { name: 'Гбит/с', div: 1e9 } : peak >= 1e6 ? { name: 'Мбит/с', div: 1e6 } : peak >= 1e3 ? { name: 'Кбит/с', div: 1e3 } : { name: 'бит/с', div: 1 };
@@ -251,33 +260,57 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
 
             <div className="mon-tiles">
                 <div className="mon-tile">
-                    <span className="mon-tile-label">Загрузка сейчас</span>
-                    <span className="mon-tile-value">{cur?.down != null ? rate(cur.down) : '—'}</span>
+                    <span className="mon-tile-label">Трафик сейчас</span>
+                    {/* Стрелки окрашены как серии графика «Трафик» ниже */}
+                    <div className="mon-tile-rates">
+                        <span className="mon-tile-value mon-tile-rate">
+                            <span className="mon-tile-dir" style={{ color: 'var(--series-1)' }} role="img" aria-label="загрузка">↓</span>
+                            {cur?.down != null ? rate(cur.down) : '—'}
+                        </span>
+                        <span className="mon-tile-value mon-tile-rate">
+                            <span className="mon-tile-dir" style={{ color: 'var(--series-2)' }} role="img" aria-label="отдача">↑</span>
+                            {cur?.up != null ? rate(cur.up) : '—'}
+                        </span>
+                    </div>
+                    <span className="mon-tile-value mon-tile-rate mon-tile-total">
+                        {used != null ? vol(used) : '—'}
+                        <span className="mon-tile-sub">потрачено за {RANGES.find(([id]) => id === range)?.[1]}</span>
+                    </span>
                 </div>
                 <div className="mon-tile">
-                    <span className="mon-tile-label">Отдача сейчас</span>
-                    <span className="mon-tile-value">{cur?.up != null ? rate(cur.up) : '—'}</span>
+                    <span className="mon-tile-label">Устройства</span>
+                    {/* Точки окрашены как серии графика «Устройства» ниже */}
+                    <div className="mon-tile-rates">
+                        <span className="mon-tile-value mon-tile-rate">
+                            <span className="mon-tile-dot" style={{ background: 'var(--series-1)' }} aria-hidden="true" />
+                            {cur?.online != null ? nf(cur.online, 0) : '—'}
+                            <span className="mon-tile-sub">онлайн</span>
+                        </span>
+                        <span className="mon-tile-value mon-tile-rate">
+                            <span className="mon-tile-dot" style={{ background: 'var(--series-2)' }} aria-hidden="true" />
+                            {cur?.heavy != null ? nf(cur.heavy, 0) : '—'}
+                            <span className="mon-tile-sub">в фоне · {cur?.busy ? 'канал занят' : 'канал свободен'}</span>
+                        </span>
+                    </div>
                 </div>
                 <div className="mon-tile">
-                    <span className="mon-tile-label">Устройств онлайн</span>
-                    <span className="mon-tile-value">{cur?.online != null ? nf(cur.online, 0) : '—'}</span>
-                </div>
-                <div className="mon-tile">
-                    <span className="mon-tile-label">В фоне</span>
-                    <span className="mon-tile-value">{cur?.heavy != null ? nf(cur.heavy, 0) : '—'}</span>
-                    <span className="mon-tile-sub">{cur?.busy ? 'канал занят' : 'канал свободен'}</span>
-                </div>
-                <div className="mon-tile">
-                    <span className="mon-tile-label">Процессор</span>
-                    <span className="mon-tile-value">{one?.cpu != null ? `${nf(one.cpu, 0)} %` : '—'}</span>
-                    <Bar v={one?.cpu} label="Загрузка процессора" />
-                    <span className="mon-tile-sub">{one?.cores ? `${nf(one.cores, 0)} ядер` : ''}</span>
-                </div>
-                <div className="mon-tile">
-                    <span className="mon-tile-label">Память</span>
-                    <span className="mon-tile-value">{one?.mem != null ? `${nf(one.mem, 0)} %` : '—'}</span>
-                    <Bar v={one?.mem} label="Занято оперативной памяти" />
-                    <span className="mon-tile-sub">{one?.mem_total ? `из ${gb(one.mem_total)}` : ''}</span>
+                    <span className="mon-tile-label">Нагрузка</span>
+                    <div className="mon-tile-rates">
+                        <div className="mon-tile-meter">
+                            <span className="mon-tile-value mon-tile-rate">
+                                {one?.cpu != null ? `${nf(one.cpu, 0)} %` : '—'}
+                                <span className="mon-tile-sub">процессор{one?.cores ? ` · ${nf(one.cores, 0)} ядер` : ''}</span>
+                            </span>
+                            <Bar v={one?.cpu} label="Загрузка процессора" />
+                        </div>
+                        <div className="mon-tile-meter">
+                            <span className="mon-tile-value mon-tile-rate">
+                                {one?.mem != null ? `${nf(one.mem, 0)} %` : '—'}
+                                <span className="mon-tile-sub">память{one?.mem_total ? ` · из ${gb(one.mem_total)}` : ''}</span>
+                            </span>
+                            <Bar v={one?.mem} label="Занято оперативной памяти" />
+                        </div>
+                    </div>
                 </div>
             </div>
 

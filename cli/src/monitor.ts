@@ -20,7 +20,7 @@ export const MONITOR_HASH_FILE = `${AWG_DIR}/monitor_token.sha256`;
 const DEFAULTS_FILE = "/etc/default/prometheus";
 const MARKER  = "# managed by forgetting";
 const LISTEN  = "127.0.0.1:9090";
-const RETENTION = "15d";
+const RETENTION = "31d";   // с запасом на вид «30 дней» во вкладке «Монитор»
 
 const log  = (s: string) => console.log(`  ${s}`);
 function fail(s: string): never { console.error(`\n  ✗ ${s}\n`); process.exit(1); }

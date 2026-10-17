@@ -29,7 +29,7 @@ const (
 	promDefaults    = "/etc/default/prometheus"
 	promMarker      = "# managed by forgetting"
 	promListen      = "127.0.0.1:9090"
-	promRetention   = "15d"
+	promRetention   = "31d" // с запасом на вид «30 дней» во вкладке «Монитор»
 )
 
 func mlog(s string) { fmt.Println("  " + s) }

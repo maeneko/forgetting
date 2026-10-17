@@ -4,7 +4,7 @@ package ui
 //   GET  /ui/monitor            — готов ли Prometheus, можно ли поставить его кнопкой, ход установки
 //   POST /ui/monitor/install    — попросить локальный awg-ctrl выполнить `awg-ctrl monitor install` (root)
 //   POST /ui/monitor/remove     — то же для `awg-ctrl monitor remove`
-//   GET  /ui/monitor/overview   — серии для графиков за 1 ч / 6 ч / 24 ч
+//   GET  /ui/monitor/overview   — серии для графиков за 1 ч / 6 ч / 24 ч / 7 дн / 30 дн
 // Панель сама пакетов не ставит и в Prometheus ходит только фиксированными запросами.
 
 import (
@@ -25,7 +25,20 @@ import (
 type promRange struct{ seconds, step int64 }
 
 // Шаг — чтобы на графике было ~250–360 точек; окно rate — минимум два скрейпа (15 с).
-var promRanges = map[string]promRange{"1h": {3600, 15}, "6h": {21600, 60}, "24h": {86400, 300}}
+// Дальше 30 дней не заглядываем: столько Prometheus хранит (promRetention в internal/cli/monitor.go).
+var promRanges = map[string]promRange{
+	"1h": {3600, 15}, "6h": {21600, 60}, "24h": {86400, 300},
+	"7d": {604800, 1800}, "30d": {2592000, 7200},
+}
+
+// Окно rate() — не короче шага: иначе на неделе/месяце точка была бы случайной двухминутной выборкой
+// из двух часов, а не средним за них. Значения «сейчас» при этом считаются отдельно, по окну 2m.
+const promRateWindow = "2m"
+
+func withWindow(q, w string) string { return strings.ReplaceAll(q, "["+promRateWindow+"]", "["+w+"]") }
+
+// rated — ряды, чьё «сейчас» показывает вкладка; при расширенном окне их берём мгновенным запросом.
+var rated = []string{"down", "up", "cpu"}
 
 // Запросы по серверам. Трафик — со счётчиков интерфейса (монотонны), а не с сумм по пирам.
 var promQueries = []struct{ key, q string }{
@@ -128,6 +141,39 @@ func (m *Monitor) rangeQuery(query string, start, end, step int64) (*series, err
 			out.ids = append(out.ids, id)
 		}
 		out.m[id] = s
+	}
+	return out, nil
+}
+
+// instantQuery — значение на момент time по каждому server_id.
+func (m *Monitor) instantQuery(query string, time_ int64) (map[int]float64, error) {
+	q := url.Values{}
+	q.Set("query", query)
+	q.Set("time", strconv.FormatInt(time_, 10))
+	c := &http.Client{Transport: m.http.Transport, Timeout: 8 * time.Second}
+	resp, err := c.Get(m.promURL + "/api/v1/query?" + q.Encode())
+	if err != nil {
+		return nil, errProm
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, errProm
+	}
+	out := map[int]float64{}
+	for _, r := range arr(field(decodeLikeAxios(raw), "data", "result")) {
+		metric := field(r, "metric")
+		if field(metric, "server_id") == nil {
+			continue
+		}
+		idf := jsToNumberAny(field(metric, "server_id"))
+		pair := arr(field(r, "value"))
+		if idf != float64(int(idf)) || len(pair) < 2 {
+			continue
+		}
+		if v := jsToNumberAny(pair[1]); !math.IsNaN(v) && !math.IsInf(v, 0) {
+			out[int(idf)] = v
+		}
 	}
 	return out, nil
 }
@@ -246,22 +292,66 @@ func (m *Monitor) router() *Router {
 		}
 		rg, ok := promRanges[rangeKey]
 		if !ok {
-			return c.Error(400, "range: 1h, 6h или 24h")
+			return c.Error(400, "range: 1h, 6h, 24h, 7d или 30d")
 		}
 		end := now()
 		start := end - rg.seconds
+		window := promRateWindow
+		if rg.step > 120 {
+			window = strconv.FormatInt(rg.step, 10) + "s"
+		}
 		got := make([]*series, len(promQueries))
-		errs := make([]error, len(promQueries))
+		errs := make([]error, len(promQueries)+2+len(rated))
+		// Объём за весь период: increase() по тем же монотонным счётчикам (сбросы счётчика он учитывает).
+		// Окно расширено — «сейчас» с конца ряда было бы средним за шаг; берём мгновенные значения по 2m.
+		var usedDown, usedUp map[int]float64
+		nowVals := map[string]map[int]float64{}
+		var mu sync.Mutex
 		var wg sync.WaitGroup
 		for i, pq := range promQueries {
 			wg.Add(1)
-			go func() { defer wg.Done(); got[i], errs[i] = m.rangeQuery(pq.q, start, end, rg.step) }()
+			go func() { defer wg.Done(); got[i], errs[i] = m.rangeQuery(withWindow(pq.q, window), start, end, rg.step) }()
+		}
+		span := strconv.FormatInt(rg.seconds, 10) + "s"
+		n := len(promQueries)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			usedDown, errs[n] = m.instantQuery(`sum by (server_id, server) (increase(awg_link_transmit_bytes_total[`+span+`]))`, end)
+		}()
+		go func() {
+			defer wg.Done()
+			usedUp, errs[n+1] = m.instantQuery(`sum by (server_id, server) (increase(awg_link_receive_bytes_total[`+span+`]))`, end)
+		}()
+		if window != promRateWindow {
+			for j, k := range rated {
+				for _, pq := range promQueries {
+					if pq.key != k {
+						continue
+					}
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						v, err := m.instantQuery(pq.q, end)
+						errs[n+2+j] = err
+						mu.Lock()
+						nowVals[k] = v
+						mu.Unlock()
+					}()
+				}
+			}
 		}
 		wg.Wait()
 		for _, err := range errs {
 			if err != nil {
 				return c.Error(502, err.Error())
 			}
+		}
+		used := func(v map[int]float64, id int) any {
+			if x, ok := v[id]; ok {
+				return x
+			}
+			return nil
 		}
 		// Вкладка показывает один сервер — выбранный в сервер-баре (?server=<id>).
 		if _, has := qs["server"]; has {
@@ -279,6 +369,15 @@ func (m *Monitor) router() *Router {
 		s := map[string]*series{}
 		for i, pq := range promQueries {
 			s[pq.key] = got[i]
+		}
+		cur := func(k string, id int) any {
+			if v, ok := nowVals[k]; ok {
+				if x, ok := v[id]; ok {
+					return x
+				}
+				return nil
+			}
+			return last(s[k].get(id))
 		}
 		ids := map[int]bool{}
 		for _, x := range got {
@@ -302,11 +401,12 @@ func (m *Monitor) router() *Router {
 			}
 			servers = append(servers, jsjson.Object{
 				{Key: "id", Val: id}, {Key: "name", Val: name}, {Key: "ok", Val: last(s["scrape_ok"].get(id)) == 1.0},
-				{Key: "down", Val: last(s["down"].get(id))}, {Key: "up", Val: last(s["up"].get(id))},
+				{Key: "down", Val: cur("down", id)}, {Key: "up", Val: cur("up", id)},
 				{Key: "online", Val: last(s["online"].get(id))}, {Key: "heavy", Val: last(s["heavy"].get(id))},
-				{Key: "congested", Val: last(s["congested"].get(id)) == 1.0}, {Key: "cpu", Val: last(s["cpu"].get(id))},
+				{Key: "congested", Val: last(s["congested"].get(id)) == 1.0}, {Key: "cpu", Val: cur("cpu", id)},
 				{Key: "mem", Val: last(s["mem"].get(id))}, {Key: "cores", Val: last(s["cores"].get(id))},
 				{Key: "mem_total", Val: last(s["mem_total"].get(id))},
+				{Key: "used_down", Val: used(usedDown, id)}, {Key: "used_up", Val: used(usedUp, id)},
 			})
 		}
 		var rangeOut any = "1h"

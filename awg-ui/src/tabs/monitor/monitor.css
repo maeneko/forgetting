@@ -56,6 +56,12 @@ LICENSE file in the root directory of this source tree.
 .mon-tile-label { font-size: 12px; color: var(--neutral-text); }
 .mon-tile-value { font-size: 20px; font-weight: 500; color: var(--on-surface); }
 .mon-tile-sub   { font-size: 12px; color: var(--neutral-text); }
+.mon-tile-rates { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.mon-tile-rate  { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; white-space: nowrap; }
+.mon-tile-dir   { font-size: 16px; }
+.mon-tile-total { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--outline-variant); }
+.mon-tile-meter { display: flex; flex-direction: column; gap: 4px; }
+.mon-tile-dot   { width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center; }
 
 .mon-charts { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 16px; }
 @media (min-width: 1000px) {

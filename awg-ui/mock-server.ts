@@ -97,7 +97,7 @@ app.get("/awg/status", (_q, r) => r.json({ up: true, peers: users.length }));
 
 // Монитор: «установка» и «удаление» Prometheus с ходом процесса (как лог CLI на реальном сервере).
 const MON_LOGS = {
-    install: ["1/4  установка пакета prometheus", "Reading package lists…", "Setting up prometheus (2.45.0)…", "2/4  токен и конфиг", "3/4  слушаем только 127.0.0.1:9090, хранение 15d", "4/4  запуск", "✓ Prometheus работает на 127.0.0.1:9090, метрики панели скрейпятся каждые 15 с."],
+    install: ["1/4  установка пакета prometheus", "Reading package lists…", "Setting up prometheus (2.45.0)…", "2/4  токен и конфиг", "3/4  слушаем только 127.0.0.1:9090, хранение 31d", "4/4  запуск", "✓ Prometheus работает на 127.0.0.1:9090, метрики панели скрейпятся каждые 15 с."],
     remove:  ["1/3  остановка сервиса", "2/3  токен", "3/3  удаление пакета и накопленных данных", "Removing prometheus (2.45.0)…", "Purging configuration files…", "✓ Prometheus удалён вместе с накопленными графиками."],
 };
 let monJob: { action: "install" | "remove"; start: number } | null = null;
@@ -118,7 +118,7 @@ for (const action of ["install", "remove"] as const) {
     app.post(`/ui/monitor/${action}`, (_q, r) => { if (!monRunning()) monJob = { action, start: Date.now() }; r.status(202).json({ running: true, action }); });
 }
 app.get("/ui/monitor/overview", (q, r) => {
-    const R: Record<string, [number, number]> = { "1h": [3600, 15], "6h": [21600, 60], "24h": [86400, 300] };
+    const R: Record<string, [number, number]> = { "1h": [3600, 15], "6h": [21600, 60], "24h": [86400, 300], "7d": [604800, 1800], "30d": [2592000, 7200] };
     const [sec, step] = R[String(q.query.range ?? "1h")] ?? R["1h"];
     const to = Math.floor(Date.now() / step) * step, from = to - sec;
     const pts = (f: (i: number, t: number) => number): [number, number][] => Array.from({ length: Math.floor(sec / step) + 1 }, (_, i) => [from + i * step, Math.max(0, f(i, from + i * step))]);
@@ -136,11 +136,13 @@ app.get("/ui/monitor/overview", (q, r) => {
     const id = Number(q.query.server ?? 0);
     const k = id === 0 ? 0.7 : 0.3;
     const down1 = scale(down, k), up1 = scale(up, k);
+    const used = (a: [number, number][]) => a.reduce((n, [, v]) => n + v, 0) * step / 8;   // бит/с × с → байты
     if (id === 3) return r.json({ range: q.query.range ?? "1h", step, from, to, servers: [], total: { down: [], up: [], online: [], heavy: [], drops: [], cpu: [], mem: [] } });
     r.json({ range: q.query.range ?? "1h", step, from, to,
         servers: [{ id, name: id === 0 ? "VPN (mock)" : "Frankfurt", ok: true, down: down1.at(-1)![1], up: up1.at(-1)![1], online: id === 0 ? 7 : 3,
             heavy: id === 0 ? heavy.at(-1)![1] : 0, congested: id === 0 && heavy.at(-1)![1] > 0,
-            cpu: id === 0 ? cpu.at(-1)![1] : cpu.at(-1)![1] * 0.5, mem: id === 0 ? mem.at(-1)![1] : 31, cores: id === 0 ? 4 : 2, mem_total: (id === 0 ? 4 : 2) * 2 ** 30 }],
+            cpu: id === 0 ? cpu.at(-1)![1] : cpu.at(-1)![1] * 0.5, mem: id === 0 ? mem.at(-1)![1] : 31, cores: id === 0 ? 4 : 2, mem_total: (id === 0 ? 4 : 2) * 2 ** 30,
+            used_down: used(down1), used_up: used(up1) }],
         total: { down: down1, up: up1, online: scale(online, k), heavy: id === 0 ? heavy : scale(heavy, 0), drops: id === 0 ? drops : scale(drops, 0),
             cpu: id === 0 ? cpu : scale(cpu, 0.5), mem: id === 0 ? mem : scale(mem, 0.55) } });
 });

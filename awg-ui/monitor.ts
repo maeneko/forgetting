@@ -16,11 +16,18 @@ type Ctrl = (method: string, urlPath: string, body?: unknown) => Promise<{ statu
 const PROM_URL = process.env.PROM_URL ?? "http://127.0.0.1:9090";
 
 // Шаг подбираем так, чтобы на графике было ~250–360 точек; окно rate — минимум два скрейпа (15 с).
+// Дальше 30 дней не заглядываем: столько Prometheus хранит (RETENTION в cli/src/monitor.ts).
 const RANGES: Record<string, { seconds: number; step: number }> = {
-    "1h":  { seconds: 3600,  step: 15 },
-    "6h":  { seconds: 21600, step: 60 },
-    "24h": { seconds: 86400, step: 300 },
+    "1h":  { seconds: 3600,    step: 15 },
+    "6h":  { seconds: 21600,   step: 60 },
+    "24h": { seconds: 86400,   step: 300 },
+    "7d":  { seconds: 604800,  step: 1800 },
+    "30d": { seconds: 2592000, step: 7200 },
 };
+// Окно rate() — не короче шага: иначе на неделе/месяце точка была бы случайной двухминутной выборкой
+// из двух часов, а не средним за них. Значения «сейчас» при этом считаются отдельно, по окну 2m.
+const RATE_WINDOW = "2m";
+const withWindow = (q: string, w: string) => q.split(`[${RATE_WINDOW}]`).join(`[${w}]`);
 
 type Point  = [number, number];
 type Series = Map<number, { name: string; points: Point[] }>;   // server_id → ряд
@@ -42,6 +49,16 @@ const QUERIES = {
     mem_total: 'max by (server_id, server) (awg_host_memory_total_bytes)',
 } as const;
 type Key = keyof typeof QUERIES;
+
+async function instantQuery(query: string, time: number): Promise<Map<number, number>> {
+    const r = await axios.get(`${PROM_URL}/api/v1/query`, { params: { query, time }, timeout: 8000 });
+    const out = new Map<number, number>();
+    for (const m of (r.data?.data?.result ?? []) as { metric: Record<string, string>; value: [number, string] }[]) {
+        const id = Number(m.metric.server_id), v = Number(m.value[1]);
+        if (Number.isInteger(id) && Number.isFinite(v)) out.set(id, v);
+    }
+    return out;
+}
 
 async function rangeQuery(query: string, start: number, end: number, step: number): Promise<Series> {
     const r = await axios.get(`${PROM_URL}/api/v1/query_range`, {
@@ -116,12 +133,17 @@ export function createMonitor(deps: { ctrlLocal: Ctrl; localEnabled: boolean }) 
 
     router.get("/overview", async (req: Request, res: Response) => {
         const range = RANGES[String(req.query.range ?? "1h")];
-        if (!range) { res.status(400).json({ error: "range: 1h, 6h или 24h" }); return; }
+        if (!range) { res.status(400).json({ error: "range: 1h, 6h, 24h, 7d или 30d" }); return; }
         const end   = Math.floor(Date.now() / 1000);
         const start = end - range.seconds;
         try {
             const keys = Object.keys(QUERIES) as Key[];
-            const got  = await Promise.all(keys.map(k => rangeQuery(QUERIES[k], start, end, range.step)));
+            const window = range.step > 120 ? `${range.step}s` : RATE_WINDOW;
+            const got  = await Promise.all(keys.map(k => rangeQuery(withWindow(QUERIES[k], window), start, end, range.step)));
+            // Окно расширено — «сейчас» с конца ряда было бы средним за шаг; берём мгновенные значения по 2m.
+            const rated: Key[] = ["down", "up", "cpu"];
+            const now   = window === RATE_WINDOW ? null
+                : new Map(await Promise.all(rated.map(async k => [k, await instantQuery(QUERIES[k], end)] as const)));
             // Вкладка показывает один сервер — тот, что выбран в сервер-баре (?server=<id>).
             const only = Number.isInteger(Number(req.query.server)) && req.query.server !== undefined ? Number(req.query.server) : null;
             const s = Object.fromEntries(keys.map((k, i) => [k,
@@ -130,19 +152,27 @@ export function createMonitor(deps: { ctrlLocal: Ctrl; localEnabled: boolean }) 
             // Список серверов — из любого ряда, где они есть; «последнее значение» берём с конца окна.
             const ids = new Set<number>();
             for (const k of keys) for (const id of s[k].keys()) ids.add(id);
+            // Объём за весь период: increase() по тем же монотонным счётчикам интерфейса (сбросы счётчика он учитывает)
+            const [usedDown, usedUp] = await Promise.all([
+                instantQuery(`sum by (server_id, server) (increase(awg_link_transmit_bytes_total[${range.seconds}s]))`, end),
+                instantQuery(`sum by (server_id, server) (increase(awg_link_receive_bytes_total[${range.seconds}s]))`, end),
+            ]);
+            const cur = (k: Key, id: number) => now?.has(k) ? (now.get(k)!.get(id) ?? null) : last(s[k].get(id));
             const servers = [...ids].sort((a, b) => a - b).map(id => ({
                 id,
                 name:      (s.scrape_ok.get(id) ?? s.down.get(id) ?? s.online.get(id))?.name ?? String(id),
                 ok:        last(s.scrape_ok.get(id)) === 1,
-                down:      last(s.down.get(id)),
-                up:        last(s.up.get(id)),
+                down:      cur("down", id),
+                up:        cur("up", id),
                 online:    last(s.online.get(id)),
                 heavy:     last(s.heavy.get(id)),
                 congested: last(s.congested.get(id)) === 1,
-                cpu:       last(s.cpu.get(id)),
+                cpu:       cur("cpu", id),
                 mem:       last(s.mem.get(id)),
                 cores:     last(s.cores.get(id)),
                 mem_total: last(s.mem_total.get(id)),
+                used_down: usedDown.get(id) ?? null,
+                used_up:   usedUp.get(id) ?? null,
             }));
 
 
