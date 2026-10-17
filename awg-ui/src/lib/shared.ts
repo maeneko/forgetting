@@ -19,6 +19,7 @@ export interface User {
     rx?:           number;
     tx?:           number;
     priority?:     Priority;     // нет у awg-ctrl старше деления канала
+    torrent?:      boolean;      // пытался качать торренты за последние 10 минут (при включённой блокировке)
 }
 export interface ServerInfo {
     name:  string;
@@ -77,6 +78,16 @@ export interface ShapingStatus {
     devices:   number;      // активных устройств в окне
     rateDown:  number;      // Мбит/с за последний тик
     rateUp:    number;
+}
+
+// Блокировка BitTorrent (GET/PUT /api/torrent на awg-ctrl сервера).
+export interface TorrentStatus {
+    settings: { enabled: boolean };
+    active:   boolean;     // nft-таблица реально стоит
+    tcp:      boolean;     // проверяется и TCP-рукопожатие (нужен свежий nftables)
+    hits:     number;      // заблокированных попыток с последнего применения
+    seen:     { ip: string; name: string }[];   // кто пытался за последние 10 минут
+    error?:   string;
 }
 
 // Сравнение версий вида 0.3.3 (хвост после «-» не учитывается): <0 — a старше b.

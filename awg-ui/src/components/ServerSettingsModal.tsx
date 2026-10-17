@@ -3,10 +3,10 @@
 // LICENSE file in the root directory of this source tree.
 import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { apiFetch, type NodeInfo, type ShapingStatus } from '../lib/shared';
+import { apiFetch, type NodeInfo, type ShapingStatus, type TorrentStatus } from '../lib/shared';
 
-// Настройки сервера: деление канала между устройствами (CAKE). Сами настройки живут в
-// awg-ctrl этого сервера — запрос идёт обычным прокси с X-Server-Id (App выбирает сервер
+// Настройки сервера: деление канала между устройствами (CAKE) и блокировка BitTorrent. Сами
+// настройки живут в awg-ctrl этого сервера — запрос идёт обычным прокси с X-Server-Id (App выбирает сервер
 // до открытия модалки), так что ядро и ноды настраиваются одинаково.
 export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
     token:   string;
@@ -22,6 +22,9 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
     const [busy, setBusy]       = useState(false);
     const [error, setError]     = useState('');
     const [unsupported, setUnsupported] = useState(false);
+    const [tst, setTst]           = useState<TorrentStatus | null>(null);
+    const [tEnabled, setTEnabled] = useState(false);
+    const [tUnsupported, setTUnsupported] = useState(false);
 
     const fill = (s: ShapingStatus) => {
         setSt(s);
@@ -32,6 +35,20 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
 
     const errText = (e: unknown, fallback: string) =>
         axios.isAxiosError(e) ? e.response?.data?.error ?? fallback : fallback;
+
+    const fillTorrent = (s: TorrentStatus) => { setTst(s); setTEnabled(s.settings.enabled); };
+
+    useEffect(() => {
+        let alive = true;
+        apiFetch('GET', '/api/torrent', token)
+            .then(s => { if (alive) fillTorrent(s as TorrentStatus); })
+            .catch(e => {
+                if (!alive) return;
+                if (axios.isAxiosError(e) && e.response?.status === 404) setTUnsupported(true);
+                else setError(errText(e, 'Не удалось загрузить настройки'));
+            });
+        return () => { alive = false; };
+    }, [token]);
 
     useEffect(() => {
         let alive = true;
@@ -55,14 +72,28 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
     const downN = Number(down), upN = Number(up);
     const valid = !enabled || (Number.isInteger(downN) && downN >= 1 && Number.isInteger(upN) && upN >= 1);
 
+    // Отправляем только изменённое: лишний PUT /api/shaping заново ставил бы tc на интерфейс.
+    const shapingDirty = !!st && (enabled !== st.settings.enabled || auto !== st.settings.auto
+        || (Number(down) || 0) !== st.settings.downMbit || (Number(up) || 0) !== st.settings.upMbit);
+    const torrentDirty = !!tst && tEnabled !== tst.settings.enabled;
+
     const save = async () => {
         setBusy(true); setError('');
+        const done: string[] = [];
         try {
-            const s = await apiFetch('PUT', '/api/shaping', token, {
-                enabled, auto, downMbit: Number(down) || 0, upMbit: Number(up) || 0,
-            });
-            fill(s as ShapingStatus);
-            showMsg(enabled ? 'Деление канала включено' : 'Деление канала выключено');
+            if (shapingDirty) {
+                const s = await apiFetch('PUT', '/api/shaping', token, {
+                    enabled, auto, downMbit: Number(down) || 0, upMbit: Number(up) || 0,
+                });
+                fill(s as ShapingStatus);
+                done.push(enabled ? 'деление канала включено' : 'деление канала выключено');
+            }
+            if (torrentDirty) {
+                const s = await apiFetch('PUT', '/api/torrent', token, { enabled: tEnabled });
+                fillTorrent(s as TorrentStatus);
+                done.push(tEnabled ? 'торренты блокируются' : 'блокировка торрентов выключена');
+            }
+            if (done.length) showMsg(done.join(', ').replace(/^./, c => c.toUpperCase()));
         } catch (e) { setError(errText(e, 'Не удалось сохранить')); }
         finally { setBusy(false); }
     };
@@ -70,7 +101,8 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
     return (
         <div className="node-scrim" onClick={onClose}>
             <div className="node-modal" role="dialog" aria-modal="true" aria-label="Настройки сервера" onClick={e => e.stopPropagation()}>
-                <h3 className="node-modal-title">Деление канала: {node.name}</h3>
+                <h3 className="node-modal-title">Настройки сервера: {node.name}</h3>
+                <h4 className="ss-section">Деление канала</h4>
 
                 {unsupported ? (
                     <p className="node-modal-hint">
@@ -135,11 +167,65 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                     </>
                 )}
 
+                <hr className="ss-divider" />
+                <h4 className="ss-section">Торренты</h4>
+                {tUnsupported ? (
+                    <p className="node-modal-hint">
+                        Этот сервер не умеет блокировать торренты: обновите его (install.sh → «Обновить»).
+                    </p>
+                ) : (
+                    <>
+                        <label className="ss-setting">
+                            <span className="ss-setting-text">
+                                <span className="ss-setting-name">Блокировать BitTorrent</span>
+                                <span className="node-modal-hint">
+                                    Режет поиск пиров (DHT), трекеры и начало торрент-соединений — как блокировка в 3x-ui.
+                                    Клиент с шифрованием и HTTPS-трекерами может частично её обойти, но без DHT и открытых
+                                    трекеров большинство торрентов не стартуют. Остальной трафик не режется.
+                                </span>
+                                <span className="node-modal-hint">
+                                    {enabled
+                                        ? 'Кто пытается качать, на 10 минут после последней попытки уходит в фоновый приоритет: уступает остальным, когда канал занят.'
+                                        : 'Включите деление канала — тогда кто пытается качать, на 10 минут уйдёт ещё и в фоновый приоритет.'}
+                                </span>
+                            </span>
+                            <input type="checkbox" checked={tEnabled} disabled={!tst || busy} onChange={e => setTEnabled(e.target.checked)} />
+                        </label>
+
+                        {tst?.settings.enabled && (
+                            <div className="ss-status">
+                                <span className={`chip ${tst.active ? 'chip--online' : 'chip--offline'}`}>
+                                    <span className="chip-dot" />{tst.active ? 'работает' : 'не применено'}
+                                </span>
+                                <span className="ss-mono">заблокировано попыток: {tst.hits.toLocaleString('ru-RU')}</span>
+                                {tst.active && !tst.tcp && (
+                                    <span className="node-modal-hint">
+                                        TCP не проверяется: на сервере старый nftables. DHT, трекеры и uTP блокируются.
+                                    </span>
+                                )}
+                                {tst.error && <span className="node-modal-hint">{tst.error}</span>}
+                                {tst.seen.length > 0 && (
+                                    <>
+                                        <span className="node-modal-hint">Пытались качать за последние 10 минут:</span>
+                                        <span className="ss-seen">
+                                            {tst.seen.map(p => (
+                                                <span key={p.ip} className="chip chip--error">
+                                                    <span className="chip-dot" />{p.name ? `${p.name} · ${p.ip}` : p.ip}
+                                                </span>
+                                            ))}
+                                        </span>
+                                    </>
+                                )}
+                            </div>
+                        )}
+                    </>
+                )}
+
                 {error && <p className="login-error">{error}</p>}
 
                 <div className="node-modal-actions">
-                    {!unsupported && (
-                        <button className="btn btn--primary" onClick={save} disabled={!st || busy || !valid}>
+                    {!(unsupported && tUnsupported) && (
+                        <button className="btn btn--primary" onClick={save} disabled={busy || !valid || !(shapingDirty || torrentDirty)}>
                             Сохранить
                         </button>
                     )}

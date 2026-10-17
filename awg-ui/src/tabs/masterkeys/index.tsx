@@ -7,6 +7,7 @@ import { apiFetch, copyText, bytes, timeAgo, type NodeInfo, type PageProps, type
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings } from '../../components/icons';
 import ServerPicker, { serverName } from '../../components/ServerPicker';
 import PriorityChip from '../../components/PriorityChip';
+import TorrentChip from '../../components/TorrentChip';
 import './masterkeys.css';
 
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
@@ -16,7 +17,7 @@ import './masterkeys.css';
 interface MasterKey { id: number; uuid: string; label: string; device_limit: number; devices: number; servers: number[]; created_at: number; deleting?: number[] }
 interface Device {
     id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null;
-    rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number; priority?: Priority;
+    rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number; priority?: Priority; torrent?: boolean;
     servers_total: number; servers_ok: number;   // на скольких серверах ключа уже стоит его текущий ключ
 }
 
@@ -284,7 +285,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
                     <span className="chip-dot" />{d.online ? 'Онлайн' : 'Офлайн'}
                 </span>
-                <PriorityChip priority={d.priority} />
+                <PriorityChip priority={d.priority} torrent={d.torrent} />
+                <TorrentChip torrent={d.torrent} />
                 <div className="mk-device-traffic">
                     <span className="mk-metric"><i className="mk-metric-name" data-sfx=" rx">↓</i><b>{bytes(d.rx)}</b></span>
                     <span className="mk-metric"><i className="mk-metric-name" data-sfx=" tx">↑</i><b>{bytes(d.tx)}</b></span>

@@ -31,6 +31,7 @@ type metricsPeer struct {
 	Rx       float64 `json:"rx"`
 	Tx       float64 `json:"tx"`
 	Priority string  `json:"priority"`
+	Torrent  bool    `json:"torrent"`
 }
 
 type metricsHost struct {
@@ -65,6 +66,7 @@ type metricsBody struct {
 	TxBytes float64       `json:"tx_bytes"`
 	Link    linkStats     `json:"link"`
 	Shaping ShapingStatus `json:"shaping"`
+	Torrent TorrentStatus `json:"torrent"`
 	Host    *metricsHost  `json:"host"`
 	List    []metricsPeer `json:"list"`
 }
@@ -139,7 +141,7 @@ func (s *Server) collectMetrics() (*metricsBody, error) {
 			return nil, err
 		}
 		ps := stats[pub]
-		b.List = append(b.List, metricsPeer{"user", n, ip, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(ip)})
+		b.List = append(b.List, metricsPeer{"user", n, ip, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(ip), s.torrent.Seen(ip)})
 	}
 	rows.Close()
 	devs, err := s.peersAll()
@@ -148,7 +150,7 @@ func (s *Server) collectMetrics() (*metricsBody, error) {
 	}
 	for _, p := range devs {
 		ps := stats[p.PubKey]
-		b.List = append(b.List, metricsPeer{"device", "", p.IP, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(p.IP)})
+		b.List = append(b.List, metricsPeer{"device", "", p.IP, ps.Online, orZero(ps.Rx), orZero(ps.Tx), s.shaping.PriorityOf(p.IP), s.torrent.Seen(p.IP)})
 	}
 	b.Peers.Total = st.Peers
 	for _, ps := range stats {
@@ -163,6 +165,7 @@ func (s *Server) collectMetrics() (*metricsBody, error) {
 		s.linkCounter("rx_dropped"), s.linkCounter("tx_dropped"), s.linkCounter("rx_errors"), s.linkCounter("tx_errors"),
 	}
 	b.Shaping = s.shaping.Status()
+	b.Torrent = s.torrent.Status()
 	b.Host = readHost()
 	return b, nil
 }

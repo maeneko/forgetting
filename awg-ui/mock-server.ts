@@ -57,7 +57,10 @@ const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семь
 const signPub = crypto.randomBytes(32);
 const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
 // Мок: устройство «догнано» на всех серверах ключа, кроме Tokyo (id 2 — ещё не подключалась).
-const devOut = (m: MK, d: Dev) => ({ ...d, priority: shapingOf[0]?.enabled && d.id === masters[0]?.devs[0]?.id ? "background" : "normal", servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
+const devTorrent = (d: Dev) => !!torrentOf[0]?.enabled && d.id === masters[0]?.devs[1]?.id;
+const devOut = (m: MK, d: Dev) => ({ ...d,
+    priority: shapingOf[0]?.enabled && (d.id === masters[0]?.devs[0]?.id || devTorrent(d)) ? "background" : "normal",
+    torrent: devTorrent(d), servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
 const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
 
 app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: MOCK_VERSION }));
@@ -165,7 +168,8 @@ const shapingView = (id: number) => {
     const settings = shapingOf[id] ?? { enabled: false, downMbit: 0, upMbit: 0, auto: true };
     const on = settings.enabled;
     return {
-        settings, active: on, congested: on && id === 0, heavy: on && id === 0 ? ["10.9.0.2"] : [],
+        settings, active: on, congested: on && id === 0,
+        heavy: on && id === 0 ? ["10.9.0.2", ...(torrentOf[0]?.enabled ? [TORRENT_IP, "10.9.0.12"] : [])] : [],
         devices: on ? 7 : 0, rateDown: on ? Math.round(settings.downMbit * 0.9 * 10) / 10 : 0, rateUp: on ? 12.4 : 0,
     };
 };
@@ -178,10 +182,36 @@ app.put("/api/shaping", (q, r) => {
     r.json(shapingView(id));
 });
 
+// Блокировка торрентов: на сервере 0 качает пользователь 10.9.0.3 и второе устройство первого мастер-ключа;
+// Amsterdam (3) изображает старый nftables без TCP-проверки; Frankfurt (1) — старая нода без маршрута (404).
+// Сервер берём прямо из X-Server-Id: srv() подменяет сервер без своих пользователей на 0.
+const torrentOf: Record<number, { enabled: boolean; since: number }> = {};
+const tsid = (q: express.Request) => Number(q.headers["x-server-id"] ?? 0) || 0;
+const TORRENT_IP = "10.9.0.3";
+const torrentSeenIp = (id: number, ip: string) => id === 0 && !!torrentOf[0]?.enabled && ip === TORRENT_IP;
+const torrentView = (id: number) => {
+    const t = torrentOf[id] ?? { enabled: false, since: 0 };
+    const seen = id === 0 && t.enabled
+        ? [{ ip: TORRENT_IP, name: users.find(u => u.ip === TORRENT_IP)?.name ?? "" }, { ip: "10.9.0.12", name: "" }]
+        : [];
+    return { settings: { enabled: t.enabled }, active: t.enabled, tcp: t.enabled && id !== 3,
+        hits: t.enabled && id === 0 ? 1840 + Math.floor((now() - t.since) * 3.7) : 0, seen };
+};
+app.get("/api/torrent", (q, r) => tsid(q) === 1 ? r.status(404).json({ error: "Not found" }) : r.json(torrentView(tsid(q))));
+app.put("/api/torrent", (q, r) => {
+    const id = tsid(q), b = q.body ?? {};
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    if (typeof b.enabled !== "boolean") return r.status(400).json({ error: "enabled должен быть true/false" });
+    torrentOf[id] = { enabled: b.enabled, since: b.enabled && !torrentOf[id]?.enabled ? now() : (torrentOf[id]?.since ?? now()) };
+    r.json(torrentView(id));
+});
+
 app.get("/api/users", (q, r) => r.json({ users: U_(q) }));
 // Приоритет в моке: пока на сервере 0 включено деление канала, первый пользователь «фоновый».
-const prioOf = (q: express.Request, ip: string) => (srv(q) === 0 && shapingOf[0]?.enabled && ip === "10.9.0.2" ? "background" : "normal");
-app.get("/api/users/stats", (q, r) => r.json({ users: U_(q).map(({ vpn_key, pub_key, ...u }) => ({ ...u, priority: prioOf(q, u.ip) })) }));
+// С меткой «торренты» — тоже фоновый (пока включено деление канала).
+const prioOf = (q: express.Request, ip: string) =>
+    (srv(q) === 0 && shapingOf[0]?.enabled && (ip === "10.9.0.2" || torrentSeenIp(tsid(q), ip)) ? "background" : "normal");
+app.get("/api/users/stats", (q, r) => r.json({ users: U_(q).map(({ vpn_key, pub_key, ...u }) => ({ ...u, priority: prioOf(q, u.ip), torrent: torrentSeenIp(tsid(q), u.ip) })) }));
 app.post("/api/users/reissue", (q, r) => r.json({ total: U_(q).length, reissued: U_(q).length, regenerated: [], backup: "" }));
 app.post("/api/users", (q, r) => {
     const users = U_(q);

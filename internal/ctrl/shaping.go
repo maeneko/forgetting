@@ -20,6 +20,7 @@ import (
 //   загрузка (к клиенту)   — CAKE root на awg1, dual-dsthost, diffserv3
 //   отдача (от клиента)    — ingress awg1 → ifb-awg, CAKE dual-srchost, besteffort
 //   тяжёлые при перегрузке — DSCP CS1 (bulk-tin CAKE) через отдельную nft-таблицу
+//   с меткой «торренты»   — туда же, пока метка висит (см. torrent.go), независимо от перегрузки
 //
 // Ничего не пишет в awg1.conf (PostUp не трогаем): всё применяется из процесса и
 // идемпотентно. Правила tc пропадают вместе с интерфейсом, поэтому Apply зовётся на
@@ -123,6 +124,7 @@ type Shaping struct {
 	histOrder   []string
 	totals      []tick
 	heavy       *orderedSet
+	applied     *orderedSet // что сейчас стоит в nft-наборе: тяжёлые ∪ с меткой торрента
 	congested   bool
 	lastRateDn  float64
 	lastRateUp  float64
@@ -138,7 +140,7 @@ func newShaping(s *Server) *Shaping {
 	sampleS := envNum("SHAPE_SAMPLE_S", 10)
 	windowS := envNum("SHAPE_WINDOW_S", 600)
 	return &Shaping{
-		s: s, prev: map[string][2]float64{}, history: map[string][]tick{}, heavy: newOrderedSet(),
+		s: s, prev: map[string][2]float64{}, history: map[string][]tick{}, heavy: newOrderedSet(), applied: newOrderedSet(),
 		sampleS: sampleS, windowTicks: int(math.Max(3, math.Round(windowS/sampleS))),
 	}
 }
@@ -266,13 +268,12 @@ func (h *Shaping) applyNow() error {
 			return err
 		}
 	}
-	h.mu.Lock()
-	heavy := h.heavy.list()
-	h.mu.Unlock()
+	heavy := h.desired()
 	if err := h.nftApply(heavy); err != nil {
 		return err
 	}
 	h.mu.Lock()
+	h.applied = setOf(heavy)
 	h.lastError = ""
 	h.mu.Unlock()
 	h.s.log.Info("shaping applied", "down", st.DownMbit, "up", st.UpMbit, "overhead", oh, "heavy", len(heavy))
@@ -287,6 +288,7 @@ func (h *Shaping) removeNow() {
 	shExec("nft", "delete", "table", "inet", nftTable)
 	h.mu.Lock()
 	h.heavy.clear()
+	h.applied.clear()
 	h.history, h.histOrder, h.prev = map[string][]tick{}, nil, map[string][2]float64{}
 	h.totals = nil
 	h.congested = false
@@ -317,6 +319,50 @@ func (h *Shaping) Update(st ShapingSettings) error {
 		h.mu.Unlock()
 	}
 	return err
+}
+
+// desired — кого держать в фоновом классе: тяжёлые (порядок сэмплера) и, следом, устройства с
+// меткой «торренты». Метку ставит и снимает nft (таймаут), поэтому сверяемся каждый тик.
+func (h *Shaping) desired() []string {
+	h.mu.Lock()
+	out := setOf(h.heavy.list())
+	h.mu.Unlock()
+	for _, ip := range h.s.torrent.SeenList() {
+		out.add(ip)
+	}
+	return out.list()
+}
+
+func setOf(list []string) *orderedSet {
+	o := newOrderedSet()
+	for _, k := range list {
+		o.add(k)
+	}
+	return o
+}
+
+// syncNft — привести nft-набор к desired(); без изменений nft не трогаем.
+func (h *Shaping) syncNft() {
+	want := h.desired()
+	h.mu.Lock()
+	same := len(want) == h.applied.size()
+	for _, ip := range want {
+		same = same && h.applied.has(ip)
+	}
+	h.mu.Unlock()
+	if same {
+		return
+	}
+	h.opMu.Lock()
+	err := h.nftApply(want)
+	h.opMu.Unlock()
+	if err != nil {
+		h.noteError(err)
+		return
+	}
+	h.mu.Lock()
+	h.applied = setOf(want)
+	h.mu.Unlock()
 }
 
 // ───────── сэмплер (RFC 6057) ─────────
@@ -391,6 +437,8 @@ func (h *Shaping) tick() {
 	h.tickNo++
 	tickNo := h.tickNo
 	h.mu.Unlock()
+	// В конце любого тика, в том числе пока окно не набралось: метка торрента не ждёт 10 минут.
+	defer h.syncNft()
 
 	// Страховка: интерфейс могли поднять руками (awg-quick down/up) — qdisc тогда исчез.
 	if tickNo%checkEvery == 0 && !h.hasCake(h.s.iface) {
@@ -443,18 +491,9 @@ func (h *Shaping) tick() {
 	h.lastRateUp = totalUp * 8 / dt / 1e6
 
 	if !st.Auto {
-		changed := h.heavy.size() > 0 || h.congested
 		h.heavy.clear()
 		h.congested = false
 		h.mu.Unlock()
-		if changed {
-			h.opMu.Lock()
-			err := h.nftApply(nil)
-			h.opMu.Unlock()
-			if err != nil {
-				h.noteError(err)
-			}
-		}
 		return
 	}
 	if len(h.totals) < h.windowTicks { // пока окно не набралось, решений не принимаем
@@ -507,21 +546,11 @@ func (h *Shaping) tick() {
 			}
 		}
 	}
-	var apply []string
 	if changed || wasCongested != h.congested {
 		h.heavy = next
-		apply = next.list()
-		h.s.log.Info("shaping: класс тяжёлых обновлён", "congested", h.congested, "avgMbit", math.Round(avg), "heavy", apply)
+		h.s.log.Info("shaping: класс тяжёлых обновлён", "congested", h.congested, "avgMbit", math.Round(avg), "heavy", next.list())
 	}
 	h.mu.Unlock()
-	if changed || wasCongested != h.congested {
-		h.opMu.Lock()
-		err := h.nftApply(apply)
-		h.opMu.Unlock()
-		if err != nil {
-			h.noteError(err)
-		}
-	}
 }
 
 func (h *Shaping) Start() {
@@ -571,7 +600,7 @@ func (h *Shaping) qdiscStats(dev string) *QdiscStats {
 func (h *Shaping) PriorityOf(ip string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.heavy.has(ip) {
+	if h.applied.has(ip) { // то, что реально стоит в nft: тяжёлые и с меткой торрента
 		return "background"
 	}
 	return "normal"
@@ -593,7 +622,7 @@ func (h *Shaping) Status() ShapingStatus {
 			devices++
 		}
 	}
-	heavy := h.heavy.list()
+	heavy := h.applied.list()
 	if heavy == nil {
 		heavy = []string{}
 	}

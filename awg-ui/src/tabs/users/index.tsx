@@ -9,6 +9,7 @@ import {
 } from '../../lib/shared';
 import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe } from '../../components/icons';
 import PriorityChip from '../../components/PriorityChip';
+import TorrentChip from '../../components/TorrentChip';
 import './users.css';
 
 // Вкладка «Пользователи»: форма создания + таблица (десктоп) / карточки (мобильный)
@@ -29,7 +30,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
             const data = await apiFetch('GET', '/api/users/stats', tok);
             setUsers(prev => prev.map(u => {
                 const s = (data.users as User[] ?? []).find(x => x.name === u.name);
-                return s ? { ...u, online: s.online, lastHandshake: s.lastHandshake, rx: s.rx, tx: s.tx, priority: s.priority } : u;
+                return s ? { ...u, online: s.online, lastHandshake: s.lastHandshake, rx: s.rx, tx: s.tx, priority: s.priority, torrent: s.torrent } : u;
             }));
         } catch { /* silent */ }
     }, []);
@@ -187,7 +188,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                                 : 'никогда'}
                                     </span>
                                 </td>
-                                <td><PriorityChip priority={u.priority} /></td>
+                                <td><span className="user-chips"><PriorityChip priority={u.priority} torrent={u.torrent} /><TorrentChip torrent={u.torrent} /></span></td>
                                 <td>
                                     {u.name}
                                     {u.key_gen !== serverGen && (
@@ -254,7 +255,8 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                         <div className="user-card-ip">
                             <IcoGlobe />
                             <span className="user-card-ip-text">{u.ip}</span>
-                            <PriorityChip priority={u.priority} />
+                            <PriorityChip priority={u.priority} torrent={u.torrent} />
+                            <TorrentChip torrent={u.torrent} />
                         </div>
                         <div className="user-card-metrics">
                             <div className="metric-block">

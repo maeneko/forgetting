@@ -377,6 +377,7 @@ type devStat struct {
 	lastHS     float64
 	rx, tx     float64
 	background bool
+	torrent    bool
 }
 
 // masterDevices — статистика устройства по всем серверам ключа: онлайн, если есть свежий
@@ -420,6 +421,7 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 				st.tx += numOr(field(p, "tx"), 0)
 				// Устройство стоит на каждом сервере со своим IP; фоновым его делает любой из них.
 				st.background = st.background || field(p, "priority") == "background"
+				st.torrent = st.torrent || truthy(field(p, "torrent"))
 			}
 		}()
 	}
@@ -449,6 +451,7 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 			{Key: "version", Val: d.Version}, {Key: "created_at", Val: d.CreatedAt}, {Key: "last_seen", Val: nullInt(d.LastSeen)},
 			{Key: "rekey_requested", Val: d.RekeyRequested == 1}, {Key: "online", Val: st.online}, {Key: "lastHandshake", Val: st.lastHS},
 			{Key: "rx", Val: st.rx}, {Key: "tx", Val: st.tx}, {Key: "priority", Val: prio},
+			{Key: "torrent", Val: st.torrent},
 			{Key: "servers_total", Val: len(links)}, {Key: "servers_ok", Val: okN},
 		})
 	}

@@ -87,7 +87,8 @@ func (s *Server) routes() []route {
 				}
 				ps := stats[pub]
 				list = append(list, ob{{"name", n}, {"ip", ip}, {"key_gen", kg}, {"online", ps.Online},
-					{"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx}, {"priority", s.shaping.PriorityOf(ip)}})
+					{"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx}, {"priority", s.shaping.PriorityOf(ip)},
+					{"torrent", s.torrent.Seen(ip)}})
 			}
 			rows.Close()
 			return ok(ob{{"users", list}})
@@ -147,7 +148,7 @@ func (s *Server) routes() []route {
 				ps := stats[p.PubKey]
 				list = append(list, ob{{"pub_key", p.PubKey}, {"ip", p.IP}, {"psk_key", p.PskKey}, {"owner", p.Owner},
 					{"online", ps.Online}, {"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx},
-					{"priority", s.shaping.PriorityOf(p.IP)}})
+					{"priority", s.shaping.PriorityOf(p.IP)}, {"torrent", s.torrent.Seen(p.IP)}})
 			}
 			return ok(ob{{"peers", list}})
 		}),
@@ -355,6 +356,21 @@ func (s *Server) routes() []route {
 				return result{}, httpErr(500, err.Error())
 			}
 			return ok(s.shaping.Status())
+		}),
+
+		// Блокировка BitTorrent. Тоже под /api/ и через PUT — чтобы проходила через awg-agent на ноде.
+		R("GET", "/api/torrent", false, a, func(c *rctx) (result, error) { return ok(s.torrent.Status()) }),
+
+		R("PUT", "/api/torrent", false, a, func(c *rctx) (result, error) {
+			enabled, isBool := c.obj().Get2("enabled").(bool)
+			if !isBool {
+				return result{}, httpErr(400, "enabled должен быть true/false")
+			}
+			// nft не нашёлся или ядро отказало: оператору нужна причина, а не 500.
+			if err := s.torrent.Update(TorrentSettings{Enabled: enabled}); err != nil {
+				return result{}, httpErr(500, err.Error())
+			}
+			return ok(s.torrent.Status())
 		}),
 
 		R("GET", "/api/metrics", false, a, func(c *rctx) (result, error) {

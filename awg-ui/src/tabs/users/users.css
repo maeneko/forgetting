@@ -47,6 +47,7 @@ LICENSE file in the root directory of this source tree.
 }
 .user-card-ip {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     color: var(--neutral-text);
@@ -78,3 +79,6 @@ LICENSE file in the root directory of this source tree.
     /* .tip-wrap на мобильной растягивается на всю ширину — метке это не нужно. */
     .user-gen { width: auto; }
 }
+
+/* Чипы приоритета и торрентов в одной ячейке */
+.user-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }

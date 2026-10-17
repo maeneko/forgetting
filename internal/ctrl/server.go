@@ -55,6 +55,7 @@ type Server struct {
 	c     Config
 
 	shaping *Shaping
+	torrent *Torrent
 	metrics metricsCache
 	monitor monitorJob
 	cliPath string
@@ -155,6 +156,7 @@ func New() (*Server, error) {
 	}
 	s.log.Info("awg params loaded from conf", "Jc", params.Jc, "H1", params.H1, "gen", gen)
 	s.shaping = newShaping(s)
+	s.torrent = newTorrent(s)
 	return s, nil
 }
 
@@ -182,5 +184,6 @@ func (s *Server) Run() error {
 	// ни один из путей awg-quick up внутри awg-ctrl тогда не срабатывает.
 	go s.shaping.Apply()
 	s.shaping.Start()
+	go s.torrent.Apply() // nft-таблицы после перезагрузки нет — ставим заново
 	return <-errc
 }

@@ -434,6 +434,21 @@ func (m *Metrics) render() string {
 	out.add("awg_shaping_qdisc_drops_total", "counter", "Пакетов, отброшенных CAKE.", dirs(func(x any, dir string) any { return field(x, dir, "drops") }))
 	out.add("awg_shaping_qdisc_backlog_bytes", "gauge", "Байт в очереди CAKE.", dirs(func(x any, dir string) any { return field(x, dir, "backlog") }))
 
+	// Блокировка BitTorrent
+	tb := func(fn func(x any) any) []sample {
+		return per(func(s serverInfo, d any) []sample {
+			x := field(d, "torrent")
+			if !truthy(x) {
+				return nil
+			}
+			return []sample{{L(s), fn(x)}}
+		})
+	}
+	out.add("awg_torrent_block_enabled", "gauge", "Блокировка BitTorrent включена в настройках (1/0).", tb(func(x any) any { return b2f(truthy(field(x, "settings", "enabled"))) }))
+	out.add("awg_torrent_block_active", "gauge", "nft-таблица блокировки реально стоит (1/0).", tb(func(x any) any { return b2f(truthy(field(x, "active"))) }))
+	out.add("awg_torrent_blocked_total", "counter", "Заблокированных попыток торрент-соединений с последнего применения правил.", tb(func(x any) any { return or0(field(x, "hits")) }))
+	out.add("awg_torrent_devices", "gauge", "Устройств, пытавшихся качать торренты за последние 10 минут.", tb(func(x any) any { return float64(len(arr(field(x, "seen")))) }))
+
 	if m.perPeer {
 		peers := func(fn func(p any) any) []sample {
 			return per(func(s serverInfo, d any) []sample {
@@ -450,6 +465,7 @@ func (m *Metrics) render() string {
 		}
 		out.add("awg_peer_online", "gauge", "Пир на связи (1/0).", peers(func(p any) any { return b2f(truthy(field(p, "online"))) }))
 		out.add("awg_peer_background", "gauge", "Пир в фоновом классе: канал занят, а он давно качает больше своей доли (1/0).", peers(func(p any) any { return b2f(field(p, "priority") == "background") }))
+		out.add("awg_peer_torrent", "gauge", "Пир пытался открыть торрент-соединение за последние 10 минут (1/0).", peers(func(p any) any { return b2f(truthy(field(p, "torrent"))) }))
 		out.add("awg_peer_received_bytes_total", "counter", "Принято от пира, байт.", peers(func(p any) any { return field(p, "rx") }))
 		out.add("awg_peer_sent_bytes_total", "counter", "Отправлено пиру, байт.", peers(func(p any) any { return field(p, "tx") }))
 	}
