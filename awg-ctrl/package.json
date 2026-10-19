@@ -1,6 +1,6 @@
 {
   "name": "awg-control",
-  "version": "0.4.2.1",
+  "version": "0.4.3",
   "description": "",
   "main": "dist/index.js",
   "scripts": {
