@@ -26,13 +26,6 @@ LICENSE file in the root directory of this source tree.
 .mk-tr-master td { background: var(--surface-container); font-weight: 500; padding-top: 6px; padding-bottom: 6px; }
 .mk-tr-master:hover td { background: var(--surface-container); }
 .mk-name { display: inline-flex; align-items: center; gap: 8px; color: var(--primary); }
-/* UUID ключа в строке: выглядит как ID устройства, по клику копирует */
-.mk-uuid-btn {
-    background: none; border: 0; padding: 0; margin: 0;
-    cursor: pointer; font: inherit; font-weight: 400; color: inherit; line-height: inherit;
-}
-.mk-uuid-btn:hover .mk-device-id { color: var(--primary); }
-.mk-uuid-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
 .mk-master-uuid {
     display: block;
     font-family: var(--mono); font-size: 12px; font-weight: 400;
@@ -46,6 +39,9 @@ LICENSE file in the root directory of this source tree.
 .mk-tr-tools:hover { background: transparent; }
 .mk-tr-device td, .mk-tr-free td { padding-top: 10px; padding-bottom: 10px; }
 .mk-flag { color: var(--neutral-text); font-size: 12px; }
+/* чипы приоритета и торрентов в одной ячейке — как во вкладке «Пользователи» */
+.mk-table .user-chips { display: inline-flex; flex-wrap: nowrap; gap: 6px; }
+.mk-ip { font-family: var(--mono); }
 /* иерархия: линия слева от имени и «ножка» к каждой строке; у последней линия обрывается */
 .mk-tr-device td:first-child, .mk-tr-free td:first-child {
     background: linear-gradient(var(--outline), var(--outline)) 30px 0 / 2px 100% no-repeat;
@@ -210,6 +206,13 @@ LICENSE file in the root directory of this source tree.
 }
 .mk-device-name { font-size: 14px; font-weight: 500; color: var(--on-surface); }
 .mk-device-sub  { font-size: 12px; color: var(--neutral-text); }
+.mk-device-ip {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    width: 100%;
+    color: var(--neutral-text);
+}
+.mk-device-ip .mk-ip { font-size: 13px; }
+.mk-device-ip .tip-wrap { width: auto; }
 .mk-device-traffic { display: flex; gap: 12px; font-family: var(--mono); font-size: 12px; color: var(--neutral-text); }
 .mk-metric { display: inline-flex; gap: 4px; }
 .mk-metric i, .mk-metric b { font-style: normal; font-weight: 400; }

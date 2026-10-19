@@ -785,3 +785,14 @@ tbody td:last-child  { padding-right: 20px; }
 .server-pick-name { font-weight: 500; }
 .server-pick-ip, .server-pick-gen { font-size: 12px; color: var(--neutral-text); }
 .server-pick-ip { font-family: var(--mono); margin-left: auto; }
+
+/* Короткий идентификатор под именем (UUID мастер-ключа, ID устройства):
+   первые символы моноширинным, полностью — в подсказке, по клику копируется. */
+.name-stack { display: inline-flex; flex-direction: column; line-height: 1.25; vertical-align: middle; }
+.copy-id {
+    align-self: flex-start;
+    background: none; border: 0; padding: 0; margin: 0; cursor: pointer;
+    font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--neutral-text);
+}
+.copy-id:hover { color: var(--primary); }
+.copy-id:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }

@@ -3,8 +3,8 @@
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback } from 'react';
 import QRCode from 'qrcode';
-import { apiFetch, copyText, bytes, timeAgo, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
-import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings } from '../../components/icons';
+import { apiFetch, copyText, bytes, timeAgo, getServerId, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
+import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings, IcoGlobe } from '../../components/icons';
 import ServerPicker, { serverName } from '../../components/ServerPicker';
 import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
@@ -19,6 +19,7 @@ interface Device {
     id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null;
     rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number; priority?: Priority; torrent?: boolean;
     servers_total: number; servers_ok: number;   // на скольких серверах ключа уже стоит его текущий ключ
+    ips?: { server_id: number; ip: string }[];   // IP на каждом сервере ключа (старая панель не отдаёт)
 }
 
 // Устройство ещё не на всех серверах ключа (нода не в сети при регистрации или смене ключа) —
@@ -31,6 +32,18 @@ const platformLabel = (d: Device): string =>
     d.platform ? (d.version ? `${d.platform}-${d.version}` : d.platform) : '—';
 
 const errText = (e: any): string => e?.response?.data?.error ?? 'Ошибка запроса';
+
+// Статус — как у пользователей: «онлайн», иначе сколько прошло с последнего handshake.
+const statusChip = (d: Device) => (
+    <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
+        <span className="chip-dot" />
+        {d.online ? 'онлайн' : d.lastHandshake ? timeAgo(d.lastHandshake) + ' назад' : 'никогда'}
+    </span>
+);
+
+// IP устройства на выбранном сервере (на каждом сервере ключа он свой), иначе — на первом.
+const ipOf = (d: Device): string =>
+    (d.ips?.find(x => x.server_id === getServerId()) ?? d.ips?.[0])?.ip ?? '—';
 
 export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const [keys, setKeys]       = useState<MasterKey[]>([]);
@@ -254,16 +267,50 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         </div>
     );
 
-    // UUID ключа в строке списка — как ID устройств под ним (та же ширина и обрезка),
-    // полностью — в подсказке, по клику копируется.
-    const uuidCell = (k: MasterKey) => (
-        <span className="tip-wrap mk-uuid-wrap" data-tip={`UUID ${k.uuid} · нажми, чтобы скопировать`}>
-            <button className="mk-uuid-btn" aria-label={`Скопировать UUID ${k.uuid}`}
-                onClick={() => copyText(k.uuid).then(() => showMsg('UUID скопирован'), () => showMsg('Не удалось скопировать'))}>
-                <code className="mk-device-id">{k.uuid}</code>
-            </button>
+    // Метка ключа и под ней UUID — коротко, чтобы не раздувать колонку «Имя». Полностью — в подсказке,
+    // по клику копируется.
+    const nameCell = (k: MasterKey) => (
+        <span className="name-stack">
+            {k.label}
+            <span className="tip-wrap" data-tip={`UUID ${k.uuid} · нажми, чтобы скопировать`}>
+                <button className="copy-id" aria-label={`Скопировать UUID ${k.uuid}`}
+                    onClick={() => copyText(k.uuid).then(() => showMsg('UUID скопирован'), () => showMsg('Не удалось скопировать'))}>
+                    {k.uuid.slice(0, 8)}…
+                </button>
+            </span>
         </span>
     );
+
+    // Сводка по устройствам ключа в его строке — видна и у свёрнутого ключа.
+    const summary = (list: Device[]) => {
+        if (!list.length) return <><td></td><td></td><td colSpan={2}></td><td></td><td></td></>;
+        const on = list.filter(d => d.online).length;
+        const last = Math.max(...list.map(d => d.lastHandshake || 0));
+        const torrent = list.some(d => d.torrent);
+        const prio = list.some(d => d.priority === 'background') ? 'background' : list.find(d => d.priority)?.priority;
+        return (
+            <>
+                <td>
+                    <span className={`chip chip--${on ? 'online' : 'offline'}`}>
+                        <span className="chip-dot" />
+                        {on ? `онлайн: ${on} из ${list.length}` : last ? timeAgo(last) + ' назад' : 'никогда'}
+                    </span>
+                </td>
+                <td><span className="user-chips"><PriorityChip priority={prio} torrent={torrent} /><TorrentChip torrent={torrent} /></span></td>
+                <td colSpan={2}></td>
+                <td>{bytes(list.reduce((a, d) => a + d.rx, 0))}</td>
+                <td>{bytes(list.reduce((a, d) => a + d.tx, 0))}</td>
+            </>
+        );
+    };
+
+    const ipCell = (d: Device) => {
+        const all = d.ips ?? [];
+        const ip = <code className="mk-ip">{ipOf(d)}</code>;
+        return all.length > 1
+            ? <span className="tip-wrap" data-tip={all.map(x => `${serverName(nodes, x.server_id)}: ${x.ip}`).join(' · ')}>{ip}</span>
+            : ip;
+    };
 
     const caret = (k: MasterKey) => (
         <button className={`mk-caret${folded.has(k.id) ? ' mk-caret--folded' : ''}`}
@@ -279,14 +326,17 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                         <span className="mk-device-name">{d.device_name || 'Устройство'}</span>
                         <code className="mk-device-id" title={`ID устройства: ${d.device_id}`}>{d.device_id}</code>
                     </span>
-                    <span className="mk-device-sub">{platformLabel(d)} · был {d.last_seen ? timeAgo(d.last_seen) + ' назад' : 'никогда'}
+                    <span className="mk-device-sub">{platformLabel(d)}
                         {d.rekey_requested ? ' · ждёт смены ключа' : ''}{syncLabel(d)}</span>
                 </div>
-                <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
-                    <span className="chip-dot" />{d.online ? 'Онлайн' : 'Офлайн'}
-                </span>
-                <PriorityChip priority={d.priority} torrent={d.torrent} />
-                <TorrentChip torrent={d.torrent} />
+                {statusChip(d)}
+                {/* как строка IP в карточке пользователя: адрес и чипы приоритета/торрентов */}
+                <div className="mk-device-ip">
+                    <IcoGlobe />
+                    <span className="mk-ip">{ipOf(d)}</span>
+                    <PriorityChip priority={d.priority} torrent={d.torrent} />
+                    <TorrentChip torrent={d.torrent} />
+                </div>
                 <div className="mk-device-traffic">
                     <span className="mk-metric"><i className="mk-metric-name" data-sfx=" rx">↓</i><b>{bytes(d.rx)}</b></span>
                     <span className="mk-metric"><i className="mk-metric-name" data-sfx=" tx">↑</i><b>{bytes(d.tx)}</b></span>
@@ -320,8 +370,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <table className="mk-table">
                     <thead>
                         <tr>
-                            <th>Имя</th><th>ID устройства</th><th>Платформа</th><th>Статус</th>
-                            <th>↓ rx</th><th>↑ tx</th><th>Был</th><th>Устройства</th><th></th>
+                            <th>Имя</th><th>Статус</th><th>Приоритет</th><th>IP</th><th>Платформа</th>
+                            <th>↓ rx</th><th>↑ tx</th><th>Устройства</th><th></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -330,9 +380,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                         ) : keys.map(k => {
                             if (k.deleting) return (
                                 <tr key={k.id} className="mk-tr-master mk-last">
-                                    <td><span className="mk-name"><IcoKey />{k.label}</span></td>
-                                    <td className="td-mono">{uuidCell(k)}</td>
-                                    <td colSpan={7}>{deletingChip(k)}</td>
+                                    <td><span className="mk-name"><IcoKey />{nameCell(k)}</span></td>
+                                    <td colSpan={8}>{deletingChip(k)}</td>
                                 </tr>
                             );
                             const list = devs[k.id] ?? [];
@@ -341,28 +390,35 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                             return (
                                 <Fragment key={k.id}>
                                     <tr className="mk-tr-master">
-                                        <td><span className="mk-name">{caret(k)}<IcoKey />{k.label}</span></td>
-                                        <td className="td-mono">{uuidCell(k)}</td>
-                                        <td colSpan={5}></td>
+                                        <td><span className="mk-name">{caret(k)}<IcoKey />{nameCell(k)}</span></td>
+                                        {summary(list)}
                                         <td>{meter(k, list.length)}</td>
                                         <td className="td-actions mk-td-actions">{actions(k)}</td>
                                     </tr>
                                     {tools === k.id && <tr className="mk-tr-tools"><td colSpan={9}>{toolbox(k)}</td></tr>}
                                     {open && list.map((d, i) => (
                                         <tr key={d.id} className={`mk-tr-device${i === list.length - 1 && free === 0 ? ' mk-last' : ''}`}>
-                                            <td><span className="mk-indent">{d.device_name || 'Устройство'}</span></td>
-                                            <td className="td-mono"><code className="mk-device-id" title={d.device_id}>{d.device_id}</code></td>
-                                            <td>{platformLabel(d)}</td>
                                             <td>
-                                                <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
-                                                    <span className="chip-dot" />{d.online ? 'Онлайн' : 'Офлайн'}
+                                                <span className="mk-indent">
+                                                    <span className="name-stack">
+                                                        {d.device_name || 'Устройство'}
+                                                        <span className="tip-wrap" data-tip={`ID устройства ${d.device_id} · нажми, чтобы скопировать`}>
+                                                            <button className="copy-id" aria-label={`Скопировать ID устройства ${d.device_id}`}
+                                                                onClick={() => copyText(d.device_id).then(() => showMsg('ID устройства скопирован'), () => showMsg('Не удалось скопировать'))}>
+                                                                {d.device_id.slice(0, 8)}…
+                                                            </button>
+                                                        </span>
+                                                    </span>
                                                 </span>
-                                            </td>
-                                            <td className="td-mono">{bytes(d.rx)}</td>
-                                            <td className="td-mono">{bytes(d.tx)}</td>
-                                            <td>{d.last_seen ? timeAgo(d.last_seen) + ' назад' : 'никогда'}
                                                 {d.rekey_requested && <span className="mk-flag"> · ждёт смены ключа</span>}
-                                                {syncLabel(d) && <span className="mk-flag">{syncLabel(d)}</span>}</td>
+                                                {syncLabel(d) && <span className="mk-flag">{syncLabel(d)}</span>}
+                                            </td>
+                                            <td>{statusChip(d)}</td>
+                                            <td><span className="user-chips"><PriorityChip priority={d.priority} torrent={d.torrent} /><TorrentChip torrent={d.torrent} /></span></td>
+                                            <td className="td-mono">{ipCell(d)}</td>
+                                            <td>{platformLabel(d)}</td>
+                                            <td>{bytes(d.rx)}</td>
+                                            <td>{bytes(d.tx)}</td>
                                             <td></td>
                                             <td className="td-actions mk-td-actions">{deviceActions(d)}</td>
                                         </tr>

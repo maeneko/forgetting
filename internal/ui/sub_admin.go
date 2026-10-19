@@ -437,9 +437,13 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 			st = &devStat{}
 		}
 		okN := 0
+		ips := []any{} // IP устройства на каждом сервере ключа, где он уже выдан
 		for _, l := range links {
 			if l.PeerPub.Valid && l.PeerPub.String == d.PubKey && l.IP.Valid && l.IP.String != "" {
 				okN++
+			}
+			if l.IP.Valid && l.IP.String != "" {
+				ips = append(ips, jsjson.Object{{Key: "server_id", Val: l.ServerID}, {Key: "ip", Val: l.IP.String}})
 			}
 		}
 		prio := "normal"
@@ -452,7 +456,7 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 			{Key: "rekey_requested", Val: d.RekeyRequested == 1}, {Key: "online", Val: st.online}, {Key: "lastHandshake", Val: st.lastHS},
 			{Key: "rx", Val: st.rx}, {Key: "tx", Val: st.tx}, {Key: "priority", Val: prio},
 			{Key: "torrent", Val: st.torrent},
-			{Key: "servers_total", Val: len(links)}, {Key: "servers_ok", Val: okN},
+			{Key: "servers_total", Val: len(links)}, {Key: "servers_ok", Val: okN}, {Key: "ips", Val: ips},
 		})
 	}
 	return out, nil

@@ -60,7 +60,8 @@ const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit
 const devTorrent = (d: Dev) => !!torrentOf[0]?.enabled && d.id === masters[0]?.devs[1]?.id;
 const devOut = (m: MK, d: Dev) => ({ ...d,
     priority: shapingOf[0]?.enabled && (d.id === masters[0]?.devs[0]?.id || devTorrent(d)) ? "background" : "normal",
-    torrent: devTorrent(d), servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length });
+    torrent: devTorrent(d), servers_total: m.servers.length, servers_ok: m.servers.filter(s => s !== 2).length,
+    ips: m.servers.filter(s => s !== 2).map(s => ({ server_id: s, ip: `10.9.0.${50 + d.id + s * 10}` })) });
 const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
 
 app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: MOCK_VERSION }));
