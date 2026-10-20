@@ -186,6 +186,9 @@ type Sub struct {
 	locksMu sync.Mutex
 	locks   map[int]*sync.Mutex // один проход на сервер за раз
 
+	peersMu   sync.Mutex
+	peerCalls map[int]*peersCall // последний GET /api/peers по серверу, см. peersOf
+
 	sigMu    sync.Mutex
 	seenSigs map[string]time.Time // подпись → когда забыть
 
@@ -201,11 +204,12 @@ type Sub struct {
 func newSub(a *App) (*Sub, error) {
 	s := &Sub{
 		a: a, port: envNum("SUB_PORT"),
-		useTLS:   strings.ToLower(envOr("SUB_TLS", "off")) == "on",
-		host:     strings.TrimSpace(os.Getenv("SUB_HOST")),
-		auditOn:  strings.ToLower(envOr("AUDIT", "on")) != "off",
-		locks:    map[int]*sync.Mutex{},
-		seenSigs: map[string]time.Time{},
+		useTLS:    strings.ToLower(envOr("SUB_TLS", "off")) == "on",
+		host:      strings.TrimSpace(os.Getenv("SUB_HOST")),
+		auditOn:   strings.ToLower(envOr("AUDIT", "on")) != "off",
+		locks:     map[int]*sync.Mutex{},
+		peerCalls: map[int]*peersCall{},
+		seenSigs:  map[string]time.Time{},
 	}
 	limited := func(what string) func(string) {
 		return func(ip string) {

@@ -276,7 +276,14 @@ app.get("/ui/masterkeys/:id/link", (q, r) => {
     const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
     r.json({ link: encodeSenLink({ tls: false, addrs: [{ host: "203.0.113.7", port: 41234 }], secret: m.secret, signPub, name: m.label }), tls: false });
 });
-app.get("/ui/masterkeys/:id/devices", (q, r) => { const m = find(q.params.id); m ? r.json({ devices: m.devs.map(d => devOut(m, d)) }) : r.status(404).json({ error: "Не найден" }); });
+// MOCK_MK_FAIL=<id ключа> — /devices этого ключа отвечает 502; MOCK_MK_DOWN=<id сервера> — этот сервер «не ответил».
+app.get("/ui/masterkeys/:id/devices", (q, r) => {
+    const m = find(q.params.id);
+    if (!m) return r.status(404).json({ error: "Не найден" });
+    if (process.env.MOCK_MK_FAIL === String(m.id)) return r.status(502).json({ error: "awg-ctrl недоступен" });
+    const down = Number(process.env.MOCK_MK_DOWN);
+    r.json({ devices: m.devs.map(d => devOut(m, d)), unreachable: m.servers.filter(s => s === down) });
+});
 app.delete("/ui/devices/:id", (q, r) => { for (const m of masters) m.devs = m.devs.filter(d => d.id !== Number(q.params.id)); r.json({ success: true }); });
 app.post("/ui/devices/:id/rekey", (q, r) => { masters.forEach(m => m.devs.forEach(d => { if (d.id === Number(q.params.id)) d.rekey_requested = true; })); r.json({}); });
 app.post("/ui/devices/:id/psk", (_q, r) => r.json({ pending: 0 }));

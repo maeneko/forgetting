@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -104,11 +105,16 @@ func (s *Sub) visible(masterID int64, scope []int) bool {
 	return true
 }
 
-// masterFor — живой (не удаляемый) ключ в пределах области; чужой — как несуществующий.
+// masterFor — живой (не удаляемый) ключ в пределах области. Ключ, которого нет или который
+// удалён, — 404; ключ, у которого есть сервер вне области API-ключа, — 403: клиент не должен
+// принимать его за удалённый и выдавать вместо него второй (так у пользователя появлялся дубль).
 func (s *Sub) masterFor(id int64, scope []int) (*masterRow, error) {
 	m := s.masterByID(s.a.db, id)
-	if m == nil || !s.visible(m.ID, scope) {
+	if m == nil {
 		return nil, fail(404, "Не найден")
+	}
+	if !s.visible(m.ID, scope) {
+		return nil, fail(403, "Ключ вне области API-ключа")
 	}
 	return m, nil
 }
@@ -278,20 +284,30 @@ func (s *Sub) updateMaster(m *masterRow, body any, scope []int) (jsjson.Object, 
 		devices := s.devicesOf(s.a.db, m.ID)
 		if err := s.a.tx(func(tx *sql.Tx) error {
 			for _, sid := range removed {
-				tx.Exec("DELETE FROM master_servers WHERE master_id = ? AND server_id = ?", m.ID, sid)
+				if _, err := tx.Exec("DELETE FROM master_servers WHERE master_id = ? AND server_id = ?", m.ID, sid); err != nil {
+					return err
+				}
 				for _, d := range devices {
 					for _, l := range s.linksOf(tx, d.ID) {
 						if l.ServerID == sid && l.PeerPub.Valid {
-							tx.Exec("INSERT OR IGNORE INTO peer_tombstones (server_id, pub_key) VALUES (?, ?)", sid, l.PeerPub.String)
+							if _, err := tx.Exec("INSERT OR IGNORE INTO peer_tombstones (server_id, pub_key) VALUES (?, ?)", sid, l.PeerPub.String); err != nil {
+								return err
+							}
 						}
 					}
-					tx.Exec("DELETE FROM device_peers WHERE device_id = ? AND server_id = ?", d.ID, sid)
+					if _, err := tx.Exec("DELETE FROM device_peers WHERE device_id = ? AND server_id = ?", d.ID, sid); err != nil {
+						return err
+					}
 				}
 			}
 			for _, sid := range added {
-				tx.Exec("INSERT OR IGNORE INTO master_servers (master_id, server_id) VALUES (?, ?)", m.ID, sid)
+				if _, err := tx.Exec("INSERT OR IGNORE INTO master_servers (master_id, server_id) VALUES (?, ?)", m.ID, sid); err != nil {
+					return err
+				}
 				for _, d := range devices {
-					tx.Exec("INSERT OR IGNORE INTO device_peers (device_id, server_id) VALUES (?, ?)", d.ID, sid)
+					if _, err := tx.Exec("INSERT OR IGNORE INTO device_peers (device_id, server_id) VALUES (?, ?)", d.ID, sid); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -380,13 +396,61 @@ type devStat struct {
 	torrent    bool
 }
 
+// peersTTL — сколько держится ответ GET /api/peers сервера. Вкладка за один проход просит
+// устройства каждого ключа, и без этого каждый запрос заново тянул бы пиров со всех серверов.
+const peersTTL = 3 * time.Second
+
+type peersCall struct {
+	done  chan struct{} // закрывается, когда ответ получен
+	at    time.Time     // нулевое — ответ не годится для повторного использования (ошибка)
+	peers []any
+	err   error
+}
+
+// peersOf — пиры сервера с их статистикой. Параллельные запросы к одному серверу делят один
+// вызов; свежий ответ переиспользуется peersTTL, ошибка — нет.
+func (s *Sub) peersOf(id int) ([]any, error) {
+	s.peersMu.Lock()
+	if c := s.peerCalls[id]; c != nil {
+		select {
+		case <-c.done:
+			if !c.at.IsZero() && time.Since(c.at) < peersTTL {
+				s.peersMu.Unlock()
+				return c.peers, c.err
+			}
+		default: // уже идёт — дождаться его же
+			s.peersMu.Unlock()
+			<-c.done
+			return c.peers, c.err
+		}
+	}
+	c := &peersCall{done: make(chan struct{})}
+	s.peerCalls[id] = c
+	s.peersMu.Unlock()
+
+	r, err := s.a.nodes.CtrlFor(id)("GET", "/api/peers", nil)
+	switch {
+	case err != nil:
+		c.err = err
+	case !ok2xx(r.Status):
+		c.err = fmt.Errorf("awg-ctrl ответил %d", r.Status)
+	default:
+		c.peers = arr(field(r.Data, "peers"))
+		c.at = time.Now()
+	}
+	close(c.done)
+	return c.peers, c.err
+}
+
 // masterDevices — статистика устройства по всем серверам ключа: онлайн, если есть свежий
 // handshake хоть на одном; трафик суммируется. servers_ok — где уже стоит его текущий ключ.
-func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
+// Сервер, который не ответил, не рушит список: его статистики просто нет, а id возвращается
+// вторым значением — панель покажет, что данные неполные.
+func (s *Sub) masterDevices(m *masterRow) ([]any, []int) {
 	stats := map[string]*devStat{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var firstErr error
+	unreachable := []int{}
 	for _, id := range s.serverIDsOf(s.a.db, m.ID) {
 		if !s.a.nodes.IsOnline(id) {
 			continue
@@ -394,19 +458,14 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, err := s.a.nodes.CtrlFor(id)("GET", "/api/peers", nil)
+			peers, err := s.peersOf(id)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
+				unreachable = append(unreachable, id)
 				return
 			}
-			if !ok2xx(r.Status) {
-				return
-			}
-			for _, p := range arr(field(r.Data, "peers")) {
+			for _, p := range peers {
 				pub, _ := field(p, "pub_key").(string)
 				st := stats[pub]
 				if st == nil {
@@ -426,9 +485,7 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 		}()
 	}
 	wg.Wait()
-	if firstErr != nil {
-		return nil, firstErr
-	}
+	sort.Ints(unreachable)
 	out := []any{}
 	for _, d := range s.devicesOf(s.a.db, m.ID) {
 		links := s.linksOf(s.a.db, d.ID)
@@ -459,7 +516,7 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, error) {
 			{Key: "servers_total", Val: len(links)}, {Key: "servers_ok", Val: okN}, {Key: "ips", Val: ips},
 		})
 	}
-	return out, nil
+	return out, unreachable
 }
 
 func (s *Sub) deleteDevice(d *deviceRow) jsjson.Object {
@@ -613,8 +670,8 @@ func (s *Sub) masterKeysRouter() *Router {
 		if err != nil {
 			return 0, nil, err
 		}
-		list, err := s.masterDevices(m)
-		return 200, jsjson.Object{{Key: "devices", Val: list}}, err
+		list, down := s.masterDevices(m)
+		return 200, jsjson.Object{{Key: "devices", Val: list}, {Key: "unreachable", Val: intsJSON(down)}}, nil
 	}))
 	return rt
 }
@@ -704,10 +761,7 @@ func (s *Sub) apiRouter(scopeOf func(c *Ctx) []int) *Router {
 		} else if out, err = withLink(c, m, out); err != nil {
 			return 0, nil, err
 		}
-		list, err := s.masterDevices(m)
-		if err != nil {
-			return 0, nil, err
-		}
+		list, _ := s.masterDevices(m)
 		return 200, merge(out, jsjson.Object{{Key: "device_list", Val: list}}), nil
 	}))
 	rt.Patch("/:id", aw(func(c *Ctx) (int, any, error) {
@@ -751,8 +805,8 @@ func (s *Sub) apiRouter(scopeOf func(c *Ctx) []int) *Router {
 		if err != nil {
 			return 0, nil, err
 		}
-		list, err := s.masterDevices(m)
-		return 200, jsjson.Object{{Key: "devices", Val: list}}, err
+		list, _ := s.masterDevices(m)
+		return 200, jsjson.Object{{Key: "devices", Val: list}}, nil
 	}))
 	rt.Delete("/:id/devices/:device", aw(func(c *Ctx) (int, any, error) {
 		d, err := device(c)

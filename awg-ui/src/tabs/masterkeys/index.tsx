@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { Fragment, useState, useEffect, useCallback } from 'react';
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
 import QRCode from 'qrcode';
 import { apiFetch, copyText, bytes, timeAgo, getServerId, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings, IcoGlobe } from '../../components/icons';
@@ -41,9 +41,13 @@ const statusChip = (d: Device) => (
     </span>
 );
 
-// IP устройства на выбранном сервере (на каждом сервере ключа он свой), иначе — на первом.
-const ipOf = (d: Device): string =>
-    (d.ips?.find(x => x.server_id === getServerId()) ?? d.ips?.[0])?.ip ?? '—';
+// IP устройства на выбранном сервере (на каждом сервере ключа он свой), иначе — на первом;
+// other — адрес с другого сервера, его надо подписать, иначе его примут за адрес выбранного.
+const ipPick = (d: Device): { ip: string; serverId?: number; other: boolean } => {
+    const own = d.ips?.find(x => x.server_id === getServerId());
+    const pick = own ?? d.ips?.[0];
+    return { ip: pick?.ip ?? '—', serverId: pick?.server_id, other: !own && !!pick };
+};
 
 export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const [keys, setKeys]       = useState<MasterKey[]>([]);
@@ -56,18 +60,40 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const [folded, setFolded]   = useState<Set<number>>(new Set());   // свёрнутые узлы
     const [tools, setTools]     = useState<number | null>(null);        // узел с открытыми настройками
     const [limitEdit, setLimitEdit] = useState('');
+    const [failed, setFailed] = useState<Set<number>>(new Set());   // ключи, чьи устройства не загрузились
+    const [down, setDown]     = useState<Record<number, number[]>>({});   // серверы ключа, не ответившие на статистику
+    const [creating, setCreating] = useState(false);
+    const loadSeq = useRef(0);       // номер последней загрузки: ответ более старой отбрасывается
+    const creatingRef = useRef(false);
     const [modal, setModal]     = useState<{ label: string; link: string; tls: boolean; dataUrl: string } | null>(null);
 
     const load = useCallback(async () => {
+        const seq = ++loadSeq.current;
         try {
             const d = await apiFetch('GET', '/ui/masterkeys', token);
             const list: MasterKey[] = d.keys ?? [];
+            if (seq !== loadSeq.current) return;
             setKeys(list); setEnabled(!!d.enabled); setTls(!!d.tls);
             apiFetch('GET', '/ui/nodes', token).then(r => setNodes(r.nodes ?? [])).catch(() => {});
-            const all = await Promise.all(list.filter(k => !k.deleting).map(k =>
-                apiFetch('GET', `/ui/masterkeys/${k.id}/devices`, token).then(r => [k.id, r.devices ?? []] as const)));
-            setDevs(Object.fromEntries(all));
-        } catch { showMsg('Ошибка загрузки мастер-ключей'); }
+            // Каждый ключ грузится сам по себе: сбой одного не должен прятать устройства остальных.
+            const live = list.filter(k => !k.deleting);
+            const res = await Promise.allSettled(live.map(k =>
+                apiFetch('GET', `/ui/masterkeys/${k.id}/devices`, token)));
+            if (seq !== loadSeq.current) return;
+            const bad = new Set<number>(), unreachable: Record<number, number[]> = {};
+            const fresh: Record<number, Device[]> = {};
+            res.forEach((r, i) => {
+                const id = live[i].id;
+                if (r.status === 'fulfilled') {
+                    fresh[id] = r.value.devices ?? [];
+                    if (r.value.unreachable?.length) unreachable[id] = r.value.unreachable;
+                } else bad.add(id);
+            });
+            // Не загрузилось — оставляем прежний список (устаревший лучше пустого), но помечаем.
+            setDevs(prev => Object.fromEntries(live.flatMap(k =>
+                fresh[k.id] ? [[k.id, fresh[k.id]]] : prev[k.id] ? [[k.id, prev[k.id]]] : [])));
+            setFailed(bad); setDown(unreachable);
+        } catch { if (seq === loadSeq.current) showMsg('Ошибка загрузки мастер-ключей'); }
     }, [token, showMsg]);
 
     // Действие над ключом/устройством: выполнить, показать сообщение, обновить данные.
@@ -77,15 +103,17 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     }, [load, showMsg]);
 
     const create = useCallback(async () => {
-        if (!label.trim()) return;
-        await act(async () => {
+        if (!label.trim() || creatingRef.current) return;
+        creatingRef.current = true; setCreating(true);
+        try { await act(async () => {
             // Новый ключ отдаёт все серверы, которые уже подключались; набор потом правится в настройках ключа.
             const ready = nodes.filter(n => !n.pending).map(n => n.id);
             await apiFetch('POST', '/ui/masterkeys', token, {
                 label: label.trim(), device_limit: Number(limit), ...(ready.length ? { servers: ready } : {}),
             });
             setLabel('');
-        }, 'Мастер-ключ создан');
+        }, 'Мастер-ключ создан'); }
+        finally { creatingRef.current = false; setCreating(false); }
     }, [label, limit, nodes, token, act]);
 
     const serverNames = useCallback((ids: number[]) => ids.map(id => serverName(nodes, id)).join(', '), [nodes]);
@@ -119,15 +147,19 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     }, [fetchLink, showMsg]);
 
     // Лимит ниже числа устройств: сервер сразу отвяжет лишних, начиная с подключившихся последними, —
-    // поэтому сперва спросить и назвать, кого именно.
+    // поэтому сперва спросить и назвать, кого именно. Список устройств не загрузился — считаем по
+    // счётчику ключа и имён не называем, но спросить всё равно надо.
     const saveLimit = useCallback(async (k: MasterKey) => {
         const limit = Number(limitEdit);
-        const list = devs[k.id] ?? [];
-        const extra = list.length - limit;
+        const list = devs[k.id];
+        const have = list?.length ?? k.devices;
+        const extra = have - limit;
         if (Number.isInteger(limit) && extra > 0) {
-            const names = [...list].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, extra)
-                .map(d => `«${d.device_name || d.id}»`).join(', ');
-            if (!confirm(`Лимит ${limit} меньше, чем устройств (${list.length}). Будут отвязаны подключившиеся последними: ${names}. Продолжить?`)) return;
+            const who = list
+                ? [...list].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, extra)
+                    .map(d => `«${d.device_name || d.id}»`).join(', ')
+                : `${extra} шт.`;
+            if (!confirm(`Лимит ${limit} меньше, чем устройств (${have}). Будут отвязаны подключившиеся последними: ${who}. Продолжить?`)) return;
         }
         try {
             const r = await apiFetch('PATCH', `/ui/masterkeys/${k.id}`, token, { device_limit: limit });
@@ -281,6 +313,13 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         </span>
     );
 
+    // Данные по ключу неполные: устройства не загрузились или сервер не ответил на статистику.
+    const dataFlag = (k: MasterKey) => {
+        if (failed.has(k.id)) return <span className="mk-flag" title="Список устройств не загрузился — показан последний известный"> · устройства не загрузились</span>;
+        const d = down[k.id];
+        return d?.length ? <span className="mk-flag" title="Онлайн и трафик с этих серверов не получены"> · нет связи: {serverNames(d)}</span> : null;
+    };
+
     // Сводка по устройствам ключа в его строке — видна и у свёрнутого ключа.
     const summary = (list: Device[]) => {
         if (!list.length) return <><td></td><td></td><td colSpan={2}></td><td></td><td></td></>;
@@ -304,12 +343,14 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         );
     };
 
+    // Адрес с другого сервера подписан его именем; подсказка со всеми адресами — когда их больше одного.
     const ipCell = (d: Device) => {
         const all = d.ips ?? [];
-        const ip = <code className="mk-ip">{ipOf(d)}</code>;
+        const { ip, serverId, other } = ipPick(d);
+        const text = <code className="mk-ip">{ip}{other && serverId !== undefined ? ` · ${serverName(nodes, serverId)}` : ''}</code>;
         return all.length > 1
-            ? <span className="tip-wrap" data-tip={all.map(x => `${serverName(nodes, x.server_id)}: ${x.ip}`).join(' · ')}>{ip}</span>
-            : ip;
+            ? <span className="tip-wrap" data-tip={all.map(x => `${serverName(nodes, x.server_id)}: ${x.ip}`).join(' · ')}>{text}</span>
+            : text;
     };
 
     const caret = (k: MasterKey) => (
@@ -333,7 +374,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 {/* как строка IP в карточке пользователя: адрес и чипы приоритета/торрентов */}
                 <div className="mk-device-ip">
                     <IcoGlobe />
-                    <span className="mk-ip">{ipOf(d)}</span>
+                    {ipCell(d)}
                     <PriorityChip priority={d.priority} torrent={d.torrent} />
                     <TorrentChip torrent={d.torrent} />
                 </div>
@@ -361,7 +402,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <input className="field mk-limit-input" type="number" min={1} max={100} title="Лимит устройств"
                     aria-label="Лимит устройств" value={limit} onChange={e => setLimit(e.target.value)} />
                 <div className="toolbar-btns">
-                    <button className="btn btn--primary" onClick={create}><IcoPlus /> Создать ключ</button>
+                    <button className="btn btn--primary" onClick={create} disabled={creating}><IcoPlus /> Создать ключ</button>
                 </div>
             </div>
 
@@ -385,14 +426,15 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                                 </tr>
                             );
                             const list = devs[k.id] ?? [];
-                            const free = Math.max(0, k.device_limit - list.length);
+                            const count = devs[k.id]?.length ?? k.devices;
+                            const free = Math.max(0, k.device_limit - count);
                             const open = !folded.has(k.id);
                             return (
                                 <Fragment key={k.id}>
                                     <tr className="mk-tr-master">
-                                        <td><span className="mk-name">{caret(k)}<IcoKey />{nameCell(k)}</span></td>
+                                        <td><span className="mk-name">{caret(k)}<IcoKey />{nameCell(k)}{dataFlag(k)}</span></td>
                                         {summary(list)}
-                                        <td>{meter(k, list.length)}</td>
+                                        <td>{meter(k, count)}</td>
                                         <td className="td-actions mk-td-actions">{actions(k)}</td>
                                     </tr>
                                     {tools === k.id && <tr className="mk-tr-tools"><td colSpan={9}>{toolbox(k)}</td></tr>}
@@ -449,15 +491,16 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                             </li>
                         );
                         const list = devs[k.id] ?? [];
-                        const free = Math.max(0, k.device_limit - list.length);
+                        const count = devs[k.id]?.length ?? k.devices;
+                        const free = Math.max(0, k.device_limit - count);
                         const isFolded = folded.has(k.id);
                         return (
                             <li className="mk-root" key={k.id}>
                                 <div className="mk-master">
                                     {caret(k)}
                                     <IcoKey />
-                                    <span className="mk-master-label">{k.label}<code className="mk-master-uuid">{k.uuid}</code></span>
-                                    {meter(k, list.length)}
+                                    <span className="mk-master-label">{k.label}{dataFlag(k)}<code className="mk-master-uuid">{k.uuid}</code></span>
+                                    {meter(k, count)}
                                     {actions(k)}
                                 </div>
                                 {tools === k.id && toolbox(k)}
