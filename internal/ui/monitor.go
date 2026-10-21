@@ -132,7 +132,10 @@ func (m *Monitor) forgetSource() {
 }
 
 func (m *Monitor) findSource() *promSource {
-	if m.promReady() {
+	// Prometheus на этой машине берём сразу, только если в нём метрики панели: на 127.0.0.1:9090
+	// может стоять и чужой (мониторинг оператора), тогда он лишь заслонил бы Prometheus ноды.
+	local := m.promReady()
+	if local && m.hasPanelMetrics() {
 		return &promSource{local: true}
 	}
 	ids := m.a.nodes.IDs()
@@ -156,7 +159,17 @@ func (m *Monitor) findSource() *promSource {
 			return &promSource{node: id}
 		}
 	}
+	// На нодах нет — свой, даже пустой: например, только что поставлен и ещё не скрейпил.
+	if local {
+		return &promSource{local: true}
+	}
 	return nil
+}
+
+// hasPanelMetrics — скрейпит ли Prometheus этой машины панель (есть ли в нём awg_scrape_ok).
+func (m *Monitor) hasPanelMetrics() bool {
+	data, err := m.promGet(&promSource{local: true}, "/api/v1/query", url.Values{"query": {"count(awg_scrape_ok)"}})
+	return err == nil && len(arr(field(data, "data", "result"))) > 0
 }
 
 // promGet — JSON-ответ Prometheus (path с запросом): напрямую или через агента ноды.

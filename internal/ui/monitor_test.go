@@ -107,8 +107,20 @@ func TestPrometheusOnNodeZero(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	// На машине панели — чужой Prometheus (мониторинг оператора): готов, но метрик панели в нём нет.
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/-/ready":
+			io.WriteString(w, "Prometheus Server is Ready.\n")
+		case "/api/v1/query":
+			io.WriteString(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer foreign.Close()
 	m := newMonitor(a)
-	m.promURL = "http://127.0.0.1:1" // своего Prometheus у панели нет
+	m.promURL = foreign.URL
 	src := m.source()
 	if src == nil || src.local || src.node != 0 {
 		t.Fatalf("Prometheus не найден на ноде #0: %+v", src)
