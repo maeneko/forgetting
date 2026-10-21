@@ -33,6 +33,14 @@
 bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
 ```
 
+Не от root — через `sudo bash -c`: `sudo bash <(curl …)` падает с
+`/dev/fd/63: No such file or directory`, потому что `sudo` закрывает дескриптор
+с текстом скрипта.
+
+```bash
+sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)"
+```
+
 Установщик по умолчанию ставит сервер на AmneziaWG 3.1. Если модуль в ядре
 старше 3.x или ядро старше 5.5, установка остановится с диагностикой — поставить
 на 2.0 можно так:
