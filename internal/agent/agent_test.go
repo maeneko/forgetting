@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -349,5 +352,120 @@ func TestFallsBackToJoinAddress(t *testing.T) {
 	case <-connected:
 	case <-ctx.Done():
 		t.Fatal("агент не перешёл на адрес из join")
+	}
+}
+
+func TestPromAllowed(t *testing.T) {
+	for p, want := range map[string]string{
+		"/prom/-/ready":                         "/-/ready",
+		"/prom/api/v1/query?query=up&time=1":    "/api/v1/query?query=up&time=1",
+		"/prom/api/v1/query_range?query=up":     "/api/v1/query_range?query=up",
+		"/prom/api/v1/admin/tsdb/delete_series": "",
+		"/prom/api/v1/query/../admin":           "",
+		"/prom//api/v1/query":                   "",
+		"/prom/api/v1/query?query=up#x":         "",
+		"/prom/api/v1/query?query=up\nHost: x":  "",
+		"/prom/api/v1/labels":                   "",
+	} {
+		got, ok := promAllowed("GET", p)
+		if want == "" && ok || want != "" && got != want {
+			t.Errorf("promAllowed(%q) = %q, %v", p, got, ok)
+		}
+	}
+	if _, ok := promAllowed("POST", "/prom/api/v1/query"); ok {
+		t.Error("POST к Prometheus пропущен")
+	}
+	a := &Agent{c: Config{PromURL: "http://127.0.0.1:1"}}
+	if r := a.execProm("GET", "/prom/-/ready"); r.status != 404 {
+		t.Errorf("без AGENT_METRICS_PORT: %d", r.status)
+	}
+}
+
+// Prometheus на ноде: запросы панели доходят до него, а его скрейп получает метрики core.
+func TestPrometheusOnNode(t *testing.T) {
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/query":
+			io.WriteString(w, `{"status":"success","q":"`+r.URL.Query().Get("query")+`"}`)
+		case "/-/ready":
+			io.WriteString(w, "Prometheus Server is Ready.\n")
+		default:
+			w.WriteHeader(500)
+		}
+	}))
+	defer prom.Close()
+
+	results := make(chan jsjson.Object, 8)
+	c := newCore(t, func(ctx context.Context, ws *websocket.Conn, read func() jsjson.Object) {
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "hello"}, {Key: "nonce", Val: "n"}})
+		if read() == nil {
+			return
+		}
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "ready"}})
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "req"}, {Key: "id", Val: 1}, {Key: "method", Val: "GET"}, {Key: "path", Val: "/prom/api/v1/query?query=up"}})
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "req"}, {Key: "id", Val: 2}, {Key: "method", Val: "GET"}, {Key: "path", Val: "/prom/api/v1/admin/tsdb/snapshot"}})
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "req"}, {Key: "id", Val: 3}, {Key: "method", Val: "GET"}, {Key: "path", Val: "/prom/-/ready"}})
+		for {
+			m := read()
+			if m == nil {
+				return
+			}
+			switch m.Get2("t") {
+			case "res":
+				results <- m
+			case "metrics":
+				send(ctx, ws, jsjson.Object{{Key: "t", Val: "metrics_res"}, {Key: "id", Val: m.Get2("id")}, {Key: "status", Val: 200}, {Key: "text", Val: "awg_up 1\n"}})
+			}
+		}
+	})
+
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	a, _ := newAgent(t, c, c.pin(t), "http://127.0.0.1:1")
+	a.c.PromURL, a.c.MetricsPort = prom.URL, port
+	a.c.MonitorHash = filepath.Join(t.TempDir(), "monitor_token.sha256")
+	sum := sha256.Sum256([]byte("awgm_good"))
+	os.WriteFile(a.c.MonitorHash, []byte(hex.EncodeToString(sum[:])+"\n"), 0o644)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go a.Run(ctx)
+
+	byID := map[float64]string{}
+	for range 3 {
+		select {
+		case r := <-results:
+			byID[r.Get2("id").(float64)] = string(jsjson.MustMarshal(r))
+		case <-ctx.Done():
+			t.Fatal("нет ответов агента")
+		}
+	}
+	for id, want := range map[float64]string{
+		1: `{"t":"res","id":1,"status":200,"data":{"status":"success","q":"up"}}`,
+		2: `{"t":"res","id":2,"status":400,"data":{"error":"Запрос не разрешён агентом"}}`,
+		3: `{"t":"res","id":3,"status":200,"data":"Prometheus Server is Ready.\n"}`,
+	} {
+		if byID[id] != want {
+			t.Errorf("res %v:\n got %s\nwant %s", id, byID[id], want)
+		}
+	}
+
+	scrape := func(tok string) (int, string) {
+		req, _ := http.NewRequest("GET", "http://127.0.0.1:"+strconv.Itoa(port)+"/metrics", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if st, _ := scrape("awgm_bad"); st != 401 {
+		t.Errorf("чужой токен: %d", st)
+	}
+	if st, body := scrape("awgm_good"); st != 200 || body != "awg_up 1\n" {
+		t.Errorf("скрейп: %d %q", st, body)
 	}
 }

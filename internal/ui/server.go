@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -908,7 +909,9 @@ func (a *App) static(c *Ctx) bool {
 		if st, err := os.Stat(f); err == nil && !hidden {
 			if st.IsDir() {
 				if !strings.HasSuffix(c.R.URL.Path, "/") {
-					http.Redirect(c.W, c.R, c.R.URL.Path+"/", http.StatusMovedPermanently)
+					// Относительный адрес: за прокси в подпапке абсолютный увёл бы из неё.
+					c.W.Header().Set("Location", path.Base(c.R.URL.Path)+"/")
+					c.W.WriteHeader(http.StatusMovedPermanently)
 					return false
 				}
 				f = filepath.Join(f, "index.html")

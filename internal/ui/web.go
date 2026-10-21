@@ -212,12 +212,13 @@ func (c *Ctx) Obj() jsjson.Object {
 }
 
 // remoteIP — req.socket.remoteAddress.
+// remoteIP — адрес клиента; за доверенным reverse-proxy — из его заголовков (trustproxy.go).
 func (c *Ctx) remoteIP() string {
 	host, _, err := net.SplitHostPort(c.R.RemoteAddr)
 	if err != nil {
 		return "unknown"
 	}
-	return host
+	return clientIP(host, c.R.Header, trustedProxies())
 }
 
 // hostname — req.hostname в Express (trust proxy выключен): Host без порта, у IPv6 — в скобках.

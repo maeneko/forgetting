@@ -8,11 +8,12 @@ import LineChart from '../../components/LineChart';
 import './monitor.css';
 
 // Вкладка «Монитор»: встроенный Prometheus и основные графики.
-// Кнопка «Подключить Prometheus» просит локальный awg-ctrl поставить его (`awg-ctrl monitor install`, root;
-// сама панель пакетов не ставит). Графики читают Prometheus через фиксированные запросы панели
-// (awg-ui/monitor.ts).
+// Кнопка «Подключить Prometheus» просит awg-ctrl сервера поставить его (`awg-ctrl monitor install`, root;
+// сама панель пакетов не ставит). У панели без VPN он ставится на ноду, и панель читает его через её агента.
+// Графики читают Prometheus через фиксированные запросы панели (internal/ui/monitor.go).
 interface Status {
     ready: boolean; can_install: boolean; command: string;
+    host: { id: number; name: string } | null;   // Prometheus на ноде (или будет поставлен туда); null — на этом сервере
     job: { action: 'install' | 'remove'; running: boolean; exit: number | null; log: string } | null;   // последняя операция
 }
 type Pts = [number, number][];
@@ -93,7 +94,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
     useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
     const loadStatus = useCallback(async () => {
-        try { const s = await apiFetch('GET', '/ui/monitor', token) as Status; if (alive.current) setStatus(s); return s; }
+        try { const s = await apiFetch('GET', `/ui/monitor?server=${getServerId() ?? 0}`, token) as Status; if (alive.current) setStatus(s); return s; }
         catch { return null; }
     }, [token]);
 
@@ -139,7 +140,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
     const run = async (action: 'install' | 'remove') => {
         if (action === 'remove' && !confirm('Удалить Prometheus? Он будет остановлен, а накопленные графики (до 31 дня) сотрутся. Панель продолжит отдавать /metrics.')) return;
         setPending(action);
-        try { await apiFetch('POST', `/ui/monitor/${action}`, token); await loadStatus(); }
+        try { await apiFetch('POST', `/ui/monitor/${action}?server=${getServerId() ?? 0}`, token); await loadStatus(); }
         catch (e: any) { setPending(null); showMsg(e?.response?.data?.error ?? (action === 'install' ? 'Не удалось запустить установку' : 'Не удалось запустить удаление')); }
     };
     const working = !!pending || !!status?.job?.running;
@@ -174,7 +175,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                 <span className="chip chip--offline"><span className="chip-dot" />не подключён</span>
             </div>
             <p className="mon-hint">
-                Панель поставит Prometheus на этот сервер и сама подключит его к своим метрикам: основные графики —
+                Панель поставит Prometheus {status.host ? <>на сервер <b>{status.host.name}</b></> : 'на этот сервер'} и сама подключит его к своим метрикам: основные графики —
                 скорость, устройства онлайн, нагрузка на канал, — появятся здесь через минуту-две. Prometheus слушает
                 только 127.0.0.1, наружу он не открывается.
             </p>
@@ -188,7 +189,10 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                 </div>
             ) : (
                 <>
-                    <p className="mon-hint">Выполните на сервере от root (у этой панели нет своего awg-ctrl, который мог бы сделать это сам):</p>
+                    <p className="mon-hint">
+                        У этой панели нет своего VPN-сервера: выберите ноду в сервер-баре, чтобы поставить Prometheus на неё
+                        кнопкой, или выполните на ней от root:
+                    </p>
                     <code className="mon-code">{status.command}</code>
                     <div className="mon-actions">
                         <button className="btn btn--tonal" onClick={() => copyText(status.command).then(() => showMsg('Команда скопирована'))}>
@@ -210,8 +214,8 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                 <span className="chip chip--online"><span className="chip-dot" />работает</span>
             </div>
             <p className="mon-hint">
-                Стоит на этом сервере и слушает только 127.0.0.1:9090, графики хранит 31 день. Удаление остановит его, снимет
-                пакет и сотрёт накопленные данные.
+                Стоит {status.host ? <>на сервере <b>{status.host.name}</b> (панель читает его через агента ноды)</> : 'на этом сервере'} и
+                слушает только 127.0.0.1:9090, графики хранит 31 день. Удаление остановит его, снимет пакет и сотрёт накопленные данные.
             </p>
             {status.can_install ? (
                 <div className="mon-actions">
@@ -222,7 +226,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                 </div>
             ) : (
                 <>
-                    <p className="mon-hint">Выполните на сервере от root:</p>
+                    <p className="mon-hint">Выполните на сервере с Prometheus от root:</p>
                     <code className="mon-code">awg-ctrl monitor remove</code>
                 </>
             )}

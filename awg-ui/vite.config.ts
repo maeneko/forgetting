@@ -5,6 +5,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
+    // Ресурсы — от адреса страницы, а не от корня домена: собранная панель работает и в корне, и в
+    // подпапке за reverse-proxy (example.com/forgetting/) без пересборки. Запросы к API — так же
+    // (main.tsx).
+    base: './',
     plugins: [react()],
     server: {
         proxy: {

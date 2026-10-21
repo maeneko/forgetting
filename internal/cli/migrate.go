@@ -219,6 +219,14 @@ func (c *CLI) migrateImport(file string) {
 		errorf("  Не удалось записать %s: %v", c.envFile, err)
 		os.Exit(1)
 	}
+	// Подписка и хаб переезжают на порты старого сервера — их надо открыть, как install.sh.
+	opened, failed := migrate.OpenFirewall(plan.SubPort, plan.NodePort)
+	if len(opened) > 0 {
+		fmt.Printf("  %s UFW: открыты %s\n", green("✓"), strings.Join(opened, " "))
+	}
+	if len(failed) > 0 {
+		errorf("  UFW: не удалось открыть %s — откройте вручную: ufw allow <порт>/tcp", strings.Join(failed, " "))
+	}
 	c.restartFresh()
 
 	// Сертификат хаба приехал в архиве, а нет — awg-ui создаёт его при старте.

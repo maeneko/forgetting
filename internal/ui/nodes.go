@@ -43,8 +43,10 @@ const (
 	rpcTimeout  = 15 * time.Second
 	rpcSlow     = 120 * time.Second // /awg/*: рестарт и upgrade идут долго
 	hubMaxFrame = 4 * 1024 * 1024
-	failWindow  = 15 * time.Minute
-	failMaxHits = 20
+	// Метрики для Prometheus на ноде: каждый ответ опрашивает все серверы — не чаще этого.
+	metricsEvery = 5 * time.Second
+	failWindow   = 15 * time.Minute
+	failMaxHits  = 20
 )
 
 var (
@@ -110,6 +112,9 @@ type nodeConn struct {
 	alive   bool
 	pending map[int64]*pending
 	closed  bool
+	// Запрос метрик от ноды (Prometheus на ней): идёт ли сейчас и когда начат последний.
+	metricsBusy bool
+	metricsAt   time.Time
 }
 
 type deleteVeto struct {
@@ -585,6 +590,10 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
+		if m.Get2("t") == "metrics" && isInt(m.Get2("id")) {
+			go n.nodeMetrics(conn, m.Get2("id"))
+			continue
+		}
 		if m.Get2("t") == "res" && isInt(m.Get2("id")) {
 			rid := int64(m.Get2("id").(float64))
 			conn.mu.Lock()
@@ -606,6 +615,29 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		n.dropConn(nodeID, conn)
 		logf("nodes: #%d отключена", nodeID)
 	}
+}
+
+// nodeMetrics — Prometheus на ноде скрейпит метрики панели через её агента: та же экспозиция,
+// что /metrics ядра, со всеми серверами (docs/node-protocol.md, «Мониторинг на ноде»).
+func (n *Nodes) nodeMetrics(c *nodeConn, id any) {
+	c.mu.Lock()
+	t := time.Now()
+	busy := c.metricsBusy || t.Sub(c.metricsAt) < metricsEvery
+	if !busy {
+		c.metricsBusy, c.metricsAt = true, t
+	}
+	c.mu.Unlock()
+	res := jsjson.Object{{Key: "t", Val: "metrics_res"}, {Key: "id", Val: id}}
+	if busy {
+		res = append(res, jsjson.KV{Key: "status", Val: 429}, jsjson.KV{Key: "text", Val: "слишком часто\n"})
+	} else {
+		text := n.a.metrics.render()
+		c.mu.Lock()
+		c.metricsBusy = false
+		c.mu.Unlock()
+		res = append(res, jsjson.KV{Key: "status", Val: 200}, jsjson.KV{Key: "text", Val: text})
+	}
+	c.ws.Write(context.Background(), websocket.MessageText, jsjson.MustMarshal(res))
 }
 
 // Start поднимает хаб (если настроен) и периодические ping/health.

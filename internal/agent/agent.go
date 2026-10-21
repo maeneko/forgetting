@@ -1,7 +1,9 @@
 // Package agent — агент ноды (порт awg-agent/index.ts). Сам открывает исходящее
 // WSS-соединение к core (awg-ui), доказывает свою личность подписью Ed25519 и исполняет
 // присланные запросы на локальном awg-ctrl (127.0.0.1). Входящих портов у ноды нет,
-// awg-ctrl остаётся закрытым от сети. Протокол и формат join-строки — docs/node-protocol.md.
+// awg-ctrl остаётся закрытым от сети. Если на ноде стоит Prometheus (`awg-ctrl monitor install`),
+// агент отдаёт ему метрики панели, взятые у core, и пропускает к нему запросы вкладки «Монитор».
+// Протокол и формат join-строки — docs/node-protocol.md.
 package agent
 
 import (
@@ -10,9 +12,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -44,6 +48,8 @@ const (
 	ctrlTimeout      = 110 * time.Second
 	maxBackoff       = 60 * time.Second
 	closeAuthFailed  = 4003
+	promTimeout      = 8 * time.Second // как у панели к своему Prometheus
+	metricsTimeout   = 9 * time.Second // меньше scrape_timeout Prometheus (10 с по умолчанию)
 )
 
 type Config struct {
@@ -58,6 +64,9 @@ type Config struct {
 	CLIEnvFile   string
 	JoinSecret   string // одноразовый, живёт до первого успешного подключения
 	Version      string
+	PromURL      string // Prometheus этой машины: к нему агент пропускает запросы панели (/prom/…)
+	MetricsPort  int    // 127.0.0.1:порт, где Prometheus ноды скрейпит метрики панели; 0 — мониторинга на ноде нет
+	MonitorHash  string // хэш токена этого Prometheus (его пишет `awg-ctrl monitor install`)
 	Logf, Errorf func(format string, a ...any)
 }
 
@@ -100,6 +109,9 @@ func ConfigFromEnv() (Config, error) {
 		CLIEnvFile:   os.Getenv("CLI_ENV_FILE"),
 		JoinSecret:   os.Getenv("JOIN_SECRET"),
 		Version:      os.Getenv("VERSION"),
+		PromURL:      or("PROM_URL", "http://127.0.0.1:9090"),
+		MetricsPort:  atoi("AGENT_METRICS_PORT"),
+		MonitorHash:  or("MONITOR_HASH_FILE", "/etc/amnezia/amneziawg/monitor_token.sha256"),
 	}
 	if c.Version == "" {
 		c.Version = envFromFile(filepath.Join(cwd, "..", ".env"), "VERSION")
@@ -120,8 +132,19 @@ type Agent struct {
 	joinSecret string
 	addrs      []string // куда звонить: адрес от core, затем из join (CORE_HOST:CORE_PORT)
 	cur        int
+	link       *coreLink // соединение после ready; nil — core сейчас недоступен
 
 	http *http.Client
+	prom *http.Client
+}
+
+// coreLink — запросы ноды к core (пока один: метрики панели для Prometheus ноды).
+type coreLink struct {
+	send    func(v any)
+	done    <-chan struct{}
+	mu      sync.Mutex
+	seq     int64
+	pending map[int64]chan reply
 }
 
 // loadNodeKey — личность ноды (Ed25519): создаётся один раз, приватная часть с ноды не уходит.
@@ -159,6 +182,7 @@ func New(c Config) (*Agent, error) {
 		nodePubRaw: b64.EncodeToString(key.Public().(ed25519.PublicKey)),
 		// awg-ctrl на loopback: системный прокси (HTTPS_PROXY и т. п.) сюда не нужен.
 		http: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: ctrlTimeout},
+		prom: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: promTimeout},
 	}
 	a.setAddrs(c.CoreEndpoint)
 	if ik, err := iauth.LoadPrivate(c.InternalKey); err == nil {
@@ -213,11 +237,13 @@ func errReply(status int, msg string) reply {
 	return reply{status, jsjson.Object{{Key: "error", Val: msg}}}
 }
 
-// execute выполняет запрос core на локальном awg-ctrl. Ответ возвращается как его разобрал
-// бы axios: JSON — значением, иначе строкой (пустое тело — "").
+// execute выполняет запрос core на локальном awg-ctrl (или, для /prom/…, на Prometheus).
 func (a *Agent) execute(m jsjson.Object) reply {
 	method, _ := m.Get2("method").(string)
 	method = strings.ToUpper(method)
+	if s, _ := m.Get2("path").(string); strings.HasPrefix(s, "/prom/") {
+		return a.execProm(method, s)
+	}
 	p, ok := pathAllowed(m.Get2("path"))
 	if !methods[method] || !ok {
 		return errReply(400, "Запрос не разрешён агентом")
@@ -243,14 +269,19 @@ func (a *Agent) execute(m jsjson.Object) reply {
 	if a.internalKey != nil {
 		req.Header.Set("Authorization", "Bearer "+iauth.Mint(a.internalKey, "awg-agent", time.Now()))
 	}
-	resp, err := a.http.Do(req)
+	return do(a.http, req, "awg-ctrl недоступен")
+}
+
+// do — ответ как его разобрал бы axios: JSON — значением, иначе строкой (пустое тело — "").
+func do(c *http.Client, req *http.Request, down string) reply {
+	resp, err := c.Do(req)
 	if err != nil {
-		return errReply(502, "awg-ctrl недоступен")
+		return errReply(502, down)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return errReply(502, "awg-ctrl недоступен")
+		return errReply(502, down)
 	}
 	if len(raw) == 0 {
 		return reply{resp.StatusCode, ""}
@@ -259,6 +290,40 @@ func (a *Agent) execute(m jsjson.Object) reply {
 		return reply{resp.StatusCode, v}
 	}
 	return reply{resp.StatusCode, string(raw)}
+}
+
+// promPaths — всё, что панель читает у Prometheus: готовность и фиксированные запросы вкладки.
+var promPaths = map[string]bool{"/prom/-/ready": true, "/prom/api/v1/query": true, "/prom/api/v1/query_range": true}
+
+// promAllowed — запрос панели к Prometheus этой машины: только GET и только пути из promPaths.
+func promAllowed(method string, p any) (string, bool) {
+	s, ok := p.(string)
+	if method != "GET" || !ok || len(s) > 8192 || !rePath.MatchString(s) {
+		return "", false
+	}
+	pathname, query, _ := strings.Cut(s, "?")
+	if !promPaths[pathname] || strings.Contains(query, "#") {
+		return "", false
+	}
+	return strings.TrimPrefix(s, "/prom"), true
+}
+
+// execProm — Prometheus ноды для вкладки «Монитор» панели. Пропускаем, только если он
+// скрейпит панель через этого агента (AGENT_METRICS_PORT): чужой Prometheus на машине
+// панели не отдаём, да и метрик панели в нём нет.
+func (a *Agent) execProm(method string, p any) reply {
+	if a.c.MetricsPort == 0 {
+		return errReply(404, "Prometheus на этой ноде не подключён к панели")
+	}
+	rest, ok := promAllowed(method, p)
+	if !ok {
+		return errReply(400, "Запрос не разрешён агентом")
+	}
+	req, err := http.NewRequest("GET", strings.TrimSuffix(a.c.PromURL, "/")+rest, nil)
+	if err != nil {
+		return errReply(400, "Запрос не разрешён агентом")
+	}
+	return do(a.prom, req, "Prometheus не отвечает")
 }
 
 // ── Соединение с core ──────────────────────────────────────────────────────
@@ -426,6 +491,7 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 		return false
 	}
 	defer ws.CloseNow()
+	defer a.setLink(nil)
 	ws.SetReadLimit(maxPayload)
 
 	send := func(v any) {
@@ -472,6 +538,7 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 		case t == "ready":
 			ready = true
 			armDead()
+			a.setLink(&coreLink{send: send, done: ctx.Done(), pending: map[int64]chan reply{}})
 			if onReady != nil {
 				onReady()
 			}
@@ -485,6 +552,8 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 			if core, ok := m.Get2("core").(string); ok && a.learnCore(core) {
 				send(jsjson.Object{{Key: "t", Val: "core_ok"}, {Key: "core", Val: core}})
 			}
+		case t == "metrics_res" && ready:
+			a.deliver(m)
 		case t == "req" && ready:
 			id, ok := m.Get2("id").(float64)
 			if !ok || id != float64(int64(id)) {
@@ -499,6 +568,104 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 	}
 }
 
+// ── Метрики панели для Prometheus ноды ─────────────────────────────────────
+
+func (a *Agent) setLink(l *coreLink) {
+	a.mu.Lock()
+	a.link = l
+	a.mu.Unlock()
+}
+
+// deliver — ответ core на запрос метрик.
+func (a *Agent) deliver(m jsjson.Object) {
+	id, ok := m.Get2("id").(float64)
+	a.mu.Lock()
+	l := a.link
+	a.mu.Unlock()
+	if !ok || l == nil {
+		return
+	}
+	l.mu.Lock()
+	ch := l.pending[int64(id)]
+	delete(l.pending, int64(id))
+	l.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	st, _ := m.Get2("status").(float64)
+	text, _ := m.Get2("text").(string)
+	ch <- reply{int(st), text}
+}
+
+// coreMetrics — экспозиция /metrics панели, как её отдал бы сам core.
+func (a *Agent) coreMetrics(ctx context.Context) reply {
+	a.mu.Lock()
+	l := a.link
+	a.mu.Unlock()
+	if l == nil {
+		return reply{503, "core недоступен\n"}
+	}
+	ch := make(chan reply, 1)
+	l.mu.Lock()
+	l.seq++
+	id := l.seq
+	l.pending[id] = ch
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		delete(l.pending, id)
+		l.mu.Unlock()
+	}()
+	l.send(jsjson.Object{{Key: "t", Val: "metrics"}, {Key: "id", Val: id}})
+	select {
+	case r := <-ch:
+		return r
+	case <-l.done:
+		return reply{503, "core недоступен\n"}
+	case <-ctx.Done():
+		return reply{504, "core не ответил\n"}
+	}
+}
+
+// tokenOK — тот же токен, что встроенный Prometheus предъявил бы самой панели: хэш в файле,
+// перечитываем на каждый скрейп (раз в 15 с), чтобы переустановка не требовала перезапуска.
+func (a *Agent) tokenOK(r *http.Request) bool {
+	given, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	raw, err := os.ReadFile(a.c.MonitorHash)
+	if !ok || !strings.HasPrefix(given, "awgm_") || err != nil {
+		return false
+	}
+	want, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	sum := sha256.Sum256([]byte(given))
+	return err == nil && len(want) == len(sum) && subtle.ConstantTimeCompare(sum[:], want) == 1
+}
+
+// serveMetrics — 127.0.0.1:AGENT_METRICS_PORT/metrics для Prometheus этой ноды: метрики всех
+// серверов панели, полученные у core по уже открытому WSS. Наружу порт не открывается.
+func (a *Agent) serveMetrics(ctx context.Context) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !a.tokenOK(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		cctx, cancel := context.WithTimeout(r.Context(), metricsTimeout)
+		defer cancel()
+		res := a.coreMetrics(cctx)
+		text, _ := res.data.(string)
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.WriteHeader(res.status)
+		io.WriteString(w, text)
+	})
+	srv := &http.Server{Addr: "127.0.0.1:" + strconv.Itoa(a.c.MetricsPort), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() { <-ctx.Done(); srv.Close() }()
+	a.c.Logf("agent: метрики панели для Prometheus — http://%s/metrics", srv.Addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		a.c.Errorf("agent: метрики для Prometheus не подняты: %v", err)
+	}
+}
+
 func hostPort(host string, port int) string {
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
 		host = "[" + host + "]"
@@ -509,6 +676,9 @@ func hostPort(host string, port int) string {
 // Run переподключается вечно: экспоненциальная пауза до минуты, после отказа core — минута.
 func (a *Agent) Run(ctx context.Context) error {
 	a.c.Logf("agent: нода #%d → wss://%s", a.c.NodeID, a.addr())
+	if a.c.MetricsPort > 0 {
+		go a.serveMetrics(ctx)
+	}
 	backoff := time.Second
 	for {
 		ready := false

@@ -4,6 +4,8 @@ package cli
 // cli/src/monitor.ts). Работает от root (ставит пакет, пишет в /etc): панель сама пакетов не
 // ставит, она только просит (через awg-ctrl) или показывает эту команду. Всё слушает
 // 127.0.0.1: наружу Prometheus не торчит, а панель читает его по HTTP на той же машине.
+// На ноде без своей панели и скрейп, и чтение идут через агента: метрики панели он берёт у
+// core по WSS (AGENT_METRICS_PORT), а запросы вкладки «Монитор» пропускает к Prometheus.
 
 import (
 	"crypto/rand"
@@ -11,6 +13,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -121,7 +125,8 @@ func copyFile(src, dst string) {
 	}
 }
 
-func writePromConfig(uiPort string) {
+// writePromConfig — target: порт панели на этой машине или агента ноды.
+func writePromConfig(target string) {
 	if exists(promConf) {
 		copyFile(promConf, promConf+".bak-"+backupStamp())
 	}
@@ -135,7 +140,7 @@ scrape_configs:
     scheme: http
     metrics_path: /metrics
 `+authBlock()+`    static_configs:
-      - targets: ['127.0.0.1:`+uiPort+`']
+      - targets: ['127.0.0.1:`+target+`']
 `), 0o644)
 }
 
@@ -172,8 +177,22 @@ func (c *CLI) monitorInstall() {
 	if !reDebian.MatchString(osFamily()) {
 		mfail("Автоустановка поддерживает только Debian и Ubuntu. На другом дистрибутиве поставьте Prometheus сами и подключите его кнопкой в панели (токен метрик).")
 	}
-	uiPort := os.Getenv("UI_PORT")
-	if uiPort == "" {
+	// Нода без своей панели (в том числе сервер, с которого панель переехала): метрики панели
+	// Prometheus получает от агента, а тот — от core.
+	viaAgent := c.isNode && !contains(c.all, "ui")
+	target, newPort := os.Getenv("UI_PORT"), false
+	if viaAgent {
+		if target = os.Getenv("AGENT_METRICS_PORT"); target == "" {
+			if target = freeLocalPort(); target == "" {
+				mfail("Не нашлось свободного порта для агента")
+			}
+			if err := c.writeEnvFile(updateEnvVar(c.readEnvFile(), "AGENT_METRICS_PORT", target)); err != nil {
+				mfail("Не удалось записать " + c.envFile + ": " + err.Error())
+			}
+			c.setSvcEnv("agent", "AGENT_METRICS_PORT", target)
+			newPort = true
+		}
+	} else if target == "" {
 		mfail("На этой машине нет панели (UI_PORT не задан): Prometheus скрейпит метрики панели.")
 	}
 	// Чужой Prometheus не трогаем: перезаписать его prometheus.yml значит сломать чужой мониторинг.
@@ -195,7 +214,12 @@ func (c *CLI) monitorInstall() {
 
 	mlog("2/4  токен и конфиг")
 	writePromToken()
-	writePromConfig(uiPort)
+	writePromConfig(target)
+	if newPort {
+		mlog("агент отдаёт метрики панели на 127.0.0.1:" + target + " — перезапуск агента")
+		c.stop("agent")
+		c.start("agent")
+	}
 
 	mlog("3/4  слушаем только " + promListen + ", хранение " + promRetention)
 	setPromArgs()
@@ -208,11 +232,30 @@ func (c *CLI) monitorInstall() {
 	for range 30 {
 		if promReady() {
 			fmt.Printf("\n  ✓ Prometheus работает на %s, метрики панели скрейпятся каждые 15 с.\n    Во вкладке «Монитор» графики появятся через минуту-две.\n\n", promListen)
+			if viaAgent {
+				fmt.Print("    Панель читает его через агента этой ноды.\n\n")
+			}
 			return
 		}
 		time.Sleep(time.Second)
 	}
 	mfail("Prometheus не ответил за 30 с: journalctl -u prometheus")
+}
+
+// freeLocalPort — свободный порт из того же диапазона, что у install.sh (32768–55535).
+func freeLocalPort() string {
+	for range 50 {
+		n, err := rand.Int(rand.Reader, big.NewInt(55535-32768+1))
+		if err != nil {
+			return ""
+		}
+		p := strconv.Itoa(32768 + int(n.Int64()))
+		if l, err := net.Listen("tcp", "127.0.0.1:"+p); err == nil {
+			l.Close()
+			return p
+		}
+	}
+	return ""
 }
 
 func yesNo(b bool, yes, no string) string {

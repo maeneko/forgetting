@@ -184,6 +184,8 @@ func New() *CLI {
 				{"NODE_PORT", env("NODE_PORT", "")},
 				// IP ретрансляторов (старый сервер после переноса): им — доверие к заголовку PROXY.
 				{"RELAY_FROM", env("RELAY_FROM", "")},
+				// Reverse-proxy перед панелью (кроме loopback): от них — X-Forwarded-For / X-Real-IP.
+				{"TRUST_PROXY", env("TRUST_PROXY", "")},
 				// Когда панель приняла перенос: с этого момента считаются клиенты, узнавшие новый адрес.
 				{"MOVED_IN_AT", env("MOVED_IN_AT", "")},
 				// Вкладка «Перенос» пишет сюда порты, PANEL_MOVED и RELAY_FROM.
@@ -211,6 +213,8 @@ func New() *CLI {
 				{"CLI_ENV_FILE", cliEnv},
 				{"AWGCTRL_PORT", env("AWGCTRL_PORT", "3005")},
 				{"INTERNAL_AUTH_KEY_FILE", env("INTERNAL_AUTH_KEY_FILE", "/etc/amnezia/amneziawg/internal_auth_private.key")},
+				// Prometheus на ноде (`monitor install`): здесь он скрейпит метрики панели.
+				{"AGENT_METRICS_PORT", env("AGENT_METRICS_PORT", "")},
 			},
 			pidFile: "/tmp/awg-agent.pid", logFile: filepath.Join(c.logs, "awg-agent.log"),
 		},
@@ -247,6 +251,18 @@ func New() *CLI {
 		c.all = append(c.all, "relay")
 	}
 	return c
+}
+
+// setSvcEnv — значение, записанное в cli.env уже после запуска CLI, для следующего start.
+func (c *CLI) setSvcEnv(name, key, value string) {
+	s := c.svc[name]
+	for i := range s.env {
+		if s.env[i][0] == key {
+			s.env[i][1] = value
+			return
+		}
+	}
+	s.env = append(s.env, [2]string{key, value})
 }
 
 func (c *CLI) panelMoved() bool { return strings.ToLower(os.Getenv("PANEL_MOVED")) == "on" }

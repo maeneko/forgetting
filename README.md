@@ -57,6 +57,34 @@ AWG_GEN=auto bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgettin
 `REPO_BASE`, `REPO_FALLBACK`, `ARCHIVE_URL`, `BRAND` перед запуском установщика
 (подробности — в комментариях `install.sh` и в `.env`).
 
+### Панель за nginx
+
+Панель работает и в корне домена, и в любой подпапке — пути в ней относительные,
+настраивать сам префикс не нужно. Пример для `https://example.com/forgetting/`
+(`39708` — `PORT` панели из `/opt/awg-control/cli/cli.env`):
+
+```nginx
+location = /forgetting { return 301 /forgetting/; }
+location ^~ /forgetting/ {
+    proxy_pass http://127.0.0.1:39708/;      # слэш в конце срезает префикс
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Адрес клиента панель берёт из `X-Forwarded-For` / `X-Real-IP` только от доверенного
+прокси: с этой же машины (loopback) — всегда, с других адресов — если они перечислены
+в `TRUST_PROXY` в `cli.env` (IP или сети через запятую, например
+`TRUST_PROXY=10.0.0.5,192.168.1.0/24`), после чего `awg-ctrl restart`. От остальных
+заголовки игнорируются. Без этого все входы шли бы с адреса прокси и делили один
+лимит неудачных попыток.
+
+Сам порт панели после этого можно закрыть снаружи (`ufw deny <PORT>/tcp`) — порты
+подписки (`SUB_PORT`) и хаба нод (`NODE_PORT`) должны оставаться открытыми: клиенты
+и ноды ходят на них напрямую, не через nginx.
+
 ## API
 
 Наружу смотрят две независимые поверхности. **Публичный API** `/api/v1` —

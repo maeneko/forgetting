@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -172,5 +173,33 @@ func TestCodeAndSeal(t *testing.T) {
 	box[len(box)-1] ^= 1
 	if _, err := OpenRequest(c.Key, box); err == nil {
 		t.Error("открылся повреждённый")
+	}
+}
+
+// Приём переноса открывает новые порты в UFW, только если он активен, — как install.sh.
+func TestOpenFirewall(t *testing.T) {
+	var calls []string
+	status := "Status: active"
+	defer func(f func(...string) ([]byte, error)) { ufw = f }(ufw)
+	ufw = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "status" {
+			return []byte(status), nil
+		}
+		if len(args) > 1 && args[1] == "45000/tcp" {
+			return nil, errors.New("exit 1")
+		}
+		return nil, nil
+	}
+	opened, failed := OpenFirewall(40222, 45000, 0)
+	if strings.Join(opened, ",") != "40222/tcp" || strings.Join(failed, ",") != "45000/tcp" {
+		t.Errorf("opened %v failed %v", opened, failed)
+	}
+	if strings.Join(calls, "; ") != "status; allow 40222/tcp; allow 45000/tcp; reload" {
+		t.Errorf("вызовы: %v", calls)
+	}
+	calls, status = nil, "Status: inactive"
+	if opened, _ := OpenFirewall(40222); opened != nil || len(calls) != 1 {
+		t.Errorf("UFW выключен, а правила трогаются: %v", calls)
 	}
 }

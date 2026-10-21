@@ -280,6 +280,10 @@ func (m *Migration) importHandler(c *Ctx) bool {
 	if err := envfile.Set(m.envFile, plan.Env); err != nil {
 		return fail(err)
 	}
+	// Подписка и хаб переезжают на порты старого сервера — их надо открыть, как install.sh.
+	if opened, failed := migrate.OpenFirewall(plan.SubPort, plan.NodePort); len(opened)+len(failed) > 0 {
+		logf("migrate: UFW открыт %v, не открылись %v", opened, failed)
+	}
 	join := migrate.JoinString(host, plan.NodePort, pin, 0, secret, plan.UIPort, plan.SubPort)
 	m.state = moveImported
 	logf("migrate: панель «%s» принята с %s — перезапуск", b.Str("server_name"), c.remoteIP())

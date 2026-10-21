@@ -118,7 +118,8 @@ app.get("/ui/monitor", (_q, r) => {
         const n = monRunning() ? Math.max(1, Math.floor(((Date.now() - monJob.start) / MON_MS) * lines.length)) : lines.length;
         job = { action: monJob.action, running: monRunning(), exit: monRunning() ? null : 0, log: lines.slice(0, n).join("\n") };
     }
-    r.json({ ready: monReady, can_install: true, command: "awg-ctrl monitor install", job });
+    // MOCK_ROLE=core/retire — панель без VPN: Prometheus на ноде #0 (сервер, с которого она переехала)
+    r.json({ ready: monReady, can_install: true, command: "awg-ctrl monitor install", host: MOCK_CORE ? { id: 0, name: "VPN" } : null, job });
 });
 for (const action of ["install", "remove"] as const) {
     app.post(`/ui/monitor/${action}`, (_q, r) => { if (!monRunning()) monJob = { action, start: Date.now() }; r.status(202).json({ running: true, action }); });
