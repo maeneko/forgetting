@@ -279,3 +279,33 @@ LICENSE file in the root directory of this source tree.
 
     .mk-free { padding: 12px; font-size: 13px; }
 }
+
+/* «Серверы для всех» (BulkServersModal) */
+.bs-modal { max-width: 620px; }
+.bs-list { display: flex; flex-direction: column; gap: 8px; }
+.bs-row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface-container); border-radius: 12px; padding: 8px 8px 8px 14px;
+    font-size: 13px; color: var(--on-surface);
+}
+.bs-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.bs-sub { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--neutral-text); }
+.bs-sub .server-pick-ip { margin-left: 0; }
+.bs-opts { display: flex; gap: 4px; flex-shrink: 0; }
+.bs-opt {
+    min-height: 36px; padding: 0 12px;
+    font: inherit; font-size: 13px; color: var(--on-surface);
+    background: var(--surface-bright);
+    border: 1px solid var(--outline); border-radius: var(--r-pill);
+    cursor: pointer; white-space: nowrap;
+}
+.bs-opt:hover { background: var(--state-primary); }
+.bs-opt--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: 500; }
+.bs-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--on-surface); cursor: pointer; }
+.bs-check input { accent-color: var(--primary); width: 18px; height: 18px; margin: 0; }
+@media (max-width: 640px) {
+    .bs-row { flex-wrap: wrap; }
+    .bs-opts { width: 100%; }
+    .bs-opt { flex: 1; }
+}
+.bs-modal .btn:disabled { opacity: .5; cursor: default; }

@@ -268,3 +268,86 @@ func TestNodeKeyPersists(t *testing.T) {
 		t.Fatalf("node.key mode %v", st.Mode().Perm())
 	}
 }
+
+// Нода #0 — сервер, с которого переехала панель: 0 — значение, а не «не задан».
+func TestConfigNodeZero(t *testing.T) {
+	t.Setenv("CORE_HOST", "203.0.113.7")
+	t.Setenv("CORE_PORT", "40500")
+	t.Setenv("CORE_PIN", "pin")
+	for id, ok := range map[string]bool{"0": true, "3": true, "": false, "-1": false, "x": false} {
+		t.Setenv("NODE_ID", id)
+		c, err := ConfigFromEnv()
+		if (err == nil) != ok {
+			t.Errorf("NODE_ID=%q: %v", id, err)
+		}
+		if ok && strconv.Itoa(c.NodeID) != id {
+			t.Errorf("NODE_ID=%q → %d", id, c.NodeID)
+		}
+	}
+}
+
+// Панель переехала: core сообщает свой адрес в ready, агент записывает его в cli.env,
+// подтверждает (core_ok) и с тех пор звонит туда первым, а адрес из join — запасной.
+func TestLearnsCoreAddress(t *testing.T) {
+	c := newCore(t, func(ctx context.Context, ws *websocket.Conn, read func() jsjson.Object) {
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "hello"}, {Key: "nonce", Val: "n"}})
+		read()
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "ready"}, {Key: "core", Val: "198.51.100.9:40500"}})
+		read()
+		ws.Close(websocket.StatusNormalClosure, "")
+	})
+	a, envFile := newAgent(t, c, c.pin(t), "http://127.0.0.1:1")
+	host, port := c.hostPort()
+	join := hostPort(host, port)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a.connectOnce(ctx, nil)
+
+	<-c.frames // auth
+	if ok := <-c.frames; string(jsjson.MustMarshal(ok)) != `{"t":"core_ok","core":"198.51.100.9:40500"}` {
+		t.Errorf("подтверждение: %s", jsjson.MustMarshal(ok))
+	}
+	if raw, _ := os.ReadFile(envFile); !strings.Contains(string(raw), "CORE_ENDPOINT=198.51.100.9:40500") {
+		t.Errorf("cli.env: %q", raw)
+	}
+	if strings.Join(a.addrs, " ") != "198.51.100.9:40500 "+join || a.addr() != join {
+		t.Errorf("адреса %v, текущий %s", a.addrs, a.addr())
+	}
+}
+
+func TestBadCoreAddressIgnored(t *testing.T) {
+	a := &Agent{c: Config{CoreHost: "203.0.113.1", CorePort: 40500, CLIEnvFile: filepath.Join(t.TempDir(), "cli.env"), Logf: t.Logf, Errorf: t.Logf}}
+	a.setAddrs("")
+	for _, bad := range []string{"", "x", "host:0", "host:99999", "a b:1", "host:1/x", "[::1]:x"} {
+		if a.learnCore(bad) {
+			t.Errorf("принят адрес %q", bad)
+		}
+	}
+	if !a.learnCore("[2001:db8::1]:443") || a.addrs[0] != "[2001:db8::1]:443" {
+		t.Errorf("IPv6: %v", a.addrs)
+	}
+}
+
+// Записанный адрес не отвечает (старый сервер выключен или новый ещё не открыт) — следующая
+// попытка идёт на адрес из join.
+func TestFallsBackToJoinAddress(t *testing.T) {
+	connected := make(chan struct{}, 1)
+	c := newCore(t, func(ctx context.Context, ws *websocket.Conn, read func() jsjson.Object) {
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "hello"}, {Key: "nonce", Val: "n"}})
+		read()
+		send(ctx, ws, jsjson.Object{{Key: "t", Val: "ready"}})
+		connected <- struct{}{}
+		<-ctx.Done()
+	})
+	a, _ := newAgent(t, c, c.pin(t), "http://127.0.0.1:1")
+	a.c.CoreEndpoint = "127.0.0.1:1"
+	a.setAddrs(a.c.CoreEndpoint)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go a.Run(ctx)
+	select {
+	case <-connected:
+	case <-ctx.Done():
+		t.Fatal("агент не перешёл на адрес из join")
+	}
+}

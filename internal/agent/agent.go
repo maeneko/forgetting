@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/maeneko/forgetting/internal/envfile"
 	"github.com/maeneko/forgetting/internal/iauth"
 	"github.com/maeneko/forgetting/internal/jsjson"
 )
@@ -47,6 +49,7 @@ const (
 type Config struct {
 	CoreHost     string
 	CorePort     int
+	CoreEndpoint string // «host:port», который core сообщил сам (после переезда панели); пробуется первым
 	CorePin      string // SHA-256 SPKI сертификата core, base64url
 	NodeID       int
 	Ctrl         string // http://127.0.0.1:PORT
@@ -77,6 +80,8 @@ func envFromFile(file, key string) string {
 func ConfigFromEnv() (Config, error) {
 	cwd, _ := os.Getwd()
 	atoi := func(k string) int { n, _ := strconv.Atoi(strings.TrimSpace(os.Getenv(k))); return n }
+	// Нода №0 — сервер, с которого переехала панель: 0 здесь — значение, а не «не задано».
+	nodeID, idErr := strconv.Atoi(strings.TrimSpace(os.Getenv("NODE_ID")))
 	or := func(k, def string) string {
 		if v, ok := os.LookupEnv(k); ok {
 			return v
@@ -84,21 +89,22 @@ func ConfigFromEnv() (Config, error) {
 		return def
 	}
 	c := Config{
-		CoreHost:    os.Getenv("CORE_HOST"),
-		CorePort:    atoi("CORE_PORT"),
-		CorePin:     os.Getenv("CORE_PIN"),
-		NodeID:      atoi("NODE_ID"),
-		Ctrl:        "http://127.0.0.1:" + or("AWGCTRL_PORT", "3005"),
-		NodeKeyFile: or("NODE_KEY_FILE", filepath.Join(cwd, "node.key")),
-		InternalKey: or("INTERNAL_AUTH_KEY_FILE", "/etc/amnezia/amneziawg/internal_auth_private.key"),
-		CLIEnvFile:  os.Getenv("CLI_ENV_FILE"),
-		JoinSecret:  os.Getenv("JOIN_SECRET"),
-		Version:     os.Getenv("VERSION"),
+		CoreHost:     os.Getenv("CORE_HOST"),
+		CorePort:     atoi("CORE_PORT"),
+		CorePin:      os.Getenv("CORE_PIN"),
+		CoreEndpoint: os.Getenv("CORE_ENDPOINT"),
+		NodeID:       nodeID,
+		Ctrl:         "http://127.0.0.1:" + or("AWGCTRL_PORT", "3005"),
+		NodeKeyFile:  or("NODE_KEY_FILE", filepath.Join(cwd, "node.key")),
+		InternalKey:  or("INTERNAL_AUTH_KEY_FILE", "/etc/amnezia/amneziawg/internal_auth_private.key"),
+		CLIEnvFile:   os.Getenv("CLI_ENV_FILE"),
+		JoinSecret:   os.Getenv("JOIN_SECRET"),
+		Version:      os.Getenv("VERSION"),
 	}
 	if c.Version == "" {
 		c.Version = envFromFile(filepath.Join(cwd, "..", ".env"), "VERSION")
 	}
-	if c.CoreHost == "" || c.CorePort == 0 || c.CorePin == "" || c.NodeID == 0 {
+	if c.CoreHost == "" || c.CorePort == 0 || c.CorePin == "" || idErr != nil || c.NodeID < 0 {
 		return c, errors.New("agent: не заданы CORE_HOST / CORE_PORT / CORE_PIN / NODE_ID — выполните `awg-ctrl join <ссылка>`")
 	}
 	return c, nil
@@ -112,6 +118,8 @@ type Agent struct {
 
 	mu         sync.Mutex
 	joinSecret string
+	addrs      []string // куда звонить: адрес от core, затем из join (CORE_HOST:CORE_PORT)
+	cur        int
 
 	http *http.Client
 }
@@ -152,6 +160,7 @@ func New(c Config) (*Agent, error) {
 		// awg-ctrl на loopback: системный прокси (HTTPS_PROXY и т. п.) сюда не нужен.
 		http: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: ctrlTimeout},
 	}
+	a.setAddrs(c.CoreEndpoint)
 	if ik, err := iauth.LoadPrivate(c.InternalKey); err == nil {
 		a.internalKey = ik
 	} else {
@@ -306,6 +315,71 @@ func (a *Agent) forgetJoinSecret() {
 	os.WriteFile(a.c.CLIEnvFile, []byte(strings.Join(kept, "\n")), 0o600)
 }
 
+// setAddrs — сначала адрес, который сообщил core, потом адрес из join: как endpoints у клиента
+// sen://. Чужой сервер по нему не подменить — доверие даёт pin, а не адрес.
+func (a *Agent) setAddrs(learned string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.addrs = nil
+	for _, s := range []string{learned, hostPort(a.c.CoreHost, a.c.CorePort)} {
+		if s != "" && (len(a.addrs) == 0 || a.addrs[0] != s) {
+			a.addrs = append(a.addrs, s)
+		}
+	}
+	a.cur = 0
+}
+
+func (a *Agent) addr() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.addrs[a.cur%len(a.addrs)]
+}
+
+// next — не дозвонились (или core не принял): следующий адрес.
+func (a *Agent) next() {
+	a.mu.Lock()
+	a.cur = (a.cur + 1) % len(a.addrs)
+	a.mu.Unlock()
+}
+
+// learnCore — core сообщил свой адрес (панель переехала, старый сервер скоро выключат):
+// запоминаем в cli.env, чтобы после перезапуска звонить сразу туда. false — не запомнили.
+func (a *Agent) learnCore(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if p, perr := strconv.Atoi(port); err != nil || perr != nil || p <= 0 || p > 65535 || !reCoreHost.MatchString(host) {
+		return false
+	}
+	addr = hostPort(host, mustAtoi(port))
+	if addr == a.c.CoreEndpoint {
+		return true
+	}
+	if a.c.CLIEnvFile == "" {
+		return false
+	}
+	if err := envfile.Set(a.c.CLIEnvFile, [][2]string{{"CORE_ENDPOINT", addr}}); err != nil {
+		a.c.Errorf("agent: адрес core не сохранён: %v", err)
+		return false
+	}
+	a.c.CoreEndpoint = addr
+	a.mu.Lock()
+	cur := a.addrs[a.cur%len(a.addrs)]
+	a.mu.Unlock()
+	a.setAddrs(addr)
+	a.mu.Lock()
+	for i, s := range a.addrs { // текущее соединение не рвём: адрес пригодится при следующем
+		if s == cur {
+			a.cur = i
+		}
+	}
+	a.mu.Unlock()
+	a.c.Logf("agent: core теперь доступен и по %s", addr)
+	return true
+}
+
+var reCoreHost = regexp.MustCompile(`^[A-Za-z0-9.:-]{1,253}$`)
+
+func mustAtoi(s string) int { n, _ := strconv.Atoi(s); return n }
+
 func (a *Agent) secret() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -337,7 +411,7 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 
 	tr := &http.Transport{Proxy: nil, TLSClientConfig: a.tlsConfig(), TLSHandshakeTimeout: handshakeTimeout}
 	dctx, dcancel := context.WithTimeout(ctx, handshakeTimeout)
-	ws, _, err := websocket.Dial(dctx, fmt.Sprintf("wss://%s/node/v1", hostPort(a.c.CoreHost, a.c.CorePort)), &websocket.DialOptions{
+	ws, _, err := websocket.Dial(dctx, fmt.Sprintf("wss://%s/node/v1", a.addr()), &websocket.DialOptions{
 		HTTPClient:      &http.Client{Transport: tr},
 		CompressionMode: websocket.CompressionDisabled,
 		OnPingReceived:  func(context.Context, []byte) bool { armDead(); return true },
@@ -405,7 +479,12 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 				a.forgetJoinSecret()
 				a.c.Logf("agent: нода привязана к core")
 			}
-			a.c.Logf("agent: подключено к core")
+			a.c.Logf("agent: подключено к core (%s)", a.addr())
+			// Подтверждение — только когда адрес уже на диске: по нему панель решает, что
+			// старый сервер можно выключать.
+			if core, ok := m.Get2("core").(string); ok && a.learnCore(core) {
+				send(jsjson.Object{{Key: "t", Val: "core_ok"}, {Key: "core", Val: core}})
+			}
 		case t == "req" && ready:
 			id, ok := m.Get2("id").(float64)
 			if !ok || id != float64(int64(id)) {
@@ -429,10 +508,14 @@ func hostPort(host string, port int) string {
 
 // Run переподключается вечно: экспоненциальная пауза до минуты, после отказа core — минута.
 func (a *Agent) Run(ctx context.Context) error {
-	a.c.Logf("agent: нода #%d → wss://%s", a.c.NodeID, hostPort(a.c.CoreHost, a.c.CorePort))
+	a.c.Logf("agent: нода #%d → wss://%s", a.c.NodeID, a.addr())
 	backoff := time.Second
 	for {
-		authFailed := a.connectOnce(ctx, func() { backoff = time.Second })
+		ready := false
+		authFailed := a.connectOnce(ctx, func() { backoff, ready = time.Second, true })
+		if !ready {
+			a.next()
+		}
 		wait := backoff
 		if authFailed {
 			wait = maxBackoff

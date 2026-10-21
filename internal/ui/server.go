@@ -11,7 +11,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -109,10 +108,11 @@ type App struct {
 	revoked       map[string]bool
 	loginAttempts map[string]*rateEntry
 
-	nodes   *Nodes
-	sub     *Sub
-	metrics *Metrics
-	monitor *Monitor
+	nodes     *Nodes
+	sub       *Sub
+	metrics   *Metrics
+	monitor   *Monitor
+	migration *Migration
 }
 
 // New готовит панель: база, ключи, модули. Каталог панели — рабочий каталог процесса
@@ -185,6 +185,7 @@ func New() (*App, error) {
 		return nil, err
 	}
 	a.monitor = newMonitor(a)
+	a.migration = newMigration(a)
 	a.nodes.BeforeDelete(a.apiKeysBeforeDelete)
 	a.nodes.AfterDelete(a.apiKeysAfterDelete)
 	return a, nil
@@ -876,6 +877,10 @@ func (a *App) routes() *Router {
 	app.Get("/metrics", a.metrics.requireToken, a.metrics.handler)
 	app.Use("/ui/monitor", auth)
 	app.Mount("/ui/monitor", a.monitor.router())
+	// Перенос панели: приём архива — без JWT, его пускает только ключ из кода переноса.
+	app.Post("/migrate/v1/import", a.migration.importHandler)
+	app.Use("/ui/migrate", auth)
+	app.Mount("/ui/migrate", a.migration.router())
 
 	for _, p := range []string{"/api", "/health", "/awg"} {
 		app.Use(p, auth, a.proxy)
@@ -937,7 +942,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, f string) {
 
 // Run слушает панель на :PORT и запускает фоновые части (хаб нод, подписку).
 func (a *App) Run() error {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", a.port))
+	ln, err := listen(a.port)
 	if err != nil {
 		return err
 	}

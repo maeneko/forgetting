@@ -29,13 +29,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -193,6 +193,8 @@ type Sub struct {
 	seenSigs map[string]time.Time // подпись → когда забыть
 
 	registerLimit, failLimit *limiter
+
+	frozen atomic.Bool // идёт перенос панели (migrate.go): /sub/v1 отвечает «недоступна»
 
 	auditMu       sync.Mutex
 	lastAudit     *auditReport
@@ -780,7 +782,8 @@ func (s *Sub) subHost(c *Ctx) string {
 	if s.host != "" {
 		return s.host
 	}
-	if s.a.nodes.Exists(0) {
+	// Только свой сервер: у ноды №0 (переехавшей панели) endpoint — другая машина.
+	if s.a.nodes.local {
 		if p := s.storedProfile(0); p != nil {
 			if ep, ok := p.Get2("endpoint").(string); ok {
 				return hostOfEndpoint(ep)
@@ -1200,6 +1203,14 @@ func (s *Sub) publicRouter() *Router {
 		s.send(w, r, 400, subErr("bad_request"))
 	}
 	rt.notFound = func(c *Ctx) { s.sendC(c, 404, subErr("not_found")) }
+	// Перенос панели: изменения сейчас остались бы только в уезжающей базе. 502 unavailable
+	// клиент понимает как «подписка недоступна» — туннель не трогает и повторит позже.
+	rt.Use("/", func(c *Ctx) bool {
+		if s.frozen.Load() {
+			return s.sendC(c, 502, subErr("unavailable"))
+		}
+		return true
+	})
 	rt.Post("/sub/v1/register", s.wrapSub(s.register))
 	rt.Post("/sub/v1/peek", s.wrapSub(s.peek))
 	rt.Get("/sub/v1/config", s.deviceAuth, s.wrapSub(s.config))
@@ -1248,7 +1259,7 @@ func (s *Sub) Start() {
 		return
 	}
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", s.port), Handler: s.publicRouter(), ReadHeaderTimeout: 15 * time.Second, ErrorLog: quietLog()}
-	ln, err := net.Listen("tcp", srv.Addr)
+	ln, err := listen(s.port)
 	if err != nil {
 		warnf("sub: листенер не запущен: %v", err)
 		return

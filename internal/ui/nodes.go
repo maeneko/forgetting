@@ -6,7 +6,9 @@ package ui
 // своём 127.0.0.1-awg-ctrl. awg-ctrl про ноды ничего не знает.
 //
 // server_id 0 — локальный awg-ctrl этой же машины; при LOCAL_NODE=off его нет, core работает
-// как чистая панель. Протокол и формат join-строки — docs/node-protocol.md.
+// как чистая панель. Номер 0 тогда может занять нода — сервер, с которого панель переехала
+// (`awg-control migrate`): так у его пиров, ключей API и устройств не меняется id сервера.
+// Протокол и формат join-строки — docs/node-protocol.md.
 
 import (
 	"context"
@@ -201,6 +203,18 @@ func newNodes(a *App) (*Nodes, error) {
 			return nil, err
 		}
 	}
+	// core_ack — адрес панели, который агент записал к себе (кадр core_ok): нода переживёт
+	// выключение сервера, через который подключена сейчас.
+	if !hasColumn(a.db, "nodes", "core_ack") {
+		if _, err := a.db.Exec("ALTER TABLE nodes ADD COLUMN core_ack TEXT"); err != nil {
+			return nil, err
+		}
+	}
+	// Нода №0 и локальный сервер — один и тот же id: вместе их не бывает.
+	if n.local && n.row(0) != nil {
+		return nil, fmt.Errorf("nodes: в ui.db есть нода #0 (сервер, с которого переехала панель), а LOCAL_NODE=on — " +
+			"у этой панели свой VPN не включают")
+	}
 	return n, nil
 }
 
@@ -294,15 +308,15 @@ func (n *Nodes) rpc(id int64, method, path string, body any) *CtrlResp {
 
 // CtrlFor — контроллер нужного сервера: 0 — локальный awg-ctrl, остальное — нода по WSS.
 func (n *Nodes) CtrlFor(id int) Ctrl {
-	if id == 0 {
-		if !n.local {
+	if id == 0 && n.local {
+		return n.a.ctrlLocal
+	}
+	if n.row(int64(id)) == nil {
+		if id == 0 {
 			return func(string, string, any) (*CtrlResp, error) {
 				return &CtrlResp{404, errObj("Локальный сервер не настроен")}, nil
 			}
 		}
-		return n.a.ctrlLocal
-	}
-	if n.row(int64(id)) == nil {
 		return func(string, string, any) (*CtrlResp, error) {
 			return &CtrlResp{404, errObj("Сервер не найден")}, nil
 		}
@@ -311,16 +325,16 @@ func (n *Nodes) CtrlFor(id int) Ctrl {
 }
 
 func (n *Nodes) Exists(id int) bool {
-	if id == 0 {
-		return n.local
+	if id == 0 && n.local {
+		return true
 	}
 	return n.row(int64(id)) != nil
 }
 
 // IsOnline — есть ли сейчас связь (локальный считаем доступным всегда).
 func (n *Nodes) IsOnline(id int) bool {
-	if id == 0 {
-		return n.local
+	if id == 0 && n.local {
+		return true
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -385,7 +399,7 @@ func (n *Nodes) DefaultID() int {
 
 func (n *Nodes) refreshHealth(id int64) {
 	var r *CtrlResp
-	if id == 0 {
+	if id == 0 && n.local {
 		r, _ = n.a.ctrlLocal("GET", "/health", nil)
 	} else {
 		r = n.rpc(id, "GET", "/health", nil)
@@ -532,7 +546,11 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			n.dropConn(row.ID, old)
 			closeWS(old.ws, 4000, "replaced")
 		}
-		ws.Write(context.Background(), websocket.MessageText, []byte(`{"t":"ready"}`))
+		ready := jsjson.Object{{Key: "t", Val: "ready"}}
+		if home := n.home(); home != "" {
+			ready = append(ready, jsjson.KV{Key: "core", Val: home})
+		}
+		ws.Write(context.Background(), websocket.MessageText, jsjson.MustMarshal(ready))
 		first := ""
 		if joining {
 			first = " (первое подключение)"
@@ -559,6 +577,12 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		m, _ := v.(jsjson.Object)
 		if conn == nil {
 			authenticate(m)
+			continue
+		}
+		if m.Get2("t") == "core_ok" {
+			if home, ok := m.Get2("core").(string); ok && home == n.home() {
+				n.a.db.Exec("UPDATE nodes SET core_ack = ? WHERE id = ?", home, nodeID)
+			}
 			continue
 		}
 		if m.Get2("t") == "res" && isInt(m.Get2("id")) {
@@ -598,7 +622,7 @@ func (n *Nodes) Start() {
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", n.port), Handler: mux, TLSConfig: n.tls, ReadHeaderTimeout: 15 * time.Second,
 		ErrorLog: quietLog()}
 	go func() {
-		ln, err := net.Listen("tcp", srv.Addr)
+		ln, err := listen(n.port)
 		if err != nil {
 			warnf("nodes: хаб не запущен: %v", err)
 			return
@@ -655,6 +679,16 @@ func (n *Nodes) Start() {
 // ── Роуты панели (/ui/nodes, за JWT) ────────────────────────────────────────
 
 func (n *Nodes) hubReady() bool { return n.port > 0 && n.tls != nil && n.pin != nil }
+
+// home — публичный адрес хаба, который он сообщает нодам в ready (агент звонит туда первым).
+// Из SUB_HOST: у панели один публичный адрес; не задан — нодам хватает адреса из join.
+func (n *Nodes) home() string {
+	host := strings.TrimSpace(os.Getenv("SUB_HOST"))
+	if host == "" || !n.hubReady() {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(n.port))
+}
 
 func (n *Nodes) joinString(host string, id int64, secret []byte) string {
 	b := jsjson.MustMarshal(jsjson.Object{{Key: "v", Val: 1}, {Key: "h", Val: host}, {Key: "p", Val: n.port},
@@ -732,7 +766,7 @@ func (s serverInfo) json() jsjson.Object {
 
 func (n *Nodes) idOf(c *Ctx) (int64, bool) {
 	f := jsToNumber(c.Params["id"])
-	return int64(f), f == float64(int64(f)) && f >= 1
+	return int64(f), f == float64(int64(f)) && (f >= 1 || f == 0 && !n.local)
 }
 
 func (n *Nodes) router() *Router {

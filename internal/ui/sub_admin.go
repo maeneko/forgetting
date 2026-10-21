@@ -210,6 +210,12 @@ func (s *Sub) createMaster(body any, scope []int) (jsjson.Object, error) {
 				list = append(list, float64(id))
 			}
 			src = list
+		} else if def := s.defaultServers(); def != nil {
+			list := []any{}
+			for _, id := range def {
+				list = append(list, float64(id))
+			}
+			src = list
 		} else {
 			src = []any{float64(s.a.nodes.DefaultID())}
 		}
@@ -281,37 +287,7 @@ func (s *Sub) updateMaster(m *masterRow, body any, scope []int) (jsjson.Object, 
 				removed = append(removed, x)
 			}
 		}
-		devices := s.devicesOf(s.a.db, m.ID)
-		if err := s.a.tx(func(tx *sql.Tx) error {
-			for _, sid := range removed {
-				if _, err := tx.Exec("DELETE FROM master_servers WHERE master_id = ? AND server_id = ?", m.ID, sid); err != nil {
-					return err
-				}
-				for _, d := range devices {
-					for _, l := range s.linksOf(tx, d.ID) {
-						if l.ServerID == sid && l.PeerPub.Valid {
-							if _, err := tx.Exec("INSERT OR IGNORE INTO peer_tombstones (server_id, pub_key) VALUES (?, ?)", sid, l.PeerPub.String); err != nil {
-								return err
-							}
-						}
-					}
-					if _, err := tx.Exec("DELETE FROM device_peers WHERE device_id = ? AND server_id = ?", d.ID, sid); err != nil {
-						return err
-					}
-				}
-			}
-			for _, sid := range added {
-				if _, err := tx.Exec("INSERT OR IGNORE INTO master_servers (master_id, server_id) VALUES (?, ?)", m.ID, sid); err != nil {
-					return err
-				}
-				for _, d := range devices {
-					if _, err := tx.Exec("INSERT OR IGNORE INTO device_peers (device_id, server_id) VALUES (?, ?)", d.ID, sid); err != nil {
-						return err
-					}
-				}
-			}
-			return nil
-		}); err != nil {
+		if err := s.a.tx(func(tx *sql.Tx) error { return s.moveServersTx(tx, m.ID, added, removed) }); err != nil {
 			return nil, err
 		}
 		affected = append(append(affected, added...), removed...)
@@ -337,6 +313,215 @@ func (s *Sub) updateMaster(m *masterRow, body any, scope []int) (jsjson.Object, 
 	s.reconcileAll(affected)
 	return jsjson.Object{{Key: "id", Val: m.ID}, {Key: "label", Val: nl}, {Key: "device_limit", Val: nd},
 		{Key: "servers", Val: intsJSON(ids)}, {Key: "unbound", Val: unbound}}, nil
+}
+
+// moveServersTx — ключ получает серверы added и теряет removed: пиры его устройств на снятых
+// серверах — в надгробия (их снимет reconcile), на добавленных — заявки без пира (заведёт он же).
+func (s *Sub) moveServersTx(tx *sql.Tx, masterID int64, added, removed []int) error {
+	devices := s.devicesOf(tx, masterID)
+	for _, sid := range removed {
+		if _, err := tx.Exec("DELETE FROM master_servers WHERE master_id = ? AND server_id = ?", masterID, sid); err != nil {
+			return err
+		}
+		for _, d := range devices {
+			for _, l := range s.linksOf(tx, d.ID) {
+				if l.ServerID == sid && l.PeerPub.Valid {
+					if _, err := tx.Exec("INSERT OR IGNORE INTO peer_tombstones (server_id, pub_key) VALUES (?, ?)", sid, l.PeerPub.String); err != nil {
+						return err
+					}
+				}
+			}
+			if _, err := tx.Exec("DELETE FROM device_peers WHERE device_id = ? AND server_id = ?", d.ID, sid); err != nil {
+				return err
+			}
+		}
+	}
+	for _, sid := range added {
+		if _, err := tx.Exec("INSERT OR IGNORE INTO master_servers (master_id, server_id) VALUES (?, ?)", masterID, sid); err != nil {
+			return err
+		}
+		for _, d := range devices {
+			if _, err := tx.Exec("INSERT OR IGNORE INTO device_peers (device_id, server_id) VALUES (?, ?)", d.ID, sid); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ── Общая настройка серверов ────────────────────────────────────────────────
+
+// defaultServers — серверы новых ключей панели (без явного набора), из настройки «Серверы для
+// всех»; nil — не задано или ни одного из них уже нет.
+func (s *Sub) defaultServers() []int {
+	var out []int
+	for _, v := range arr(s.metaGet("default_servers")) {
+		if isInt(v) && s.a.nodes.Exists(int(v.(float64))) {
+			out = append(out, int(v.(float64)))
+		}
+	}
+	return out
+}
+
+// bulkServers — один набор правок для всех живых ключей: add — у всех, remove — ни у кого,
+// остальные серверы каждого ключа не трогаются. dry — только посчитать. hidden — ключи API,
+// которые потеряют доступ к части ключей: ключ виден API-ключу, только пока все его серверы в
+// области (visible), и добавление сервера вне области его прячет.
+func (s *Sub) bulkServers(body any) (jsjson.Object, error) {
+	b, _ := body.(jsjson.Object)
+	ids := func(k string) ([]int, error) {
+		v, has := b.Get(k)
+		if !has || v == nil {
+			return nil, nil
+		}
+		if l, ok := v.([]any); ok && len(l) == 0 {
+			return nil, nil
+		}
+		out, ok := s.a.serverList(v, s.a.nodes.Exists)
+		if !ok {
+			return nil, fail(400, "Такого сервера нет")
+		}
+		return out, nil
+	}
+	add, err := ids("add")
+	if err != nil {
+		return nil, err
+	}
+	remove, err := ids("remove")
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range add {
+		if containsInt(remove, x) {
+			return nil, fail(400, "Сервер не может быть и у всех, и ни у кого")
+		}
+	}
+	defaults, hasDefaults := b.Get("defaults")
+	var defIDs []int
+	if hasDefaults && defaults != nil {
+		if defIDs, err = s.parseServers(defaults, nil); err != nil {
+			return nil, err
+		}
+	}
+
+	type change struct {
+		id             int64
+		added, removed []int
+		before, after  []int
+	}
+	var changes []change
+	var masters []int64
+	rows, err := s.a.db.Query("SELECT id FROM master_keys WHERE revoked_at IS NULL ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			masters = append(masters, id)
+		}
+	}
+	rows.Close()
+	empty := 0
+	for _, id := range masters {
+		cur := s.serverIDsOf(s.a.db, id)
+		c := change{id: id, before: cur}
+		for _, x := range cur {
+			if containsInt(remove, x) {
+				c.removed = append(c.removed, x)
+			} else {
+				c.after = append(c.after, x)
+			}
+		}
+		for _, x := range add {
+			if !containsInt(cur, x) {
+				c.added = append(c.added, x)
+				c.after = append(c.after, x)
+			}
+		}
+		if len(c.after) == 0 {
+			empty++
+		}
+		if len(c.added)+len(c.removed) > 0 {
+			changes = append(changes, c)
+		}
+	}
+	if empty > 0 {
+		return nil, fail(409, fmt.Sprintf("У %d ключей не останется ни одного сервера — оставьте им хотя бы один", empty))
+	}
+
+	// Области ключей API: id → серверы.
+	type apiKey struct {
+		label string
+		scope []int
+	}
+	keys := map[int64]*apiKey{}
+	var order []int64
+	if r, err := s.a.db.Query("SELECT k.id, k.label, ks.server_id FROM api_keys k LEFT JOIN api_key_servers ks ON ks.key_id = k.id ORDER BY k.id"); err == nil {
+		for r.Next() {
+			var id int64
+			var label string
+			var sid sql.NullInt64
+			if r.Scan(&id, &label, &sid) != nil {
+				continue
+			}
+			if keys[id] == nil {
+				keys[id] = &apiKey{label: label}
+				order = append(order, id)
+			}
+			if sid.Valid {
+				keys[id].scope = append(keys[id].scope, int(sid.Int64))
+			}
+		}
+		r.Close()
+	}
+	within := func(list, scope []int) bool {
+		for _, x := range list {
+			if !containsInt(scope, x) {
+				return false
+			}
+		}
+		return true
+	}
+	hidden := []any{}
+	for _, id := range order {
+		k, n := keys[id], 0
+		for _, c := range changes {
+			if within(c.before, k.scope) && !within(c.after, k.scope) {
+				n++
+			}
+		}
+		if n > 0 {
+			hidden = append(hidden, jsjson.Object{{Key: "id", Val: id}, {Key: "label", Val: k.label}, {Key: "keys", Val: n}})
+		}
+	}
+	out := jsjson.Object{{Key: "changed", Val: len(changes)}, {Key: "total", Val: len(masters)}, {Key: "hidden", Val: hidden}}
+	if b.Get2("dry_run") == true {
+		return out, nil
+	}
+
+	var affected []int
+	if err := s.a.tx(func(tx *sql.Tx) error {
+		for _, c := range changes {
+			if err := s.moveServersTx(tx, c.id, c.added, c.removed); err != nil {
+				return err
+			}
+			affected = append(append(affected, c.added...), c.removed...)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if hasDefaults {
+		if defIDs == nil {
+			s.a.db.Exec("DELETE FROM sub_meta WHERE key = 'default_servers'")
+		} else {
+			s.metaSet("default_servers", intsJSON(defIDs))
+		}
+	}
+	logf("masterkeys: серверы для всех — добавлены %v, сняты %v, ключей изменено: %d", add, remove, len(changes))
+	s.reconcileAll(affected)
+	return out, nil
 }
 
 // rotateMaster — новая ссылка; устройства продолжают работать: у них auth_pub, а не secret.
@@ -571,8 +756,18 @@ func (s *Sub) masterKeysRouter() *Router {
 	master := func(c *Ctx) (*masterRow, error) { return s.masterFor(s.masterIDOf(c.Params["id"]), nil) }
 
 	rt.Get("/", func(c *Ctx) bool {
-		return c.JSON(200, jsjson.Object{{Key: "enabled", Val: s.key() != nil}, {Key: "tls", Val: s.tlsPin != nil}, {Key: "keys", Val: s.listMasters(nil)}})
+		var defaults any
+		if d := s.defaultServers(); d != nil {
+			defaults = intsJSON(d)
+		}
+		return c.JSON(200, jsjson.Object{{Key: "enabled", Val: s.key() != nil}, {Key: "tls", Val: s.tlsPin != nil}, {Key: "keys", Val: s.listMasters(nil)},
+			{Key: "defaults", Val: defaults}})
 	})
+	// «Серверы для всех»: добавить/снять серверы у всех ключей разом и задать набор для новых.
+	rt.Post("/servers", aw(func(c *Ctx) (int, any, error) {
+		out, err := s.bulkServers(c.Body)
+		return 200, out, err
+	}))
 	// Аудит серверов (только core): отчёт, внеочередной проход, ручная очистка, настройки.
 	rt.Get("/audit", func(c *Ctx) bool { return c.JSON(200, s.auditState()) })
 	rt.Post("/audit", aw(func(c *Ctx) (int, any, error) {

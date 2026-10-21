@@ -1,4 +1,4 @@
-// awg-control — единый бинарник Forgetting: роли ctrl / ui / agent и команды оператора.
+// awg-control — единый бинарник Forgetting: роли ctrl / ui / agent / relay и команды оператора.
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"github.com/maeneko/forgetting/internal/agent"
 	"github.com/maeneko/forgetting/internal/cli"
 	"github.com/maeneko/forgetting/internal/ctrl"
+	"github.com/maeneko/forgetting/internal/relay"
 	"github.com/maeneko/forgetting/internal/ui"
 )
 
@@ -60,6 +61,13 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		a.Run(ctx)
+	case "relay":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := relay.Main(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	default:
 		cli.Main(os.Args[1:])
 	}

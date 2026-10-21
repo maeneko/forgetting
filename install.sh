@@ -702,8 +702,9 @@ parse_join() {
     CORE_PIN=$(sed -nE 's/.*"pin":"([A-Za-z0-9_-]{43})".*/\1/p'     <<< "$json")
     NODE_ID=$(sed -nE 's/.*"n":([0-9]+)[,}].*/\1/p'                  <<< "$json")
     JOIN_SECRET=$(sed -nE 's/.*"s":"([A-Za-z0-9_-]{22})".*/\1/p'    <<< "$json")
-    [[ -n "$CORE_HOST" && -n "$CORE_PIN" && -n "$JOIN_SECRET" ]] \
-        && (( CORE_PORT > 0 && CORE_PORT < 65536 && NODE_ID > 0 ))
+    # NODE_ID 0 — сервер, с которого переехала панель (awg-ctrl migrate import).
+    [[ -n "$CORE_HOST" && -n "$CORE_PIN" && -n "$JOIN_SECRET" && -n "$NODE_ID" ]] \
+        && (( CORE_PORT > 0 && CORE_PORT < 65536 && NODE_ID >= 0 ))
 }
 
 # SHA-256 от SPKI сертификата панели, base64url без «=» — в том же виде, что pin в строке.

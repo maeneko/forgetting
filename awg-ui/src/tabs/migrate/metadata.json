@@ -1,0 +1,11 @@
+{
+  "id": "migrate",
+  "label": "Перенос",
+  "icon": "move",
+  "group": "server",
+  "order": 1.9,
+  "chrome": {
+    "serverBar": false,
+    "restart": false
+  }
+}

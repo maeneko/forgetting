@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,6 +62,10 @@ func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
 	sec, sok := j.Get2("s").(string)
 	port, pok := isPosInt(j.Get2("p"), 65536)
 	id, iok := isPosInt(j.Get2("n"), 9007199254740992)
+	// Нода #0 — этот же сервер после переноса панели (`migrate import` выдаёт строку с n = 0).
+	if n, ok := j.Get2("n").(float64); ok && n == 0 {
+		id, iok = 0, true
+	}
 	if j.Get2("v") != 1.0 || !hok || !reJoinHost.MatchString(h) || !pok || !pinok || !reJoinPin.MatchString(pin) ||
 		!iok || !sok || !reJoinSec.MatchString(sec) {
 		errorf("  Ссылка неверного формата или от другой версии панели")
@@ -71,7 +76,8 @@ func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
 	}
 
 	hasPanel := os.Getenv("UI_PASS") != ""
-	keepPanel := !hasFlag && hasPanel
+	moved := c.panelMoved()
+	keepPanel := !hasFlag && hasPanel && !moved
 	content := c.readEnvFile()
 	np := "off"
 	if keepPanel {
@@ -81,11 +87,18 @@ func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
 		{"JOIN_SECRET", sec}, {"NODE_PANEL", np}} {
 		content = updateEnvVar(content, kv[0], kv[1])
 	}
+	content = removeEnvVar(content, "CORE_ENDPOINT") // адрес прежней панели к новой не относится
+	relay := ""
+	if moved {
+		relay = relayRoutes(h, port, j)
+		content = updateEnvVar(content, "RELAY", relay)
+	}
 	c.writeEnvFile(content)
 
 	// Панель останавливается, а пиры её устройств остаются на awg-ctrl — управлять ими больше
 	// некому. Решает оператор; спрашиваем до остановки, снимаем после (иначе панель вернёт их).
-	dropPeers := !keepPanel && hasPanel && c.askDropPanelPeers()
+	// После переноса этими пирами управляет новая панель: снимать нечего.
+	dropPeers := !keepPanel && hasPanel && !moved && c.askDropPanelPeers()
 	if !keepPanel {
 		c.stop("ui")
 	}
@@ -99,7 +112,33 @@ func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
 		tail = " · своя панель остановлена"
 	}
 	fmt.Printf("\n  %s Настроено: core %s:%d, нода #%d%s\n", green("✓"), h, port, id, tail)
+	if relay != "" {
+		fmt.Println("  " + dim("Ретранслятор прежних портов на новую панель: "+relay))
+	}
 	c.restartFresh()
+}
+
+// relayRoutes — прежние порты этого сервера → новая панель. Подписка и хаб там на тех же
+// портах (так их ставит `migrate import`), порт панели — из поля ui join-строки.
+func relayRoutes(host string, hubPort int64, j jsjson.Object) string {
+	hp := func(p any) string { return net.JoinHostPort(host, fmt.Sprint(p)) }
+	var routes []string
+	add := func(local int, target string) {
+		if local > 0 {
+			routes = append(routes, fmt.Sprintf("%d=%s", local, target))
+		}
+	}
+	sub := envPort("SUB_PORT")
+	if p, ok := isPosInt(j.Get2("sub"), 65536); ok {
+		add(sub, hp(p))
+	} else {
+		add(sub, hp(sub))
+	}
+	add(envPort("NODE_PORT"), hp(hubPort))
+	if p, ok := isPosInt(j.Get2("ui"), 65536); ok {
+		add(envPort("UI_PORT"), hp(p))
+	}
+	return strings.Join(routes, ",")
 }
 
 func (c *CLI) unjoinCore() {
@@ -109,7 +148,7 @@ func (c *CLI) unjoinCore() {
 	}
 	c.stop("agent")
 	content := c.readEnvFile()
-	for _, k := range []string{"CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET", "NODE_PANEL"} {
+	for _, k := range []string{"CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET", "NODE_PANEL", "CORE_ENDPOINT"} {
 		content = removeEnvVar(content, k)
 	}
 	c.writeEnvFile(content)

@@ -198,8 +198,9 @@ base64url-декодировать, отбросить первые 4 байта
 
 | Метод | Что делает |
 |---|---|
-| `GET /ui/masterkeys` | `{ enabled, tls, keys: [{ id, uuid, label, device_limit, devices, servers, created_at, deleting? }] }`; `:id` в путях — id или `uuid` |
-| `POST /ui/masterkeys` | `{ label, device_limit?, servers? }` → `201` |
+| `GET /ui/masterkeys` | `{ enabled, tls, keys: [{ id, uuid, label, device_limit, devices, servers, created_at, deleting? }], defaults }`; `:id` в путях — id или `uuid`; `defaults` — серверы новых ключей или `null` |
+| `POST /ui/masterkeys` | `{ label, device_limit?, servers? }` → `201`; без `servers` — `defaults`, а нет их — сервер по умолчанию |
+| `POST /ui/masterkeys/servers` | «Серверы для всех»: `{ add?, remove?, defaults?, dry_run? }` — `add` появляются у всех живых ключей, `remove` снимаются у всех, прочие серверы ключей не трогаются; `defaults` (`null` — сбросить) — набор новых ключей. → `{ changed, total, hidden: [{ id, label, keys }] }`, `hidden` — ключи API, которые перестанут видеть столько мастер-ключей (сервер вне их области). `409`, если у ключа не останется серверов |
 | `PATCH /ui/masterkeys/:id` | `{ label?, device_limit?, servers? }` |
 | `GET /ui/masterkeys/:id/link` | `{ link, tls }` — ссылка `sen://…` |
 | `GET /ui/masterkeys/:id/devices` | Устройства со статусом и трафиком |
@@ -211,7 +212,14 @@ base64url-декодировать, отбросить первые 4 байта
 ## Управление
 
 ```bash
-awg-ctrl 
+awg-ctrl                                  # меню
+awg-ctrl start|stop|restart|status
+awg-ctrl credentials [user|pass]
+awg-ctrl join '<awgjoin://…>' [--no-panel] / unjoin
+awg-ctrl rehome <хост[:порт]>             # нода: панель переехала на новый адрес
+awg-ctrl migrate export [файл]            # перенос панели на отдельный сервер без VPN
+awg-ctrl migrate import <архив>           #   (порядок — docs/node-protocol.md, «Перенос панели»)
+awg-ctrl migrate cancel
 ```
 
 Через systemd (автозапуск на загрузке):

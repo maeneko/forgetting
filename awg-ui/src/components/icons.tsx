@@ -102,9 +102,16 @@ export const IcoPulse = () => (
     </svg>
 );
 
+export const IcoMove = () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="4" width="8" height="16" rx="2"/><rect x="14" y="4" width="8" height="16" rx="2"/><path d="M7 12h10"/><path d="m14 9 3 3-3 3"/>
+    </svg>
+);
+
 export const ICONS: Record<string, () => JSX.Element> = {
     users: IcoUsers,
     key:   IcoKey,
     shield: IcoShield,
     pulse:  IcoPulse,
+    move:   IcoMove,
 };

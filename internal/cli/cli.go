@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maeneko/forgetting/internal/envfile"
 	"github.com/maeneko/forgetting/internal/jsjson"
 )
 
@@ -181,6 +182,12 @@ func New() *CLI {
 				{"SUB_HOST", env("SUB_HOST", "")},
 				// Приём нод (core): без NODE_PORT хаб выключен. LOCAL_NODE=off — core без своего VPN.
 				{"NODE_PORT", env("NODE_PORT", "")},
+				// IP ретрансляторов (старый сервер после переноса): им — доверие к заголовку PROXY.
+				{"RELAY_FROM", env("RELAY_FROM", "")},
+				// Когда панель приняла перенос: с этого момента считаются клиенты, узнавшие новый адрес.
+				{"MOVED_IN_AT", env("MOVED_IN_AT", "")},
+				// Вкладка «Перенос» пишет сюда порты, PANEL_MOVED и RELAY_FROM.
+				{"CLI_ENV_FILE", cliEnv},
 				// Часовой аудит пиров на всех серверах — только у core.
 				{"AUDIT", audit},
 				{"METRICS_PEERS", env("METRICS_PEERS", "off")},
@@ -196,6 +203,7 @@ func New() *CLI {
 			env: [][2]string{
 				{"CORE_HOST", env("CORE_HOST", "")},
 				{"CORE_PORT", env("CORE_PORT", "")},
+				{"CORE_ENDPOINT", env("CORE_ENDPOINT", "")},
 				{"CORE_PIN", env("CORE_PIN", "")},
 				{"NODE_ID", env("NODE_ID", "")},
 				{"NODE_KEY_FILE", env("NODE_KEY_FILE", "/etc/amnezia/amneziawg/node.key")},
@@ -205,6 +213,12 @@ func New() *CLI {
 				{"INTERNAL_AUTH_KEY_FILE", env("INTERNAL_AUTH_KEY_FILE", "/etc/amnezia/amneziawg/internal_auth_private.key")},
 			},
 			pidFile: "/tmp/awg-agent.pid", logFile: filepath.Join(c.logs, "awg-agent.log"),
+		},
+		// Ретранслятор на сервере, с которого переехала панель: прежние порты → новая панель.
+		"relay": {
+			name: "relay", label: "awg-relay", cwd: c.root,
+			env:     [][2]string{{"RELAY", env("RELAY", "")}},
+			pidFile: "/tmp/awg-relay.pid", logFile: filepath.Join(c.logs, "awg-relay.log"),
 		},
 	}
 
@@ -224,7 +238,27 @@ func New() *CLI {
 	default:
 		c.all = []string{"awgctrl", "ui"}
 	}
+	// Панель переехала (`migrate export`): здесь её больше не запускаем — вторая копия ui.db
+	// разошлась бы с перенесённой.
+	if c.panelMoved() {
+		c.all = without(c.all, "ui")
+	}
+	if os.Getenv("RELAY") != "" {
+		c.all = append(c.all, "relay")
+	}
 	return c
+}
+
+func (c *CLI) panelMoved() bool { return strings.ToLower(os.Getenv("PANEL_MOVED")) == "on" }
+
+func without(s []string, v string) []string {
+	var out []string
+	for _, x := range s {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 func (c *CLI) envOf(name string) string {
@@ -284,6 +318,9 @@ func (c *CLI) pidMatches(name string, pid int) bool {
 	s := c.svc[name]
 	if len(args) >= 2 && filepath.Base(args[0]) == filepath.Base(c.exe) && args[1] == s.name {
 		return true
+	}
+	if s.legacy == "" {
+		return false
 	}
 	// tsx запускается из node_modules сервиса: путь различает index.ts awg-ctrl и awg-agent.
 	return strings.Contains(string(raw), s.legacy) && strings.Contains(string(raw), filepath.Base(s.cwd))
@@ -476,10 +513,14 @@ func (c *CLI) startAll() {
 		}
 		return
 	}
+	// Ретранслятор от awg-ctrl не зависит: подписка и панель через него не должны ждать VPN.
+	if contains(c.all, "relay") {
+		c.start("relay")
+	}
 	c.start("awgctrl")
 	var rest, labels []string
 	for _, n := range c.all {
-		if n != "awgctrl" {
+		if n != "awgctrl" && n != "relay" {
 			rest = append(rest, n)
 			labels = append(labels, c.svc[n].label)
 		}
@@ -515,23 +556,9 @@ func contains(s []string, v string) bool {
 
 // ── cli.env ─────────────────────────────────────────────────────────────────
 
-func updateEnvVar(content, key, value string) string {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=.*$`)
-	if loc := re.FindStringIndex(content); loc != nil {
-		return content[:loc[0]] + key + "=" + value + content[loc[1]:]
-	}
-	return strings.TrimRightFunc(content, func(r rune) bool { return r == ' ' || r == '\n' || r == '\t' || r == '\r' }) + "\n" + key + "=" + value + "\n"
-}
+func updateEnvVar(content, key, value string) string { return envfile.Update(content, key, value) }
 
-func removeEnvVar(content, key string) string {
-	var kept []string
-	for _, l := range strings.Split(content, "\n") {
-		if !strings.HasPrefix(l, key+"=") {
-			kept = append(kept, l)
-		}
-	}
-	return strings.Join(kept, "\n")
-}
+func removeEnvVar(content, key string) string { return envfile.Remove(content, key) }
 
 func (c *CLI) readEnvFile() string {
 	raw, _ := os.ReadFile(c.envFile)
@@ -568,10 +595,10 @@ func (c *CLI) confirmYes(q string) bool {
 
 // ── Точка входа ─────────────────────────────────────────────────────────────
 
-const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|peers [drop <область>]|monitor <install|status|remove>>"
+const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>>"
 
 // Commands — команды оператора; main передаёт сюда всё, что не роль сервиса.
-var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "peers", "monitor"}
+var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate"}
 
 // Main выполняет команду CLI (args — без имени бинарника). Пусто — интерактивное меню.
 func Main(args []string) {
@@ -608,6 +635,10 @@ func Main(args []string) {
 		c.joinCore(sub, hasSub, a2, hasA2)
 	case "unjoin":
 		c.unjoinCore()
+	case "rehome":
+		c.rehome(sub, hasSub)
+	case "migrate":
+		c.migrateCmd(sub, a2, hasA2)
 	case "peers":
 		c.peersCmd(sub, hasSub, a2, hasA2)
 	case "monitor":

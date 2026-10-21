@@ -1,13 +1,14 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
+import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import QRCode from 'qrcode';
 import { apiFetch, copyText, bytes, timeAgo, getServerId, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings, IcoGlobe } from '../../components/icons';
 import ServerPicker, { serverName } from '../../components/ServerPicker';
 import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
+import BulkServersModal from './BulkServersModal';
 import './masterkeys.css';
 
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
@@ -66,6 +67,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const loadSeq = useRef(0);       // номер последней загрузки: ответ более старой отбрасывается
     const creatingRef = useRef(false);
     const [modal, setModal]     = useState<{ label: string; link: string; tls: boolean; dataUrl: string } | null>(null);
+    const [defaults, setDefaults] = useState<number[] | null>(null);   // серверы новых ключей из «Серверы для всех»
+    const [bulk, setBulk]       = useState(false);
 
     const load = useCallback(async () => {
         const seq = ++loadSeq.current;
@@ -73,7 +76,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
             const d = await apiFetch('GET', '/ui/masterkeys', token);
             const list: MasterKey[] = d.keys ?? [];
             if (seq !== loadSeq.current) return;
-            setKeys(list); setEnabled(!!d.enabled); setTls(!!d.tls);
+            setKeys(list); setEnabled(!!d.enabled); setTls(!!d.tls); setDefaults(d.defaults ?? null);
             apiFetch('GET', '/ui/nodes', token).then(r => setNodes(r.nodes ?? [])).catch(() => {});
             // Каждый ключ грузится сам по себе: сбой одного не должен прятать устройства остальных.
             const live = list.filter(k => !k.deleting);
@@ -106,15 +109,17 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         if (!label.trim() || creatingRef.current) return;
         creatingRef.current = true; setCreating(true);
         try { await act(async () => {
-            // Новый ключ отдаёт все серверы, которые уже подключались; набор потом правится в настройках ключа.
+            // Новый ключ — с серверами из «Серверы для всех» (их подставит панель), а не задано — со всеми,
+            // которые уже подключались; набор потом правится в настройках ключа.
             const ready = nodes.filter(n => !n.pending).map(n => n.id);
             await apiFetch('POST', '/ui/masterkeys', token, {
-                label: label.trim(), device_limit: Number(limit), ...(ready.length ? { servers: ready } : {}),
+                label: label.trim(), device_limit: Number(limit), ...(!defaults && ready.length ? { servers: ready } : {}),
             });
             setLabel('');
         }, 'Мастер-ключ создан'); }
         finally { creatingRef.current = false; setCreating(false); }
-    }, [label, limit, nodes, token, act]);
+    }, [label, limit, nodes, defaults, token, act]);
+    const live = useMemo(() => keys.filter(k => !k.deleting), [keys]);
 
     const serverNames = useCallback((ids: number[]) => ids.map(id => serverName(nodes, id)).join(', '), [nodes]);
 
@@ -403,6 +408,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                     aria-label="Лимит устройств" value={limit} onChange={e => setLimit(e.target.value)} />
                 <div className="toolbar-btns">
                     <button className="btn btn--primary" onClick={create} disabled={creating}><IcoPlus /> Создать ключ</button>
+                    <button className="btn btn--tonal" onClick={() => setBulk(true)} disabled={!live.length || !nodes.length}
+                        title="Добавить или убрать серверы у всех мастер-ключей сразу"><IcoSettings /> Серверы для всех</button>
                 </div>
             </div>
 
@@ -516,6 +523,11 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                         );
                     })}
                 </ul>
+            )}
+
+            {bulk && (
+                <BulkServersModal token={token} nodes={nodes} keys={live} defaults={defaults} onClose={() => setBulk(false)}
+                    onDone={n => { setBulk(false); showMsg(n ? `Серверы обновлены у ${n} ключей` : 'Сохранено'); load(); }} />
             )}
 
             {modal && (

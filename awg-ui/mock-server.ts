@@ -53,7 +53,9 @@ interface Dev { id: number; device_id: string; device_name: string; platform: st
 interface MK { id: number; uuid: string; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
 let mkId = 1, devId = 1;
 const dev = (name: string, platform: string, online: boolean, version = "0.6.5"): Dev => ({ id: devId++, device_id: crypto.randomUUID(), device_name: name, platform, version, created_at: now() - 86400, last_seen: now() - rnd(900), rekey_requested: false, online, lastHandshake: now() - rnd(300), rx: rnd(9e8), tx: rnd(3e8) });
-const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 3, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1] }];
+const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 3, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1] },
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Офис", device_limit: 5, created_at: now() - 86400, secret: crypto.randomBytes(16), devs: [], servers: [0] },
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Друзья", device_limit: 3, created_at: now() - 3600, secret: crypto.randomBytes(16), devs: [], servers: [1] }];
 const signPub = crypto.randomBytes(32);
 const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
 // Мок: устройство «догнано» на всех серверах ключа, кроме Tokyo (id 2 — ещё не подключалась).
@@ -121,6 +123,50 @@ app.get("/ui/monitor", (_q, r) => {
 for (const action of ["install", "remove"] as const) {
     app.post(`/ui/monitor/${action}`, (_q, r) => { if (!monRunning()) monJob = { action, start: Date.now() }; r.status(202).json({ running: true, action }); });
 }
+// Перенос панели (internal/ui/migrate.go). Мок — standalone: переносить можно, принимать нельзя;
+// MOCK_ROLE=core — наоборот (код «принимается» через 10 с, ещё через 10 с — «перезапуск»);
+// MOCK_ROLE=retire — панель уже приняла перенос: готовность к отключению старого сервера.
+const MOCK_CORE = process.env.MOCK_ROLE === "core" || process.env.MOCK_ROLE === "retire";
+let mv: { state: string; error: string | null; target: string | null; code: { code: string; at: number } | null; movedAt: number } =
+    { state: "", error: null, target: null, code: null, movedAt: process.env.MOCK_ROLE === "retire" ? Date.now() : 0 };
+const mvRetire = () => {
+    if (!mv.movedAt) return null;
+    const t = (Date.now() - mv.movedAt) / 1000;           // клиенты и ноды «узнают» адрес со временем
+    return { since: Math.floor(mv.movedAt / 1000), home: "198.51.100.20:40500",
+        old: { exists: true, online: true },
+        devices: { total: 12, fresh: Math.min(12, 7 + Math.floor(t / 15)) }, unused_links: 1,
+        nodes: [{ id: 1, name: "Frankfurt", online: true, ok: true }, { id: 2, name: "Tokyo", online: false, ok: false },
+                { id: 4, name: "Amsterdam", online: true, ok: t > 20 }] };
+};
+const mvView = () => {
+    if (mv.code && Date.now() - mv.code.at > 10000) mv = { ...mv, state: "imported", code: null, movedAt: Date.now() };
+    if (mv.state === "imported" && Date.now() - mv.movedAt > 10000) mv = { ...mv, state: "" };
+    return { state: mv.state, error: mv.error, target: mv.target,
+        code: mv.code && { code: mv.code.code, expires_in: 3600 - Math.floor((Date.now() - mv.code.at) / 1000) },
+        ...(mv.state === "imported" ? {} : {
+            export: MOCK_CORE ? "У этой панели нет своего VPN: переносить её как сервер-ноду нечего" : null,
+            accept: !MOCK_CORE ? "У этой панели свой VPN. Принять перенос может только панель без VPN: install.sh, роль «только панель»"
+                : mv.movedAt ? "На панели уже есть серверы, мастер-ключи или ключи API — принять перенос можно только на чистую" : null,
+            retire: mvRetire() }) };
+};
+app.get("/ui/migrate", (_q, r) => r.json(mvView()));
+app.post("/ui/migrate/code", (q, r) => {
+    if (!MOCK_CORE) return r.status(409).json({ error: "У этой панели свой VPN" });
+    mv.code = { code: "awgmove://" + Buffer.from(JSON.stringify({ v: 1, h: q.body?.host ?? "127.0.0.1", p: 8080, k: "mock" })).toString("base64url"), at: Date.now() };
+    r.json(mvView());
+});
+app.delete("/ui/migrate/code", (_q, r) => { mv.code = null; r.json(mvView()); });
+app.post("/ui/migrate/export", (q, r) => {
+    const code = String(q.body?.code ?? "");
+    setTimeout(() => {
+        if (!code.startsWith("awgmove://ey")) return r.status(400).json({ error: "код переноса неверного формата — скопируйте его целиком со вкладки «Перенос» новой панели" });
+        mv = { ...mv, state: "moved", target: "http://198.51.100.20:31337" };
+        r.json({ ok: true, target: mv.target });
+    }, 1500);
+});
+app.post("/ui/migrate/cancel", (_q, r) => { mv = { ...mv, state: "", error: null }; r.json(mvView()); });
+app.delete("/ui/migrate/retire", (_q, r) => { mv.movedAt = 0; r.json(mvView()); });
+
 app.get("/ui/monitor/overview", (q, r) => {
     const R: Record<string, [number, number]> = { "1h": [3600, 15], "6h": [21600, 60], "24h": [86400, 300], "7d": [604800, 1800], "30d": [2592000, 7200] };
     const [sec, step] = R[String(q.query.range ?? "1h")] ?? R["1h"];
@@ -248,11 +294,25 @@ app.post("/ui/masterkeys/audit/clean", (_q, r) => {
     mockGhost = false; r.json(mockAudit());
 });
 app.put("/ui/masterkeys/audit/settings", (q, r) => { mockAuditSettings = { ...mockAuditSettings, ...q.body }; r.json(mockAudit()); });
-app.get("/ui/masterkeys", (_q, r) => r.json({ enabled: true, tls: false, keys: masters.map(mkOut) }));
+let mkDefaults: number[] | null = null;
+app.get("/ui/masterkeys", (_q, r) => r.json({ enabled: true, tls: false, keys: masters.map(mkOut), defaults: mkDefaults }));
+// «Серверы для всех» (sub_admin.go bulkServers): add — у всех, remove — ни у кого.
+app.post("/ui/masterkeys/servers", (q, r) => {
+    const add: number[] = q.body.add ?? [], remove: number[] = q.body.remove ?? [];
+    if (add.some(x => remove.includes(x))) return r.status(400).json({ error: "Сервер не может быть и у всех, и ни у кого" });
+    const next = masters.map(m => ({ m, s: [...new Set([...m.servers.filter(x => !remove.includes(x)), ...add])].sort() }));
+    const empty = next.filter(x => !x.s.length).length;
+    if (empty) return r.status(409).json({ error: `У ${empty} ключей не останется ни одного сервера — оставьте им хотя бы один` });
+    const changed = next.filter(x => x.s.join() !== [...x.m.servers].sort().join());
+    const within = (l: number[], sc: number[]) => l.every(x => sc.includes(x));
+    const hidden = apiKeys.map(k => ({ id: k.id, label: k.label, keys: changed.filter(x => within(x.m.servers, k.servers) && !within(x.s, k.servers)).length })).filter(h => h.keys);
+    if (!q.body.dry_run) { changed.forEach(x => { x.m.servers = x.s; }); if ("defaults" in q.body) mkDefaults = q.body.defaults; }
+    r.json({ changed: changed.length, total: masters.length, hidden });
+});
 app.post("/ui/masterkeys", (q, r) => {
     const limit = q.body.device_limit ?? 3;
     if (!q.body.label || !Number.isInteger(limit) || limit < 1 || limit > 100) return r.status(400).json({ error: "Неверные параметры" });
-    const m: MK = { id: mkId++, uuid: crypto.randomUUID(), label: q.body.label, device_limit: limit, created_at: now(), secret: crypto.randomBytes(16), devs: [], servers: q.body.servers ?? [0] };
+    const m: MK = { id: mkId++, uuid: crypto.randomUUID(), label: q.body.label, device_limit: limit, created_at: now(), secret: crypto.randomBytes(16), devs: [], servers: q.body.servers ?? mkDefaults ?? [0] };
     masters.push(m); r.status(201).json(mkOut(m));
 });
 app.patch("/ui/masterkeys/:id", (q, r) => {
