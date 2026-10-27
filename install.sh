@@ -149,7 +149,7 @@ NODE_TLS_KEY="$AWG_DIR/node_tls.key"
 NODE_TLS_CRT="$AWG_DIR/node_tls.crt"
 NODE_KEY_FILE="$AWG_DIR/node.key"
 IFACE="awg1"
-AWG_PORT="47619"
+AWG_PORT="${AWG_PORT:-}"   # UDP для клиентов; пусто — выбирает choose_awg_params
 SUBNET="10.9"
 MTU="1376"
 
@@ -357,27 +357,92 @@ fi
 DB_EXISTS="n"
 [[ -f "$DB_FILE" ]] && DB_EXISTS="y"
 
-# TODO: рандомизировать параметры обфускации при установке.
-#   awg-ctrl уже читает их из [Interface] awg1.conf (readAwgParams), поэтому
-#   достаточно генерировать случайные значения здесь — править awg-ctrl не нужно.
-#   Ограничения, которые обязан соблюсти генератор:
-#     - Jc: 3–10 (больше — лишний трафик); Jmin < Jmax, оба < MTU
-#     - S1, S2: < ~150, в части версий S1 != S2
-#     - S1–S4: при заданном HeaderProtectionKey (AmneziaWG 3.x) НИ ОДНО из них
-#       не может быть меньше 12 (HEADER_PROTECTION_NONCE_SIZE). Модуль на
-#       нарушение отвечает только «Invalid argument», причина видна лишь при
-#       `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`
-#     - H1–H4: уникальны между собой, НЕ равны 1/2/3/4 (зарезервированные
-#       типы сообщений WireGuard), большие uint32 без пересечений
-#     - I1–I5 НЕ трогать: сейчас уходят в vpn:// ключ пустыми плейсхолдерами
-#   Параметры фиксируются на весь срок жизни сервера: при KEEP_DATA=y их
-#   менять нельзя (иначе все ранее выданные vpn:// ключи станут невалидными).
-JC=6; JMIN=10; JMAX=50
-S1=90; S2=45; S3=37; S4=14
-H1="1224800044-2116730834"
-H2="2122053282-2133204808"
-H3="2133604274-2140756116"
-H4="2143656228-2147444225"
+# Параметры обфускации и UDP-порт AWG. На новой установке — случайные, у каждого сервера
+# свои: известные всем значения по умолчанию — готовая сигнатура для блокировки. При KEEP_DATA=y
+# берутся из прежнего awg1.conf (choose_awg_params ниже): они зашиты во все выданные vpn://
+# ключи, их смена сделала бы каждый ключ невалидным.
+# Ограничения генератора (gen_awg_params):
+#   - Jc 4–8; Jmin < Jmax, оба много меньше MTU
+#   - S1–S4 ≥ 12: при HeaderProtectionKey (AmneziaWG 3.x) меньшее модуль отвергает с одним
+#     «Invalid argument» (причина видна лишь при
+#     `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`)
+#   - размеры пакетов после добавки разные: 148+S1 (init), 92+S2 (response), 64+S3 (cookie) —
+#     иначе тип пакета снова узнаётся по длине; отсюда же S1 != S2 и S2 != S1+56
+#   - S4 добавляется к каждому пакету данных — держим маленьким, как прежние 14
+#   - H1–H4: непересекающиеся диапазоны в [10^8, 2^31−1] — далеко от 1–4 (типы сообщений
+#     WireGuard) и не выше прежних значений (некоторые клиенты разбирают их как int32)
+#   - I1–I5 НЕ трогать: в vpn:// ключ уходят пустыми плейсхолдерами
+# Прежние постоянные значения: ими собраны ключи установок до рандомизации — нужны, если
+# при KEEP_DATA=y awg1.conf потерялся.
+LEGACY_AWG_PORT="47619"
+LEGACY_JC=6; LEGACY_JMIN=10; LEGACY_JMAX=50
+LEGACY_S1=90; LEGACY_S2=45; LEGACY_S3=37; LEGACY_S4=14
+LEGACY_H1="1224800044-2116730834"
+LEGACY_H2="2122053282-2133204808"
+LEGACY_H3="2133604274-2140756116"
+LEGACY_H4="2143656228-2147444225"
+
+rand_int() { shuf -i "$1-$2" -n 1; }
+
+gen_awg_params() {
+    JC=$(rand_int 4 8)
+    JMIN=$(rand_int 8 40)
+    JMAX=$(( JMIN + $(rand_int 20 80) ))
+    while :; do
+        S1=$(rand_int 15 150); S2=$(rand_int 15 150); S3=$(rand_int 15 60)
+        local a=$(( 148 + S1 )) b=$(( 92 + S2 )) c=$(( 64 + S3 ))
+        [[ "$S1" != "$S2" && "$a" != "$b" && "$a" != "$c" && "$b" != "$c" ]] && break
+    done
+    S4=$(rand_int 12 20)
+    # 8 разных чисел по возрастанию → 4 непересекающихся диапазона, раздаём H1–H4 вперемешку.
+    local n r
+    n=($(shuf -i 100000000-2147483647 -n 8 | sort -n))
+    r=($(printf '%s\n' "${n[0]}-${n[1]}" "${n[2]}-${n[3]}" "${n[4]}-${n[5]}" "${n[6]}-${n[7]}" | shuf))
+    H1=${r[0]}; H2=${r[1]}; H3=${r[2]}; H4=${r[3]}
+}
+
+legacy_awg_params() {
+    JC=$LEGACY_JC; JMIN=$LEGACY_JMIN; JMAX=$LEGACY_JMAX
+    S1=$LEGACY_S1; S2=$LEGACY_S2; S3=$LEGACY_S3; S4=$LEGACY_S4
+    H1=$LEGACY_H1; H2=$LEGACY_H2; H3=$LEGACY_H3; H4=$LEGACY_H4
+}
+
+# Случайный UDP-порт, который никто на сервере не слушает.
+gen_awg_port() {
+    local p
+    while :; do
+        p=$(rand_int 20000 59999)
+        [[ -z "$(ss -Hulnp "sport = :$p" 2>/dev/null)" ]] && { echo "$p"; return; }
+    done
+}
+
+# Порт и обфускация: при KEEP_DATA=y — из прежнего awg1.conf (все J/S/H разом или ни одного:
+# смешивать с новыми нельзя), иначе случайные. AWG_PORT из окружения важнее всего.
+choose_awg_params() {
+    local k prev_port=""
+    # || true: без файла sed падает, а с pipefail и set -e это молча роняло бы установку.
+    conf_val() { sed -n "s/^$1 *= *//p" "$AWG_CONF" 2>/dev/null | head -1 || true; }
+    if [[ "$KEEP_DATA" == "y" ]]; then
+        JC=$(conf_val Jc); JMIN=$(conf_val Jmin); JMAX=$(conf_val Jmax)
+        S1=$(conf_val S1); S2=$(conf_val S2); S3=$(conf_val S3); S4=$(conf_val S4)
+        H1=$(conf_val H1); H2=$(conf_val H2); H3=$(conf_val H3); H4=$(conf_val H4)
+        for k in "$JC" "$JMIN" "$JMAX" "$S1" "$S2" "$S3" "$S4" "$H1" "$H2" "$H3" "$H4"; do
+            if [[ -z "$k" ]]; then
+                legacy_awg_params
+                warn "Параметры обфускации не прочитаны из $AWG_CONF — взяты прежние постоянные"
+                break
+            fi
+        done
+        prev_port=$(conf_val ListenPort)
+        [[ -z "$prev_port" ]] && prev_port=$(prev_val SERVER_PORT)
+        AWG_PORT="${AWG_PORT:-${prev_port:-$LEGACY_AWG_PORT}}"
+    else
+        gen_awg_params
+        AWG_PORT="${AWG_PORT:-$(gen_awg_port)}"
+    fi
+    [[ "$AWG_PORT" =~ ^[0-9]+$ && "$AWG_PORT" -gt 0 && "$AWG_PORT" -lt 65536 ]] \
+        || fail "AWG_PORT «${AWG_PORT}» — не номер порта"
+}
 
 # Поколение протокола и закрепление версии пакета — управляются переменными
 # окружения, задаются ДО запуска: `AWG_GEN=auto bash install.sh`.
@@ -685,6 +750,8 @@ if [[ "$ROLE" != "node" ]]; then
         done
     fi
 fi
+
+[[ "$ROLE" != "core" ]] && choose_awg_params
 
 # Нода: к какой панели подключаться. Строку awgjoin://… даёт панель («Добавить сервер»):
 # base64url от JSON {v, h, p, pin, n, s}. Разбираем здесь, до установки, чтобы опечатка не
@@ -1282,29 +1349,65 @@ else
     ok "AmneziaWG $GEN_LABEL · модуль ${MOD_VER:-?} · tools ${TOOLS_VER:-?}$([[ "$AWG_PIN" == "y" ]] && echo " · версия закреплена")"
 fi
 
-# UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
-# цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT
-# дело не доходит и трафик клиентов наружу режется: в dmesg сыплется
-# «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
-# Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
+# Порты, которые должны быть доступны снаружи. Нода открывает только UDP для клиентов: к панели
+# она подключается сама.
+OPEN_PORTS=()
+[[ "$ROLE" != "core" ]] && OPEN_PORTS+=("${AWG_PORT}/udp")
+[[ "$ROLE" != "node" ]] && OPEN_PORTS+=("${UI_PORT}/tcp" "${SUB_PORT}/tcp")
+[[ "$ROLE" != "node" && -n "$NODE_PORT" ]] && OPEN_PORTS+=("${NODE_PORT}/tcp")
+
+# Закрывает ли голый iptables входящие: политика DROP или правило DROP/REJECT в INPUT.
+iptables_input_closed() {
+    command -v iptables &>/dev/null || return 1
+    iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP|^-A INPUT .*-j (DROP|REJECT)'
+}
+
+# Фаервол на самом сервере. Фаервол хостера (панель провайдера, security group) отсюда не
+# виден — о нём напоминаем в итоге установки.
 if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    # UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
+    # цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT
+    # дело не доходит и трафик клиентов наружу режется: в dmesg сыплется
+    # «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
+    # Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
     info "UFW активен, открываем $([[ "$ROLE" != "core" ]] && echo "маршрут и ")порты"
-    UFW_OPEN=()
     if [[ "$ROLE" != "core" ]]; then
         run ufw route allow in on "$IFACE" out on "$NET_IFACE" \
             || warn "ufw route allow не сработал — трафик клиентов может резаться"
-        UFW_OPEN+=("${AWG_PORT}/udp")
     fi
-    # Нода наружу открывает только UDP для клиентов: к панели она подключается сама.
-    [[ "$ROLE" != "node" ]] && UFW_OPEN+=("${UI_PORT}/tcp" "${SUB_PORT}/tcp")
-    [[ "$ROLE" != "node" && -n "$NODE_PORT" ]] && UFW_OPEN+=("${NODE_PORT}/tcp")
-    for P in "${UFW_OPEN[@]}"; do
+    for P in "${OPEN_PORTS[@]}"; do
         run ufw allow "$P" || warn "не удалось открыть $P"
     done
     run ufw reload || true
-    ok "UFW:$([[ "$ROLE" != "core" ]] && echo " форвардинг $IFACE → $NET_IFACE,") порты ${UFW_OPEN[*]}"
+    ok "UFW:$([[ "$ROLE" != "core" ]] && echo " форвардинг $IFACE → $NET_IFACE,") порты ${OPEN_PORTS[*]}"
+elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+    info "firewalld активен, открываем порты"
+    for P in "${OPEN_PORTS[@]}"; do
+        run firewall-cmd --permanent --add-port="$P" || warn "не удалось открыть $P"
+    done
+    run firewall-cmd --reload || true
+    ok "firewalld: порты ${OPEN_PORTS[*]}"
+    if [[ "$ROLE" != "core" ]]; then
+        warn "Если VPN подключается, а интернета нет — firewalld режет форвардинг:"
+        warn "  firewall-cmd --permanent --zone=trusted --add-interface=${IFACE} && firewall-cmd --reload"
+    fi
+elif iptables_input_closed; then
+    # Голый iptables без обёрток: вставляем ACCEPT в начало INPUT (повторно не дублируем).
+    info "iptables закрывает входящие, открываем порты"
+    for P in "${OPEN_PORTS[@]}"; do
+        iptables -C INPUT -p "${P#*/}" --dport "${P%/*}" -j ACCEPT 2>/dev/null \
+            || run iptables -I INPUT -p "${P#*/}" --dport "${P%/*}" -j ACCEPT \
+            || warn "не удалось открыть $P"
+    done
+    if command -v netfilter-persistent &>/dev/null; then
+        run netfilter-persistent save || warn "правила iptables не сохранены — после перезагрузки порты закроются"
+        ok "iptables: порты ${OPEN_PORTS[*]} (сохранено)"
+    else
+        ok "iptables: порты ${OPEN_PORTS[*]}"
+        warn "Правила iptables не переживут перезагрузку: apt install iptables-persistent && netfilter-persistent save"
+    fi
 else
-    info "UFW не активен, правила фаервола не трогаем"
+    info "Фаервол на сервере входящие не закрывает — открывать нечего"
 fi
 
 step "5/6  Команда awg-ctrl"
@@ -1431,6 +1534,9 @@ if [[ "$ROLE" == "node" ]]; then
     echo
     echo -e "    Сервер «${SERVER_NAME}» появится в списке серверов панели — управляй им оттуда."
 fi
+rule
+echo -e "    ${YLW}⚠${NC}  Если у хостера свой фаервол (панель провайдера, security group) — открой там:"
+echo -e "       ${BLD}${OPEN_PORTS[*]}${NC}  ${DIM}иначе клиенты не подключатся, а на сервере всё будет выглядеть исправным${NC}"
 rule
 echo -e "    ${DIM}awg-ctrl                     ${NC} меню: запуск, статус, логин и пароль, join/unjoin"
 echo -e "    ${DIM}systemctl restart awg-control${NC} перезапуск ${DIM}(автозапуск на загрузке включён)${NC}"
