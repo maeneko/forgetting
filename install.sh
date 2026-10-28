@@ -1,7 +1,15 @@
+#!/usr/bin/env bash
 # Copyright (c) 2026 Ivan Vasilev
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-#!/usr/bin/env bash
+#
+# Установщик Forgetting: панель управления VPN на AmneziaWG.
+#   bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
+# Поверх установки — меню: обновить, переустановить, удалить. Параметры (ROLE, JOIN, AWG_GEN,
+# AWG_PORT, AWG_MTU, UI_PREFIX, UNINSTALL…) задаются окружением — таблица в README,
+# «Параметры установщика».
+#
+# Порядок файла: помощники вывода → константы → функции → сценарий (с «Сценарий» ниже).
 
 set -euo pipefail
 
@@ -56,6 +64,9 @@ rand_alnum() {
     head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | head -c "$1"
 }
 
+rand_int() { shuf -i "$1-$2" -n 1; }
+url_host() { sed -E 's#^https?://([^/]+).*#\1#' <<< "$1"; }
+
 # Вопрос: ask VAR "текст: " [secret]. Введённое печатает сам терминал — в поток вывода, а значит
 # и в лог, оно не попадает. Поэтому после ответа строка «вопрос ответ» печатается ещё раз: на
 # экране — поверх себя же (курсор на строку вверх), в логе — целиком. Скрытый ввод — точками.
@@ -78,6 +89,16 @@ ask() {
     printf -v "$__var" '%s' "$__ans"
 }
 
+# ask_def VAR "вопрос" ПО_УМОЛЧАНИЮ [secret] — спросить, только если VAR не задана окружением;
+# пустой ответ — значение по умолчанию.
+ask_def() {
+    local __v="$1"
+    [[ -n "${!__v:-}" ]] && return 0
+    ask "$__v" "$2" "${4:-}"
+    [[ -n "${!__v}" ]] || printf -v "$__v" '%s' "$3"
+}
+
+# shellcheck disable=SC2154  # rc присваивается в самой строке trap
 trap 'rc=$?; echo -e "\n  ${RED}✗ НЕОЖИДАННАЯ ОШИБКА${NC}  строка ${LINENO}  код ${rc}\n     команда: ${BASH_COMMAND}\n     полный лог: ${LOGFILE:-<ещё не открыт>}" >&2' ERR
 
 [[ $EUID -ne 0 ]]          && fail "Запусти от root: sudo bash install.sh"
@@ -97,6 +118,7 @@ LOG_PID="${!:-}"
 # Дождаться, пока tee допишет хвост, — иначе последние строки вылезут уже после приглашения шелла.
 trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true' EXIT
 
+# ═══ Константы ═════════════════════════════════════════════════════════════════
 # ⚠️ Дублирует .env из репозитория: установщик собирает URL релиза и печатает
 # баннер ДО того, как архив с .env скачан, поэтому взять их оттуда не может.
 # При бампе версии правь оба места.
@@ -124,7 +146,6 @@ case "$(uname -m)" in
 esac
 ARCHIVE_NAME="awgcontrol-${VERSION}-linux-${GOARCH:-unknown}.tar.gz"
 ARCHIVE_URL="${ARCHIVE_URL:-}"
-url_host() { sed -E 's#^https?://([^/]+).*#\1#' <<< "$1"; }
 PROJECT="/opt/awg-control"
 AMNEZIA_DIR="/etc/amnezia"
 AWG_DIR="$AMNEZIA_DIR/amneziawg"
@@ -142,7 +163,7 @@ INTERNAL_AUTH_PUB="$AWG_DIR/internal_auth_public.key"
 SUB_SIGN_PRIV="$AWG_DIR/sub_sign.key"
 SUB_TLS_KEY="$AWG_DIR/sub_tls.key"
 SUB_TLS_CRT="$AWG_DIR/sub_tls.crt"
-# Несколько серверов (docs/node-protocol.md). Хаб панели: самоподписанный сертификат, его
+# Несколько серверов (README, «Несколько серверов»). Хаб панели: самоподписанный сертификат, его
 # отпечаток зашит в строки подключения нод — живёт столько же, сколько панель. Нода: свой
 # Ed25519-ключ, которым она представляется панели.
 NODE_TLS_KEY="$AWG_DIR/node_tls.key"
@@ -157,12 +178,57 @@ MTU="${AWG_MTU:-}"   # MTU туннеля; пусто — выбирает choos
 # ссылка на него.
 BIN="$PROJECT/awg-control"
 
-echo
-echo -e "  ${ACC}◆${NC} ${BLD}${BRAND}${NC}  ${DIM}${CHANNEL} · ${VERSION}${NC}"
-echo -e "    ${DIM}Панель управления VPN на AmneziaWG — установка${NC}"
-echo -e "    ${DIM}Лог: $LOGFILE${NC}"
-rule
+# Поколение протокола и закрепление версии пакета — управляются переменными
+# окружения, задаются ДО запуска: `AWG_GEN=auto bash install.sh`.
+#   AWG_GEN=3.1  (по умолчанию) — основное поколение: если модуль в ядре не 3.x
+#     или ядро старше 5.5, install.sh падает с диагностикой. Тихий откат на 2.0
+#     здесь нежелателен: он молча выдал бы сервер со слабой обфускацией.
+#   AWG_GEN=auto — старое поведение: 3.1, если условия выполняются, иначе 2.0
+#     без вопросов. Для установки на заведомо старое ядро/модуль.
+#   AWG_GEN=2.0  — не трогать модуль (ни апгрейд, ни перезагрузка), сразу 2.0.
+# Сервер, установленный на 2.0, переводится на 3.1 позже из панели
+# (POST /awg/upgrade) — переустановка для этого не нужна.
+AWG_GEN="${AWG_GEN:-3.1}"
+[[ "$AWG_GEN" =~ ^(auto|2\.0|3\.1)$ ]] || fail "AWG_GEN должен быть auto, 2.0 или 3.1 (задано: $AWG_GEN)"
+# AWG_PIN=y (по умолчанию) — после успешной установки держит amneziawg{,-dkms,-tools}
+# через `apt-mark hold`: unattended-upgrades не должен подменять модуль под живым
+# сервером (issue #215 — именно так словили регрессию между dkms-сборками).
+AWG_PIN="${AWG_PIN:-y}"
+[[ "$AWG_PIN" =~ ^[yn]$ ]] || fail "AWG_PIN должен быть y или n (задано: $AWG_PIN)"
 
+# Параметры обфускации, UDP-порт и MTU AWG. На новой установке — случайные, у каждого сервера
+# свои: известные всем значения по умолчанию — готовая сигнатура для блокировки. При KEEP_DATA=y
+# берутся из прежнего awg1.conf (choose_awg_params ниже): они зашиты во все выданные vpn://
+# ключи, их смена сделала бы каждый ключ невалидным.
+# Ограничения генератора (gen_awg_params):
+#   - Jc 4–8; Jmin < Jmax, оба много меньше MTU
+#   - S1–S4 ≥ 12: при HeaderProtectionKey (AmneziaWG 3.x) меньшее модуль отвергает с одним
+#     «Invalid argument» (причина видна лишь при
+#     `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`)
+#   - размеры пакетов после добавки разные: 148+S1 (init), 92+S2 (response), 64+S3 (cookie) —
+#     иначе тип пакета снова узнаётся по длине; отсюда же S1 != S2 и S2 != S1+56
+#   - S4 добавляется к каждому пакету данных — держим маленьким, как прежние 14
+#   - H1–H4: непересекающиеся диапазоны в [10^8, 2^31−1] — далеко от 1–4 (типы сообщений
+#     WireGuard) и не выше прежних значений (некоторые клиенты разбирают их как int32)
+#   - I1 — пакет-маскировка, его шлёт инициатор handshake, принимающая сторона просто
+#     отбрасывает. Сервер его не сверяет: у каждого ключа может быть свой, поэтому при
+#     KEEP_DATA=y без I1 в конфиге его можно сгенерировать заново — старые ключи не сломаются.
+#     Формат обязан пройти И kernel-модуль (сервер), И amneziawg-go (клиенты) — см. AWG_I1_RE
+#   - I2–I5 НЕ трогать: в vpn:// ключ уходят пустыми плейсхолдерами
+#   - MTU 1320–1376: не выше прежнего (запас под S4, заголовки и IPv6 на пути), не ниже —
+#     лишние накладные расходы. Расхождение MTU сервера и клиента WireGuard переносит
+# Прежние постоянные значения: ими собраны ключи установок до рандомизации — нужны, если
+# при KEEP_DATA=y awg1.conf потерялся.
+LEGACY_AWG_PORT="47619"
+LEGACY_MTU="1376"
+LEGACY_JC=6; LEGACY_JMIN=10; LEGACY_JMAX=50
+LEGACY_S1=90; LEGACY_S2=45; LEGACY_S3=37; LEGACY_S4=14
+LEGACY_H1="1224800044-2116730834"
+LEGACY_H2="2122053282-2133204808"
+LEGACY_H3="2133604274-2140756116"
+LEGACY_H4="2143656228-2147444225"
+
+# ═══ Функции ═══════════════════════════════════════════════════════════════════
 # Сначала корректно через CLI (по PID-файлам), затем добиваем всё, что ещё
 # держит файлы проекта: осиротевшие процессы, ручной запуск или stale PID,
 # которые `stop all` не находит. Вызывать ДО `rm -rf $PROJECT` — иначе сервисы
@@ -194,34 +260,15 @@ kill_related() {
     rm -f /tmp/awg-ctrl.pid /tmp/awg-ui.pid /tmp/awg-agent.pid 2>/dev/null || true
 }
 
-# Поверх существующей установки: обновить (настройки, пользователи и роль остаются)
-# или переустановить с нуля. Спрашиваем первым — от ответа зависит, спрашивать ли роль.
-# Или удалить совсем (3; без меню — UNINSTALL=y bash install.sh).
-INSTALL_MODE="fresh"
-if [[ "${UNINSTALL:-}" =~ ^([Yy]|yes|1)$ ]]; then
-    INSTALL_MODE="uninstall"
-elif [[ -d "$PROJECT" ]]; then
-    echo
-    warn "Уже установлено в $PROJECT"
-    echo -e "    ${ACC}${BLD}1${NC}  Обновить         ${DIM}до ${VERSION}; настройки, пользователи и роль сохранятся${NC}"
-    echo -e "    ${ACC}${BLD}2${NC}  Переустановить   ${DIM}с нуля; данные можно будет сохранить${NC}"
-    echo -e "    ${ACC}${BLD}3${NC}  Удалить          ${DIM}полностью: сервисы, данные, правила фаервола, по желанию AmneziaWG${NC}"
-    ask INST_CHOICE "Выбери [1–3, Enter — 1]: "
-    case "${INST_CHOICE:-1}" in
-        1) INSTALL_MODE="update" ;;
-        2) INSTALL_MODE="fresh" ;;
-        3) INSTALL_MODE="uninstall" ;;
-        *) fail "Неверный выбор: введи 1, 2 или 3" ;;
-    esac
-    echo
-fi
-
-# cli.env прежней установки читаем сразу: при переустановке каталог проекта удаляется
-# раньше, чем до него доходит дело, а из него берутся роль и порты, зашитые в уже
-# выданные ссылки (SUB_PORT, NODE_PORT) и в подключение ноды к панели.
-PREV_CLI_ENV=""
-[[ -f "$PROJECT/cli/cli.env" ]] && PREV_CLI_ENV=$(cat "$PROJECT/cli/cli.env")
+# Значение из cli.env прежней установки (PREV_CLI_ENV читается в начале сценария).
 prev_val() { grep "^$1=" <<< "$PREV_CLI_ENV" | tail -1 | cut -d= -f2- || true; }
+# Прежнее значение — только если данные сохраняются (KEEP_DATA): порт и путь панели зашиты в
+# закладки и адрес внешнего API, порты подписки и хаба — в выданные ссылки и строки нод.
+keep() { [[ "$KEEP_DATA" == "y" ]] && prev_val "$1" || true; }
+
+# Пункт чеклиста совместимости: ✓ — пройдено, ✗ — нет.
+mark() { if [[ "$1" == 1 ]]; then echo -e "  ${GRN}✓${NC}  $2"; else echo -e "  ${RED}✗${NC}  $2"; fi; }
+
 # ── Полное удаление ─────────────────────────────────────────────────────────
 # Убирает всё, что ставили установщик и awg-ctrl: сервисы и юнит, интерфейс awg1, nft-таблицы
 # шейпинга и блокировки торрентов, открытые порты в UFW/firewalld/iptables, Prometheus из
@@ -229,7 +276,7 @@ prev_val() { grep "^$1=" <<< "$PREV_CLI_ENV" | tail -1 | cut -d= -f2- || true; }
 # логи установки (в них пароль панели). AmneziaWG (пакеты, модуль, PPA) — по вопросу: он мог
 # стоять и до нас. Общие зависимости (dkms, build-essential, iptables, заголовки) не трогаем.
 uninstall_all() {
-    local role="${PREV_ROLE_HINT:-}" conf="$AWG_CONF" net_iface="" p
+    local role="$PREV_ROLE" conf="$AWG_CONF" net_iface="" p
     local awg_port ports=()
     local unit="/etc/systemd/system/awg-control.service"
 
@@ -251,7 +298,8 @@ uninstall_all() {
     if [[ -d "$AMNEZIA_DIR" || -f "$PROJECT/cli/cli.env" ]]; then
         ask KEEP_BACKUP "Сохранить копию данных (пользователи, ключи, cli.env) в /root? [Y/n]: "
         if [[ "${KEEP_BACKUP:-y}" =~ ^[Yy]$ ]]; then
-            local bak="/root/forgetting-backup-$(date +%Y%m%d-%H%M%S).tar.gz" items=()
+            local bak items=()
+            bak="/root/forgetting-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
             [[ -d "$AMNEZIA_DIR" ]] && items+=("${AMNEZIA_DIR#/}")
             [[ -f "$PROJECT/cli/cli.env" ]] && items+=("${PROJECT#/}/cli/cli.env")
             ( umask 077; tar -czf "$bak" -C / "${items[@]}" ) \
@@ -353,219 +401,6 @@ uninstall_all() {
     echo
 }
 
-if [[ "$INSTALL_MODE" == "uninstall" ]]; then
-    if   [[ -n "$(prev_val CORE_HOST)" ]];        then PREV_ROLE_HINT="node"
-    elif [[ "$(prev_val LOCAL_NODE)" == "off" ]]; then PREV_ROLE_HINT="core"
-    else                                               PREV_ROLE_HINT="standalone"
-    fi
-    uninstall_all
-    exit 0
-fi
-
-# Роль сервера (несколько серверов под одной панелью, docs/node-protocol.md):
-#   standalone — панель + VPN на одной машине, как было всегда; может принимать ноды;
-#   core       — только панель, без VPN на этой машине (LOCAL_NODE=off): AmneziaWG, модуль
-#                ядра и заголовки не ставятся, VPN-серверы подключаются к ней нодами;
-#   node       — VPN без панели: awg-ctrl + awg-agent, который сам подключается к панели
-#                по строке awgjoin://… («Добавить сервер» в панели). Входящих портов,
-#                кроме UDP для клиентов, нода не открывает.
-# Можно задать окружением: ROLE=node JOIN='awgjoin://…' bash install.sh
-# При обновлении роль берётся из прежней установки: смена роли — только переустановкой.
-PREV_ROLE=""
-if [[ -n "$PREV_CLI_ENV" ]]; then
-    if   [[ -n "$(prev_val CORE_HOST)" ]];          then PREV_ROLE="node"
-    elif [[ "$(prev_val LOCAL_NODE)" == "off" ]];   then PREV_ROLE="core"
-    else                                                 PREV_ROLE="standalone"
-    fi
-fi
-ROLE="${ROLE:-}"
-if [[ "$INSTALL_MODE" == "update" ]]; then
-    if [[ -n "$ROLE" && -n "$PREV_ROLE" && "$ROLE" != "$PREV_ROLE" ]]; then
-        fail "Смена роли ($PREV_ROLE → $ROLE) при обновлении невозможна — выбери полную переустановку"
-    fi
-    ROLE="${PREV_ROLE:-standalone}"
-elif [[ -z "$ROLE" ]]; then
-    case "$PREV_ROLE" in node) ROLE_DEF=3 ;; core) ROLE_DEF=2 ;; *) ROLE_DEF=1 ;; esac
-    echo
-    echo -e "  ${BLD}Роль сервера${NC}"
-    echo -e "    ${ACC}${BLD}1${NC}  Панель + VPN    ${DIM}самостоятельный сервер; к нему можно подключать ноды${NC}"
-    echo -e "    ${ACC}${BLD}2${NC}  Только панель   ${DIM}без VPN на этой машине; серверы подключаются нодами${NC}"
-    echo -e "    ${ACC}${BLD}3${NC}  Нода            ${DIM}VPN без панели; подключается к уже установленной${NC}"
-    ask ROLE_CHOICE "Выбери [1–3, Enter — ${ROLE_DEF}]: "
-    case "${ROLE_CHOICE:-$ROLE_DEF}" in
-        1) ROLE="standalone" ;;
-        2) ROLE="core" ;;
-        3) ROLE="node" ;;
-        *) fail "Неверный выбор: введи 1, 2 или 3" ;;
-    esac
-fi
-[[ "$ROLE" =~ ^(standalone|core|node)$ ]] || fail "ROLE должен быть standalone, core или node (задано: $ROLE)"
-case "$ROLE" in
-    standalone) ROLE_LABEL="панель + VPN" ;;
-    core)       ROLE_LABEL="только панель" ;;
-    node)       ROLE_LABEL="нода" ;;
-esac
-
-# Запускается ДО вопросов конфигурации и любого деструктива (rm -rf): на несовместимой
-# машине лучше упасть сразу, а не после ввода данных или удаления каталога.
-# Порты (UDP VPN / порт UI) здесь НЕ проверяем — это отдельно (фаервол/облако).
-step "Проверка совместимости"
-
-KERNEL=$(uname -r)
-VIRT=$(systemd-detect-virt 2>/dev/null || echo "unknown")
-
-# Семейство дистрибутива решает, как ставить AmneziaWG:
-#   ubuntu — add-apt-repository ppa:amnezia/ppa, заголовки linux-headers-generic;
-#   debian — ни software-properties-common (в Debian 13 его нет), ни
-#            linux-headers-generic там не существует: PPA подключаем вручную
-#            (ключ + signed-by), заголовки — только под текущее ядро.
-# Производные (Mint, Pop!_OS, Kali…) определяются через ID_LIKE.
-OS_ID=""; OS_LIKE=""; OS_CODENAME=""; OS_NAME=""
-if [[ -r /etc/os-release ]]; then
-    OS_ID=$(. /etc/os-release; echo "${ID:-}")
-    OS_LIKE=$(. /etc/os-release; echo "${ID_LIKE:-}")
-    OS_CODENAME=$(. /etc/os-release; echo "${VERSION_CODENAME:-}")
-    OS_NAME=$(. /etc/os-release; echo "${PRETTY_NAME:-}")
-fi
-if [[ "$OS_ID" == "ubuntu" || " $OS_LIKE " == *" ubuntu "* ]]; then
-    OS_FAMILY="ubuntu"
-elif [[ "$OS_ID" == "debian" || " $OS_LIKE " == *" debian "* ]]; then
-    OS_FAMILY="debian"
-else
-    OS_FAMILY=""
-fi
-# Вариант ядра без версии: 6.12.85+deb13-cloud-amd64 → cloud-amd64,
-# 6.1.0-18-cloud-amd64 → cloud-amd64. Нужен для мета-пакетов Debian
-# (linux-image-<вариант> / linux-headers-<вариант>).
-KFLAVOUR=$(sed -E 's/^[0-9][^-]*-([0-9]+-)?//' <<< "$KERNEL")
-# Что советовать, если заголовков под текущее ядро нет.
-if [[ "$OS_FAMILY" == "debian" ]]; then
-    HDR_FIX="apt-get update && apt-get install -y linux-image-$KFLAVOUR linux-headers-$KFLAVOUR && reboot"
-else
-    HDR_FIX="apt-get install -y linux-generic && reboot"
-fi
-
-echo -e "  ${DIM}${OS_NAME:-$(lsb_release -ds 2>/dev/null || echo unknown)} · ядро $KERNEL · виртуализация $VIRT · роль: $ROLE_LABEL${NC}"
-
-# Считаем все пункты, НЕ падая на первом, — чтобы показать полный чеклист
-# со статусом по каждому. Если хоть один не прошёл — печатаем причины и выходим
-# с кодом 0 (чистый выход, без вида «упало с ошибкой»).
-OS_OK=1; ARCH_OK=1; VIRT_OK=1; HDR_OK=1; NET_OK=1
-OS_WHY=""; ARCH_WHY=""; VIRT_WHY=""; HDR_WHY=""; NET_WHY=""
-
-# Архитектура: релиз собирается под amd64 и arm64.
-if [[ -z "$GOARCH" ]]; then
-    ARCH_OK=0
-    ARCH_WHY="архитектура '$(uname -m)' не поддерживается — сборки есть для x86_64 и aarch64"
-fi
-
-# 0) Дистрибутив: установщик умеет только apt-семейство Ubuntu/Debian.
-if [[ -z "$OS_FAMILY" ]]; then
-    OS_OK=0
-    OS_WHY="дистрибутив '${OS_NAME:-${OS_ID:-неизвестно}}' не поддерживается — нужен Ubuntu или Debian"
-fi
-
-# Виртуализация и заголовки нужны только для модуля ядра — панели без VPN (core) они не важны,
-# её можно ставить и в контейнер.
-if [[ "$ROLE" != "core" ]]; then
-    # 1) Виртуализация: kernel-модуль нельзя загрузить там, где ядро общее с хостом.
-    case "$VIRT" in
-        openvz|lxc|lxc-libvirt|docker|podman|wsl)
-            VIRT_OK=0
-            VIRT_WHY="виртуализация '$VIRT' — ядро общее с хостом, kernel-модуль AmneziaWG не загрузить (нужен userspace amneziawg-go)"
-            ;;
-    esac
-
-    # 2) Заголовки ядра: DKMS соберёт модуль только при их наличии под текущее ядро.
-    #    Уже в системе или есть кандидат в apt — ок. «(none)» — кастомное ядро, не
-    #    проходит. Пустой apt-индекс не валим: добьёт поздняя проверка на шаге AWG.
-    HDR_POLICY=$(apt-cache policy "linux-headers-$KERNEL" 2>/dev/null || true)
-    if [[ -d "/lib/modules/$KERNEL/build" ]]; then
-        :
-    elif echo "$HDR_POLICY" | grep -q 'Candidate: [^(]'; then
-        :
-    elif echo "$HDR_POLICY" | grep -q 'Candidate: (none)'; then
-        HDR_OK=0
-        HDR_WHY="нет заголовков под ядро $KERNEL в apt. Решение: $HDR_FIX, затем запусти install.sh заново"
-    fi
-fi
-
-# 3) Доступ в интернет: нужен для архива и пакетов AWG. Без -f: любой
-#    HTTP-ответ = связь есть; ненулевой код только при сбое соединения/DNS.
-#    Проверяем хосты, с которых реально качаем: хватает любого из двух —
-#    download_extract() умеет откатываться на запасной.
-NET_HOSTS=("$(url_host "$REPO_BASE")")
-[[ -n "$ARCHIVE_URL" ]] && NET_HOSTS=("$(url_host "$ARCHIVE_URL")")
-[[ -z "$ARCHIVE_URL" && "$(url_host "$REPO_FALLBACK")" != "${NET_HOSTS[0]}" ]] \
-    && NET_HOSTS+=("$(url_host "$REPO_FALLBACK")")
-NET_OK=0
-for h in "${NET_HOSTS[@]}"; do
-    if curl -sS --connect-timeout 8 -o /dev/null "https://$h" 2>/dev/null; then NET_OK=1; break; fi
-done
-[[ "$NET_OK" == 0 ]] && NET_WHY="нет доступа к ${NET_HOSTS[*]} — проверь интернет и DNS"
-
-# Чеклист: ✓ — пройдено, ✗ — нет.
-mark() { if [[ "$1" == 1 ]]; then echo -e "  ${GRN}✓${NC}  $2"; else echo -e "  ${RED}✗${NC}  $2"; fi; }
-mark "$OS_OK"   "Дистрибутив"
-mark "$ARCH_OK" "Архитектура"
-if [[ "$ROLE" != "core" ]]; then
-    mark "$VIRT_OK" "Виртуализация"
-    mark "$HDR_OK"  "Заголовки ядра"
-fi
-mark "$NET_OK"  "Доступ в интернет"
-
-if [[ "$OS_OK" == 0 || "$ARCH_OK" == 0 || "$VIRT_OK" == 0 || "$HDR_OK" == 0 || "$NET_OK" == 0 ]]; then
-    echo
-    warn "Установка невозможна — не пройдены проверки:"
-    [[ "$OS_OK"   == 0 ]] && echo -e "    ${RED}•${NC} $OS_WHY"
-    [[ "$ARCH_OK" == 0 ]] && echo -e "    ${RED}•${NC} $ARCH_WHY"
-    [[ "$VIRT_OK" == 0 ]] && echo -e "    ${RED}•${NC} $VIRT_WHY"
-    [[ "$HDR_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $HDR_WHY"
-    [[ "$NET_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $NET_WHY"
-    echo
-    trap - ERR
-    exit 0
-fi
-
-# Наличие базы определяем заранее и молча — от него зависит, спросим ли ниже имя
-# сервера (если база есть, имя берётся из неё). Без вывода. KEEP_DATA — отдельно.
-DB_EXISTS="n"
-[[ -f "$DB_FILE" ]] && DB_EXISTS="y"
-
-# Параметры обфускации, UDP-порт и MTU AWG. На новой установке — случайные, у каждого сервера
-# свои: известные всем значения по умолчанию — готовая сигнатура для блокировки. При KEEP_DATA=y
-# берутся из прежнего awg1.conf (choose_awg_params ниже): они зашиты во все выданные vpn://
-# ключи, их смена сделала бы каждый ключ невалидным.
-# Ограничения генератора (gen_awg_params):
-#   - Jc 4–8; Jmin < Jmax, оба много меньше MTU
-#   - S1–S4 ≥ 12: при HeaderProtectionKey (AmneziaWG 3.x) меньшее модуль отвергает с одним
-#     «Invalid argument» (причина видна лишь при
-#     `echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control`)
-#   - размеры пакетов после добавки разные: 148+S1 (init), 92+S2 (response), 64+S3 (cookie) —
-#     иначе тип пакета снова узнаётся по длине; отсюда же S1 != S2 и S2 != S1+56
-#   - S4 добавляется к каждому пакету данных — держим маленьким, как прежние 14
-#   - H1–H4: непересекающиеся диапазоны в [10^8, 2^31−1] — далеко от 1–4 (типы сообщений
-#     WireGuard) и не выше прежних значений (некоторые клиенты разбирают их как int32)
-#   - I1 — пакет-маскировка, его шлёт инициатор handshake, принимающая сторона просто
-#     отбрасывает. Сервер его не сверяет: у каждого ключа может быть свой, поэтому при
-#     KEEP_DATA=y без I1 в конфиге его можно сгенерировать заново — старые ключи не сломаются.
-#     Формат обязан пройти И kernel-модуль (сервер), И amneziawg-go (клиенты) — см. AWG_I1_RE
-#   - I2–I5 НЕ трогать: в vpn:// ключ уходят пустыми плейсхолдерами
-#   - MTU 1320–1376: не выше прежнего (запас под S4, заголовки и IPv6 на пути), не ниже —
-#     лишние накладные расходы. Расхождение MTU сервера и клиента WireGuard переносит
-# Прежние постоянные значения: ими собраны ключи установок до рандомизации — нужны, если
-# при KEEP_DATA=y awg1.conf потерялся.
-LEGACY_AWG_PORT="47619"
-LEGACY_MTU="1376"
-LEGACY_JC=6; LEGACY_JMIN=10; LEGACY_JMAX=50
-LEGACY_S1=90; LEGACY_S2=45; LEGACY_S3=37; LEGACY_S4=14
-LEGACY_H1="1224800044-2116730834"
-LEGACY_H2="2122053282-2133204808"
-LEGACY_H3="2133604274-2140756116"
-LEGACY_H4="2143656228-2147444225"
-
-rand_int() { shuf -i "$1-$2" -n 1; }
-
 gen_awg_params() {
     JC=$(rand_int 4 8)
     JMIN=$(rand_int 8 40)
@@ -578,8 +413,8 @@ gen_awg_params() {
     S4=$(rand_int 12 20)
     # 8 разных чисел по возрастанию → 4 непересекающихся диапазона, раздаём H1–H4 вперемешку.
     local n r
-    n=($(shuf -i 100000000-2147483647 -n 8 | sort -n))
-    r=($(printf '%s\n' "${n[0]}-${n[1]}" "${n[2]}-${n[3]}" "${n[4]}-${n[5]}" "${n[6]}-${n[7]}" | shuf))
+    mapfile -t n < <(shuf -i 100000000-2147483647 -n 8 | sort -n)
+    mapfile -t r < <(printf '%s\n' "${n[0]}-${n[1]}" "${n[2]}-${n[3]}" "${n[4]}-${n[5]}" "${n[6]}-${n[7]}" | shuf)
     H1=${r[0]}; H2=${r[1]}; H3=${r[2]}; H4=${r[3]}
 }
 
@@ -670,25 +505,17 @@ choose_awg_params() {
     [[ "$I1" =~ $AWG_I1_RE ]] || fail "I1 «${I1}» не пройдёт парсер AmneziaWG"
 }
 
-# Поколение протокола и закрепление версии пакета — управляются переменными
-# окружения, задаются ДО запуска: `AWG_GEN=auto bash install.sh`.
-#   AWG_GEN=3.1  (по умолчанию) — основное поколение: если модуль в ядре не 3.x
-#     или ядро старше 5.5, install.sh падает с диагностикой. Тихий откат на 2.0
-#     здесь нежелателен: он молча выдал бы сервер со слабой обфускацией.
-#   AWG_GEN=auto — старое поведение: 3.1, если условия выполняются, иначе 2.0
-#     без вопросов. Для установки на заведомо старое ядро/модуль.
-#   AWG_GEN=2.0  — не трогать модуль (ни апгрейд, ни перезагрузка), сразу 2.0.
-# Сервер, установленный на 2.0, переводится на 3.1 позже из панели
-# (POST /awg/upgrade) — переустановка для этого не нужна.
-AWG_GEN="${AWG_GEN:-3.1}"
-[[ "$AWG_GEN" =~ ^(auto|2\.0|3\.1)$ ]] || fail "AWG_GEN должен быть auto, 2.0 или 3.1 (задано: $AWG_GEN)"
-# AWG_PIN=y (по умолчанию) — после успешной установки держит amneziawg{,-dkms,-tools}
-# через `apt-mark hold`: unattended-upgrades не должен подменять модуль под живым
-# сервером (issue #215 — именно так словили регрессию между dkms-сборками).
-AWG_PIN="${AWG_PIN:-y}"
+valid_port() { [[ "$1" =~ ^[0-9]+$ && "$1" -gt 0 && "$1" -lt 65536 ]]; }
 
-NET_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
-[[ -z "$NET_IFACE" ]] && fail "Не могу определить сетевой интерфейс"
+# Случайный свободный TCP-порт 32768–55535, не из уже занятых установкой (аргументы).
+gen_tcp_port() {
+    local p used=" $* "
+    while :; do
+        p=$(rand_int 32768 55535)
+        [[ "$used" == *" $p "* ]] && continue
+        [[ -z "$(ss -Htlnp "sport = :$p" 2>/dev/null)" ]] && { echo "$p"; return; }
+    done
+}
 
 # Скачать архив версии VERSION, распаковать в PROJECT и проверить, что ключевые
 # файлы на месте.
@@ -817,160 +644,6 @@ start_and_status() {
     "$BIN" status
 }
 
-if [[ "$INSTALL_MODE" == "update" ]]; then
-    step "Обновление до версии ${VERSION} ($ROLE_LABEL)"
-
-    info "останавливаем и убиваем все процессы awg-control"
-    kill_related
-
-    download_extract
-    install_command
-    start_and_status
-
-    rule
-    echo -e "  ${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}  ${DIM}${ROLE_LABEL}${NC}"
-    rule
-    echo
-    exit 0
-fi
-
-# При полной переустановке убиваем все процессы awg-control и очищаем старый
-# каталог, чтобы не оставалось ни запущенных процессов, ни старых файлов.
-if [[ -d "$PROJECT" ]]; then
-    kill_related
-    rm -rf "$PROJECT"
-fi
-
-step "Конфигурация"
-
-# Server IP определяем автоматически (внешний через ifconfig.me, иначе локальный
-# по маршруту) — не спрашиваем. Если определить не удалось — падаем.
-SERVER_IP=$(curl -s4 --connect-timeout 5 ifconfig.me 2>/dev/null \
-         || ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' \
-         || echo "")
-[[ -z "$SERVER_IP" ]] && fail "Не удалось определить Server IP автоматически"
-ok "Server IP: $SERVER_IP"
-
-# Имя сервера спрашиваем ниже — только если базы ещё нет (DB_EXISTS=n).
-# Если база есть, имя берётся из неё.
-
-# Внутренняя авторизация awg-ui ↔ awg-ctrl — асимметричная пара, генерируется
-# в шаге 4 (Ключи). Здесь секрет не нужен.
-AWGCTRL_PORT=$(( (RANDOM % 22768) + 32768 ))
-
-# Панель (awg-ui) есть везде, кроме ноды.
-if [[ "$ROLE" != "node" ]]; then
-    ask UI_PORT "UI port (Enter — случайный): "
-    UI_PORT="${UI_PORT:-$(( (RANDOM % 22768) + 32768 ))}"
-
-    ask UI_USER "UI логин [admin]: "
-    UI_USER="${UI_USER:-admin}"
-
-    SUGGESTED_PASS=$(rand_alnum 12)
-    ask UI_PASS "UI пароль [$SUGGESTED_PASS]: " secret
-    UI_PASS="${UI_PASS:-$SUGGESTED_PASS}"
-
-    JWT_SECRET=$(rand_alnum 32)
-fi
-
-# Что сохранять при переустановке.
-#   С VPN (standalone, node): база пользователей и ключ сервера — только вместе:
-#   vpn:// ключи пользователей привязаны к ключу сервера. ui.db следует за ними.
-#   Панель без VPN (core): её данные — ui.db (серверы, ключи API, мастер-ключи).
-KEEP_DATA="n"
-if [[ "$ROLE" == "core" ]]; then
-    if [[ -f "$UI_DB_FILE" ]]; then
-        echo
-        warn "Найдены данные панели: $UI_DB_FILE"
-        ask KD "Сохранить серверы, ключи API и мастер-ключи? [Y/n]: "
-        [[ "${KD:-y}" =~ ^[Yy]$ || -z "${KD}" ]] && KEEP_DATA="y"
-    fi
-elif [[ -f "$DB_FILE" || -f "$PRIV_KEY_FILE" ]]; then
-    echo
-    warn "Найдена существующая установка:"
-    [[ -f "$DB_FILE" ]]       && echo "    база пользователей: $DB_FILE"
-    [[ -f "$PRIV_KEY_FILE" ]] && echo "    ключ сервера:       $PRIV_KEY_FILE"
-
-    if [[ -f "$DB_FILE" && -f "$PRIV_KEY_FILE" && -f "$PUB_KEY_FILE" ]]; then
-        ask KD "Сохранить пользователей и ключ сервера? [Y/n]: "
-        [[ "${KD:-y}" =~ ^[Yy]$ || -z "${KD}" ]] && KEEP_DATA="y"
-    else
-        warn "Для сохранения нужны и база, и оба ключа сервера — часть отсутствует."
-        warn "Пользователей не сохранить (vpn:// ключи стали бы невалидными)."
-    fi
-fi
-
-# sen://-подписка и приём нод живут в панели — у ноды их нет.
-# Порты и режим TLS зашиты в уже выданные ссылки, поэтому при KEEP_DATA=y берём прежние
-# значения из cli.env прежней установки (PREV_CLI_ENV).
-SUB_PORT="${SUB_PORT:-}"
-SUB_TLS="${SUB_TLS:-}"
-NODE_PORT="${NODE_PORT:-}"
-if [[ "$ROLE" != "node" ]]; then
-    if [[ "$KEEP_DATA" == "y" ]]; then
-        [[ -z "$SUB_PORT"  ]] && SUB_PORT="$(prev_val SUB_PORT)"
-        [[ -z "$SUB_TLS"   ]] && SUB_TLS="$(prev_val SUB_TLS)"
-        [[ -z "$NODE_PORT" ]] && NODE_PORT="$(prev_val NODE_PORT)"
-    fi
-    if [[ -z "$SUB_PORT" ]]; then
-        ask SUB_PORT "Sub port для sen:// (Enter — случайный): "
-        while [[ -z "$SUB_PORT" || "$SUB_PORT" == "$UI_PORT" || "$SUB_PORT" == "$AWGCTRL_PORT" ]]; do
-            SUB_PORT=$(( (RANDOM % 22768) + 32768 ))
-        done
-    fi
-    if [[ -z "$SUB_TLS" ]]; then
-        ask ST "Подписка sen:// по HTTPS (самоподписанный сертификат, домен не нужен)? [Y/n]: "
-        [[ "${ST:-y}" =~ ^[Nn]$ ]] && SUB_TLS="off" || SUB_TLS="on"
-    fi
-    [[ "$SUB_TLS" == "on" ]] || SUB_TLS="off"
-
-    # Приём нод: ноды сами подключаются к панели по WSS на этот порт. Сертификат хаба awg-ui
-    # создаёт при первом запуске, его отпечаток зашит в строки подключения. Панели без VPN
-    # приём нод обязателен (иначе ей нечем управлять), у «панели + VPN» — по желанию.
-    if [[ -z "$NODE_PORT" ]]; then
-        if [[ "$ROLE" == "core" ]]; then
-            ask NODE_PORT "Порт для подключения нод (Enter — случайный): "
-        else
-            ask NODE_PORT "Порт для подключения нод (Enter — не принимать ноды): "
-        fi
-    fi
-    if [[ -n "$NODE_PORT" ]] && ! [[ "$NODE_PORT" =~ ^[0-9]+$ && "$NODE_PORT" -gt 0 && "$NODE_PORT" -lt 65536 ]]; then
-        [[ "$ROLE" == "core" ]] && fail "«$NODE_PORT» — не номер порта"
-        warn "NODE_PORT «$NODE_PORT» не порт — приём нод выключен"
-        NODE_PORT=""
-    fi
-    if [[ "$ROLE" == "core" ]]; then
-        while [[ -z "$NODE_PORT" || "$NODE_PORT" == "$UI_PORT" || "$NODE_PORT" == "$SUB_PORT" ]]; do
-            NODE_PORT=$(( (RANDOM % 22768) + 32768 ))
-        done
-    fi
-fi
-
-[[ "$ROLE" != "core" ]] && choose_awg_params
-
-if [[ "$ROLE" != "node" ]]; then
-    # Секретный путь панели: снаружи она отвечает только на http://IP:PORT/<путь>/, на остальное —
-    # 404, как пустой сервер. Без него сканер узнавал панель по странице логина одним GET.
-    # При переустановке путь прежний; UI_PREFIX=off — без пути, UI_PREFIX=<свой> — свой
-    # (8–64 символа A–Z a–z 0–9 _ -).
-    UI_PREFIX="${UI_PREFIX:-}"
-    UI_PREFIX_NEW="n"
-    if [[ "$UI_PREFIX" == "off" ]]; then
-        UI_PREFIX=""
-    elif [[ -z "$UI_PREFIX" ]]; then
-        [[ "$KEEP_DATA" == "y" ]] && UI_PREFIX="$(prev_val UI_PREFIX)"
-        if [[ -z "$UI_PREFIX" ]]; then
-            UI_PREFIX=$(rand_alnum 16)
-            [[ -n "$PREV_CLI_ENV" ]] && UI_PREFIX_NEW="y"
-        fi
-    fi
-    [[ -z "$UI_PREFIX" || "$UI_PREFIX" =~ ^[A-Za-z0-9_-]{8,64}$ ]] \
-        || fail "UI_PREFIX «${UI_PREFIX}» — нужно 8–64 символа A–Z a–z 0–9 _ -"
-    # Путь переехавшей сюда панели (migrate) — её закладкам и API через ретранслятор.
-    UI_PREFIX_MOVED=""
-    [[ "$KEEP_DATA" == "y" ]] && UI_PREFIX_MOVED="$(prev_val UI_PREFIX_MOVED)"
-fi
-
 # Нода: к какой панели подключаться. Строку awgjoin://… даёт панель («Добавить сервер»):
 # base64url от JSON {v, h, p, pin, n, s}. Разбираем здесь, до установки, чтобы опечатка не
 # обнаружилась через десять минут сборки модуля. Значения в строке ограничены
@@ -1006,6 +679,514 @@ core_pin() {
         | base64 | tr '+/' '-_' | tr -d '=\n' || true
 }
 
+# ── AmneziaWG: PPA для Debian, проверки модуля и ядра ───────────────────────
+# Debian: add-apt-repository нет (software-properties-common из Debian 13 убран),
+# а PPA под Debian-релизы не собирается — подключаем его вручную на Ubuntu-серию
+# с glibc не новее дебиановской. Модуль приезжает DKMS-исходниками и от серии
+# не зависит; серия важна только для бинарника amneziawg-tools.
+#   AMNEZIA_PPA_SUITE — задать серию вручную (focal/jammy/noble).
+AMNEZIA_PPA_URL="https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu"
+AMNEZIA_PPA_FPR="75C9DD72C799870E310542E24166F2C257290828"   # Launchpad PPA for Iurii Egorov
+AMNEZIA_KEYRING="/etc/apt/keyrings/amnezia-ppa.gpg"
+add_amnezia_ppa_debian() {
+    local suite="${AMNEZIA_PPA_SUITE:-}"
+    if [[ -z "$suite" ]]; then
+        case "$OS_CODENAME" in
+            bullseye) suite="focal" ;;
+            bookworm) suite="jammy" ;;
+            trixie)   suite="noble" ;;
+            *)        suite="noble"
+                      warn "Debian '${OS_CODENAME:-неизвестно}' не сопоставлен с серией PPA — берём noble (задать вручную: AMNEZIA_PPA_SUITE=…)" ;;
+        esac
+    fi
+    info "подключение PPA amnezia (Debian ${OS_CODENAME:-?} → серия $suite)"
+
+    # Ключ берём по полному отпечатку и сверяем отпечаток после загрузки —
+    # apt-key в Debian 12+ уже нет, а доверять ответу keyserver вслепую нельзя.
+    local tmp gh fprs=""
+    tmp=$(mktemp); gh=$(mktemp -d)
+    if curl -fsSL --connect-timeout 15 \
+            "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${AMNEZIA_PPA_FPR}" \
+            | gpg --dearmor > "$tmp" 2>/dev/null; then
+        fprs=$(GNUPGHOME="$gh" gpg --batch --show-keys --with-colons "$tmp" 2>/dev/null || true)
+    fi
+    if ! grep -q "^fpr:::::::::${AMNEZIA_PPA_FPR}:" <<< "$fprs"; then
+        rm -rf "$tmp" "$gh"
+        fail "Не удалось получить ключ PPA amnezia ($AMNEZIA_PPA_FPR) с keyserver.ubuntu.com"
+    fi
+    install -d -m 0755 /etc/apt/keyrings
+    install -m 0644 "$tmp" "$AMNEZIA_KEYRING"
+    rm -rf "$tmp" "$gh"
+
+    echo "deb [signed-by=$AMNEZIA_KEYRING] $AMNEZIA_PPA_URL $suite main" \
+        > /etc/apt/sources.list.d/amnezia-ppa.list
+    ok "PPA amnezia подключён: $suite, ключ $AMNEZIA_KEYRING"
+}
+
+# Поколение протокола: 3.1 требует модуль 3.x и ядро ≥ 5.5.
+#   - модуль: PPA с 30.07.2026 отдаёт 3.x; на старых установках он может быть 2.0,
+#     поэтому сначала пробуем обновиться.
+#   - ядро: header protection использует библиотечный chacha-API
+#     (chacha_init/chacha20_crypt), которого нет до 5.5 — модуль там не соберётся
+#     (upstream issue #210). Проблема с nla_put_uint на ядрах < 6.7 уже исправлена.
+# При AWG_GEN=3.1 (по умолчанию) недоступность — fail с диагностикой: тихий
+# откат подсунул бы более слабую обфускацию незаметно для оператора.
+# При AWG_GEN=auto не падаем, а пишем 2.0-конфиг: awg-ctrl определяет поколение
+# по наличию HeaderProtectionKey в конфиге, так что всё продолжит работать ровно
+# как раньше, а перейти на 3.1 можно потом из панели.
+
+kernel_lt_5_5() {
+    local maj min
+    maj=${KERNEL%%.*}
+    min=${KERNEL#*.}; min=${min%%.*}
+    [[ "$maj" -lt 5 || ( "$maj" -eq 5 && "$min" -lt 5 ) ]]
+}
+
+# 🛑 Версий у модуля две, и путать их нельзя:
+#   modinfo                       — что лежит на диске (после apt/DKMS);
+#   /sys/module/amneziawg/version — что реально загружено в ядро.
+# `apt --only-upgrade` пересобирает модуль, но НЕ переставляет уже загруженный.
+# Ориентироваться на modinfo — значит написать 3.1-конфиг, который старый
+# загруженный модуль отвергнет: `awg setconf` вернёт «Unable to modify
+# interface: Invalid argument», и awg-quick up упадёт. Решает перезагрузка модуля.
+disk_mod_ver()   { modinfo -F version amneziawg 2>/dev/null || echo ""; }
+loaded_mod_ver() { cat /sys/module/amneziawg/version 2>/dev/null || echo ""; }
+
+# Закрывает ли голый iptables входящие: политика DROP или правило DROP/REJECT в INPUT.
+iptables_input_closed() {
+    command -v iptables &>/dev/null || return 1
+    iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP|^-A INPUT .*-j (DROP|REJECT)'
+}
+
+# Открыть OPEN_PORTS на фаерволе самого сервера: UFW, firewalld или голый iptables — что активно.
+# Фаервол хостера (панель провайдера, security group) отсюда не виден — о нём напоминаем в итоге.
+open_firewall() {
+    local P
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+        # UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
+        # цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT
+        # дело не доходит и трафик клиентов наружу режется: в dmesg сыплется
+        # «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
+        # Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
+        info "UFW активен, открываем $([[ "$ROLE" != "core" ]] && echo "маршрут и ")порты"
+        if [[ "$ROLE" != "core" ]]; then
+            run ufw route allow in on "$IFACE" out on "$NET_IFACE" \
+                || warn "ufw route allow не сработал — трафик клиентов может резаться"
+        fi
+        for P in "${OPEN_PORTS[@]}"; do
+            run ufw allow "$P" || warn "не удалось открыть $P"
+        done
+        run ufw reload || true
+        ok "UFW:$([[ "$ROLE" != "core" ]] && echo " форвардинг $IFACE → $NET_IFACE,") порты ${OPEN_PORTS[*]}"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        info "firewalld активен, открываем порты"
+        for P in "${OPEN_PORTS[@]}"; do
+            run firewall-cmd --permanent --add-port="$P" || warn "не удалось открыть $P"
+        done
+        run firewall-cmd --reload || true
+        ok "firewalld: порты ${OPEN_PORTS[*]}"
+        if [[ "$ROLE" != "core" ]]; then
+            warn "Если VPN подключается, а интернета нет — firewalld режет форвардинг:"
+            warn "  firewall-cmd --permanent --zone=trusted --add-interface=${IFACE} && firewall-cmd --reload"
+        fi
+    elif iptables_input_closed; then
+        # Голый iptables без обёрток: вставляем ACCEPT в начало INPUT (повторно не дублируем).
+        info "iptables закрывает входящие, открываем порты"
+        for P in "${OPEN_PORTS[@]}"; do
+            iptables -C INPUT -p "${P#*/}" --dport "${P%/*}" -j ACCEPT 2>/dev/null \
+                || run iptables -I INPUT -p "${P#*/}" --dport "${P%/*}" -j ACCEPT \
+                || warn "не удалось открыть $P"
+        done
+        if command -v netfilter-persistent &>/dev/null; then
+            run netfilter-persistent save || warn "правила iptables не сохранены — после перезагрузки порты закроются"
+            ok "iptables: порты ${OPEN_PORTS[*]} (сохранено)"
+        else
+            ok "iptables: порты ${OPEN_PORTS[*]}"
+            warn "Правила iptables не переживут перезагрузку: apt install iptables-persistent && netfilter-persistent save"
+        fi
+    else
+        info "Фаервол на сервере входящие не закрывает — открывать нечего"
+    fi
+}
+
+# Адрес панели для итога: с секретным путём.
+panel_url() { echo "http://$1:$2/${3:+$3/}"; }
+
+# ═══ Сценарий ══════════════════════════════════════════════════════════════════
+
+echo
+echo -e "  ${ACC}◆${NC} ${BLD}${BRAND}${NC}  ${DIM}${CHANNEL} · ${VERSION}${NC}"
+echo -e "    ${DIM}Панель управления VPN на AmneziaWG — установка${NC}"
+echo -e "    ${DIM}Лог: $LOGFILE${NC}"
+rule
+
+# Поверх существующей установки: обновить (настройки, пользователи и роль остаются),
+# переустановить с нуля или удалить совсем (без меню — UNINSTALL=y). Спрашиваем первым —
+# от ответа зависит, спрашивать ли роль.
+INSTALL_MODE="fresh"
+if [[ "${UNINSTALL:-}" =~ ^([Yy]|yes|1)$ ]]; then
+    INSTALL_MODE="uninstall"
+elif [[ -d "$PROJECT" ]]; then
+    echo
+    warn "Уже установлено в $PROJECT"
+    echo -e "    ${ACC}${BLD}1${NC}  Обновить         ${DIM}до ${VERSION}; настройки, пользователи и роль сохранятся${NC}"
+    echo -e "    ${ACC}${BLD}2${NC}  Переустановить   ${DIM}с нуля; данные можно будет сохранить${NC}"
+    echo -e "    ${ACC}${BLD}3${NC}  Удалить          ${DIM}полностью: сервисы, данные, правила фаервола, по желанию AmneziaWG${NC}"
+    ask INST_CHOICE "Выбери [1–3, Enter — 1]: "
+    case "${INST_CHOICE:-1}" in
+        1) INSTALL_MODE="update" ;;
+        2) INSTALL_MODE="fresh" ;;
+        3) INSTALL_MODE="uninstall" ;;
+        *) fail "Неверный выбор: введи 1, 2 или 3" ;;
+    esac
+    echo
+fi
+
+# cli.env прежней установки читаем сразу: при переустановке каталог проекта удаляется
+# раньше, чем до него доходит дело, а из него берутся роль и порты, зашитые в уже
+# выданные ссылки (SUB_PORT, NODE_PORT) и в подключение ноды к панели.
+PREV_CLI_ENV=""
+[[ -f "$PROJECT/cli/cli.env" ]] && PREV_CLI_ENV=$(cat "$PROJECT/cli/cli.env")
+PREV_ROLE=""
+if [[ -n "$PREV_CLI_ENV" ]]; then
+    if   [[ -n "$(prev_val CORE_HOST)" ]];        then PREV_ROLE="node"
+    elif [[ "$(prev_val LOCAL_NODE)" == "off" ]]; then PREV_ROLE="core"
+    else                                               PREV_ROLE="standalone"
+    fi
+fi
+
+if [[ "$INSTALL_MODE" == "uninstall" ]]; then
+    uninstall_all
+    exit 0
+fi
+# Роль сервера (несколько серверов под одной панелью — README, «Несколько серверов»):
+#   standalone — панель + VPN на одной машине, как было всегда; может принимать ноды;
+#   core       — только панель, без VPN на этой машине (LOCAL_NODE=off): AmneziaWG, модуль
+#                ядра и заголовки не ставятся, VPN-серверы подключаются к ней нодами;
+#   node       — VPN без панели: awg-ctrl + awg-agent, который сам подключается к панели
+#                по строке awgjoin://… («Добавить сервер» в панели). Входящих портов,
+#                кроме UDP для клиентов, нода не открывает.
+# Можно задать окружением: ROLE=node JOIN='awgjoin://…' bash install.sh
+# При обновлении роль берётся из прежней установки: смена роли — только переустановкой.
+ROLE="${ROLE:-}"
+if [[ "$INSTALL_MODE" == "update" ]]; then
+    if [[ -n "$ROLE" && -n "$PREV_ROLE" && "$ROLE" != "$PREV_ROLE" ]]; then
+        fail "Смена роли ($PREV_ROLE → $ROLE) при обновлении невозможна — выбери полную переустановку"
+    fi
+    ROLE="${PREV_ROLE:-standalone}"
+elif [[ -z "$ROLE" ]]; then
+    case "$PREV_ROLE" in node) ROLE_DEF=3 ;; core) ROLE_DEF=2 ;; *) ROLE_DEF=1 ;; esac
+    echo
+    echo -e "  ${BLD}Роль сервера${NC}"
+    echo -e "    ${ACC}${BLD}1${NC}  Панель + VPN    ${DIM}самостоятельный сервер; к нему можно подключать ноды${NC}"
+    echo -e "    ${ACC}${BLD}2${NC}  Только панель   ${DIM}без VPN на этой машине; серверы подключаются нодами${NC}"
+    echo -e "    ${ACC}${BLD}3${NC}  Нода            ${DIM}VPN без панели; подключается к уже установленной${NC}"
+    ask ROLE_CHOICE "Выбери [1–3, Enter — ${ROLE_DEF}]: "
+    case "${ROLE_CHOICE:-$ROLE_DEF}" in
+        1) ROLE="standalone" ;;
+        2) ROLE="core" ;;
+        3) ROLE="node" ;;
+        *) fail "Неверный выбор: введи 1, 2 или 3" ;;
+    esac
+fi
+[[ "$ROLE" =~ ^(standalone|core|node)$ ]] || fail "ROLE должен быть standalone, core или node (задано: $ROLE)"
+case "$ROLE" in
+    standalone) ROLE_LABEL="панель + VPN" ;;
+    core)       ROLE_LABEL="только панель" ;;
+    node)       ROLE_LABEL="нода" ;;
+esac
+
+# Запускается ДО вопросов конфигурации и любого деструктива (rm -rf): на несовместимой
+# машине лучше упасть сразу, а не после ввода данных или удаления каталога.
+# Порты (UDP VPN / порт UI) здесь НЕ проверяем — это отдельно (фаервол/облако).
+step "Проверка совместимости"
+
+KERNEL=$(uname -r)
+VIRT=$(systemd-detect-virt 2>/dev/null || echo "unknown")
+
+# Семейство дистрибутива решает, как ставить AmneziaWG:
+#   ubuntu — add-apt-repository ppa:amnezia/ppa, заголовки linux-headers-generic;
+#   debian — ни software-properties-common (в Debian 13 его нет), ни
+#            linux-headers-generic там не существует: PPA подключаем вручную
+#            (ключ + signed-by), заголовки — только под текущее ядро.
+# Производные (Mint, Pop!_OS, Kali…) определяются через ID_LIKE.
+OS_ID=""; OS_LIKE=""; OS_CODENAME=""; OS_NAME=""
+if [[ -r /etc/os-release ]]; then
+    OS_ID=$(. /etc/os-release; echo "${ID:-}")
+    OS_LIKE=$(. /etc/os-release; echo "${ID_LIKE:-}")
+    OS_CODENAME=$(. /etc/os-release; echo "${VERSION_CODENAME:-}")
+    OS_NAME=$(. /etc/os-release; echo "${PRETTY_NAME:-}")
+fi
+if [[ "$OS_ID" == "ubuntu" || " $OS_LIKE " == *" ubuntu "* ]]; then
+    OS_FAMILY="ubuntu"
+elif [[ "$OS_ID" == "debian" || " $OS_LIKE " == *" debian "* ]]; then
+    OS_FAMILY="debian"
+else
+    OS_FAMILY=""
+fi
+# Вариант ядра без версии: 6.12.85+deb13-cloud-amd64 → cloud-amd64,
+# 6.1.0-18-cloud-amd64 → cloud-amd64. Нужен для мета-пакетов Debian
+# (linux-image-<вариант> / linux-headers-<вариант>).
+KFLAVOUR=$(sed -E 's/^[0-9][^-]*-([0-9]+-)?//' <<< "$KERNEL")
+# Что советовать, если заголовков под текущее ядро нет.
+if [[ "$OS_FAMILY" == "debian" ]]; then
+    HDR_FIX="apt-get update && apt-get install -y linux-image-$KFLAVOUR linux-headers-$KFLAVOUR && reboot"
+else
+    HDR_FIX="apt-get install -y linux-generic && reboot"
+fi
+
+echo -e "  ${DIM}${OS_NAME:-$(lsb_release -ds 2>/dev/null || echo unknown)} · ядро $KERNEL · виртуализация $VIRT · роль: $ROLE_LABEL${NC}"
+
+# Считаем все пункты, НЕ падая на первом, — чтобы показать полный чеклист
+# со статусом по каждому. Если хоть один не прошёл — печатаем причины и выходим
+# с кодом 0 (чистый выход, без вида «упало с ошибкой»).
+OS_OK=1; ARCH_OK=1; VIRT_OK=1; HDR_OK=1; NET_OK=1
+OS_WHY=""; ARCH_WHY=""; VIRT_WHY=""; HDR_WHY=""; NET_WHY=""
+
+# Архитектура: релиз собирается под amd64 и arm64.
+if [[ -z "$GOARCH" ]]; then
+    ARCH_OK=0
+    ARCH_WHY="архитектура '$(uname -m)' не поддерживается — сборки есть для x86_64 и aarch64"
+fi
+
+# 0) Дистрибутив: установщик умеет только apt-семейство Ubuntu/Debian.
+if [[ -z "$OS_FAMILY" ]]; then
+    OS_OK=0
+    OS_WHY="дистрибутив '${OS_NAME:-${OS_ID:-неизвестно}}' не поддерживается — нужен Ubuntu или Debian"
+fi
+
+# Виртуализация и заголовки нужны только для модуля ядра — панели без VPN (core) они не важны,
+# её можно ставить и в контейнер.
+if [[ "$ROLE" != "core" ]]; then
+    # 1) Виртуализация: kernel-модуль нельзя загрузить там, где ядро общее с хостом.
+    case "$VIRT" in
+        openvz|lxc|lxc-libvirt|docker|podman|wsl)
+            VIRT_OK=0
+            VIRT_WHY="виртуализация '$VIRT' — ядро общее с хостом, kernel-модуль AmneziaWG не загрузить (нужен userspace amneziawg-go)"
+            ;;
+    esac
+
+    # 2) Заголовки ядра: DKMS соберёт модуль только при их наличии под текущее ядро.
+    #    Уже в системе или есть кандидат в apt — ок. «(none)» — кастомное ядро, не
+    #    проходит. Пустой apt-индекс не валим: добьёт поздняя проверка на шаге AWG.
+    HDR_POLICY=$(apt-cache policy "linux-headers-$KERNEL" 2>/dev/null || true)
+    if [[ -d "/lib/modules/$KERNEL/build" ]]; then
+        :
+    elif echo "$HDR_POLICY" | grep -q 'Candidate: [^(]'; then
+        :
+    elif echo "$HDR_POLICY" | grep -q 'Candidate: (none)'; then
+        HDR_OK=0
+        HDR_WHY="нет заголовков под ядро $KERNEL в apt. Решение: $HDR_FIX, затем запусти install.sh заново"
+    fi
+fi
+
+# 3) Доступ в интернет: нужен для архива и пакетов AWG. Без -f: любой
+#    HTTP-ответ = связь есть; ненулевой код только при сбое соединения/DNS.
+#    Проверяем хосты, с которых реально качаем: хватает любого из двух —
+#    download_extract() умеет откатываться на запасной.
+NET_HOSTS=("$(url_host "$REPO_BASE")")
+[[ -n "$ARCHIVE_URL" ]] && NET_HOSTS=("$(url_host "$ARCHIVE_URL")")
+[[ -z "$ARCHIVE_URL" && "$(url_host "$REPO_FALLBACK")" != "${NET_HOSTS[0]}" ]] \
+    && NET_HOSTS+=("$(url_host "$REPO_FALLBACK")")
+NET_OK=0
+for h in "${NET_HOSTS[@]}"; do
+    if curl -sS --connect-timeout 8 -o /dev/null "https://$h" 2>/dev/null; then NET_OK=1; break; fi
+done
+[[ "$NET_OK" == 0 ]] && NET_WHY="нет доступа к ${NET_HOSTS[*]} — проверь интернет и DNS"
+
+mark "$OS_OK"   "Дистрибутив"
+mark "$ARCH_OK" "Архитектура"
+if [[ "$ROLE" != "core" ]]; then
+    mark "$VIRT_OK" "Виртуализация"
+    mark "$HDR_OK"  "Заголовки ядра"
+fi
+mark "$NET_OK"  "Доступ в интернет"
+
+if [[ "$OS_OK" == 0 || "$ARCH_OK" == 0 || "$VIRT_OK" == 0 || "$HDR_OK" == 0 || "$NET_OK" == 0 ]]; then
+    echo
+    warn "Установка невозможна — не пройдены проверки:"
+    [[ "$OS_OK"   == 0 ]] && echo -e "    ${RED}•${NC} $OS_WHY"
+    [[ "$ARCH_OK" == 0 ]] && echo -e "    ${RED}•${NC} $ARCH_WHY"
+    [[ "$VIRT_OK" == 0 ]] && echo -e "    ${RED}•${NC} $VIRT_WHY"
+    [[ "$HDR_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $HDR_WHY"
+    [[ "$NET_OK"  == 0 ]] && echo -e "    ${RED}•${NC} $NET_WHY"
+    echo
+    trap - ERR
+    exit 0
+fi
+
+NET_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+[[ -z "$NET_IFACE" ]] && fail "Не могу определить сетевой интерфейс"
+
+# ── Обновление: новая версия поверх, настройки и данные на месте ──────────────
+if [[ "$INSTALL_MODE" == "update" ]]; then
+    step "Обновление до версии ${VERSION} ($ROLE_LABEL)"
+
+    info "останавливаем и убиваем все процессы awg-control"
+    kill_related
+
+    download_extract
+    install_command
+
+    # Установке без секретного пути панели — выдаём его (UI_PREFIX=off — оставить без пути):
+    # иначе обновлённый сервер по-прежнему узнаётся сканером по странице логина. cli.env
+    # обновление не переписывает, поэтому дописываем одну строку.
+    UI_PREFIX_NEW="n"
+    UI_PREFIX="${UI_PREFIX:-}"
+    if [[ "$ROLE" != "node" ]]; then
+        CLI_ENV="$PROJECT/cli/cli.env"
+        if ! grep -q '^UI_PREFIX=' "$CLI_ENV" 2>/dev/null && [[ "$UI_PREFIX" != "off" ]]; then
+            UI_PREFIX="${UI_PREFIX:-$(rand_alnum 16)}"
+            [[ "$UI_PREFIX" =~ ^[A-Za-z0-9_-]{8,64}$ ]] \
+                || fail "UI_PREFIX «${UI_PREFIX}» — нужно 8–64 символа A–Z a–z 0–9 _ -"
+            printf 'UI_PREFIX=%s\n' "$UI_PREFIX" >> "$CLI_ENV"
+            UI_PREFIX_NEW="y"
+            ok "Панели выдан секретный путь"
+        fi
+        UI_PREFIX=$(sed -n 's/^UI_PREFIX=//p' "$CLI_ENV" 2>/dev/null | tail -1)
+    fi
+
+    start_and_status
+
+    rule
+    echo -e "  ${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}  ${DIM}${ROLE_LABEL}${NC}"
+    rule
+    if [[ "$ROLE" != "node" ]]; then
+        HOST="$(prev_val SUB_HOST)"; HOST="${HOST:-$(prev_val SERVER_IP)}"
+        echo -e "    ${DIM}Панель   ${NC} ${BLD}$(panel_url "${HOST:-IP}" "$(prev_val UI_PORT)" "$UI_PREFIX")${NC}"
+        if [[ "$UI_PREFIX_NEW" == "y" ]]; then
+            echo -e "             ${YLW}путь новый: без него панель отвечает 404 — обнови закладки и адрес${NC}"
+            echo -e "             ${YLW}внешнего API (/${UI_PREFIX}/api/v1/…). Вернуть как было: UI_PREFIX= в cli.env${NC}"
+        fi
+        rule
+    fi
+    echo
+    exit 0
+fi
+
+step "Конфигурация"
+
+# Внешний IPv4 — через ifconfig.me, иначе адрес, с которого сервер ходит наружу. Не спрашиваем.
+SERVER_IP=$(curl -s4 --connect-timeout 5 ifconfig.me 2>/dev/null || true)
+if ! [[ "$SERVER_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    SERVER_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
+fi
+[[ -n "$SERVER_IP" ]] || fail "Не удалось определить адрес сервера"
+ok "Адрес сервера: $SERVER_IP"
+
+# Что сохранять при переустановке — спрашиваем первым: от ответа зависят значения по умолчанию.
+#   С VPN (standalone, node): база пользователей и ключ сервера — только вместе:
+#   vpn:// ключи пользователей привязаны к ключу сервера. ui.db следует за ними.
+#   Панель без VPN (core): её данные — ui.db (серверы, ключи API, мастер-ключи).
+KEEP_DATA="n"
+if [[ "$ROLE" == "core" ]]; then
+    if [[ -f "$UI_DB_FILE" ]]; then
+        echo
+        warn "Найдены данные панели: $UI_DB_FILE"
+        ask KD "Сохранить серверы, ключи API и мастер-ключи? [Y/n]: "
+        [[ "${KD:-y}" =~ ^[Yy]$ ]] && KEEP_DATA="y"
+    fi
+elif [[ -f "$DB_FILE" || -f "$PRIV_KEY_FILE" ]]; then
+    echo
+    warn "Найдена существующая установка:"
+    [[ -f "$DB_FILE" ]]       && echo "    база пользователей: $DB_FILE"
+    [[ -f "$PRIV_KEY_FILE" ]] && echo "    ключ сервера:       $PRIV_KEY_FILE"
+
+    if [[ -f "$DB_FILE" && -f "$PRIV_KEY_FILE" && -f "$PUB_KEY_FILE" ]]; then
+        ask KD "Сохранить пользователей и ключ сервера? [Y/n]: "
+        [[ "${KD:-y}" =~ ^[Yy]$ ]] && KEEP_DATA="y"
+    else
+        warn "Для сохранения нужны и база, и оба ключа сервера — часть отсутствует."
+        warn "Пользователей не сохранить (vpn:// ключи стали бы невалидными)."
+    fi
+fi
+
+# Панель (awg-ui), подписка sen:// и приём нод есть везде, кроме ноды. Значения из окружения
+# (UI_PORT=…, SUB_PORT=…) важнее и не спрашиваются.
+UI_PORT="${UI_PORT:-}"; UI_USER="${UI_USER:-}"; UI_PASS="${UI_PASS:-}"
+SUB_PORT="${SUB_PORT:-}"; SUB_TLS="${SUB_TLS:-}"; NODE_PORT="${NODE_PORT:-}"
+JWT_SECRET=""
+if [[ "$ROLE" != "node" ]]; then
+    DEF=$(keep UI_PORT); DEF="${DEF:-$(gen_tcp_port)}"
+    ask_def UI_PORT "Порт панели [$DEF]: " "$DEF"
+    valid_port "$UI_PORT" || fail "Порт панели «$UI_PORT» — не номер порта"
+
+    DEF=$(keep UI_USER); DEF="${DEF:-admin}"
+    ask_def UI_USER "Логин панели [$DEF]: " "$DEF"
+
+    DEF=$(keep UI_PASS)
+    if [[ -n "$DEF" ]]; then
+        ask_def UI_PASS "Пароль панели [Enter — прежний]: " "$DEF" secret
+    else
+        DEF=$(rand_alnum 12)
+        ask_def UI_PASS "Пароль панели [$DEF]: " "$DEF" secret
+    fi
+    # Прежний секрет — чтобы открытые вкладки панели не разлогинило.
+    JWT_SECRET=$(keep JWT_SECRET); JWT_SECRET="${JWT_SECRET:-$(rand_alnum 32)}"
+
+    SUB_PORT="${SUB_PORT:-$(keep SUB_PORT)}"
+    if [[ -z "$SUB_PORT" ]]; then
+        DEF=$(gen_tcp_port "$UI_PORT")
+        ask_def SUB_PORT "Порт подписки sen:// [$DEF]: " "$DEF"
+    fi
+    valid_port "$SUB_PORT" || fail "Порт подписки «$SUB_PORT» — не номер порта"
+    [[ "$SUB_PORT" != "$UI_PORT" ]] || fail "Порт подписки совпадает с портом панели ($UI_PORT)"
+
+    SUB_TLS="${SUB_TLS:-$(keep SUB_TLS)}"
+    if [[ -z "$SUB_TLS" ]]; then
+        ask ST "Подписка sen:// по HTTPS (самоподписанный сертификат, домен не нужен)? [Y/n]: "
+        [[ "${ST:-y}" =~ ^[Nn]$ ]] && SUB_TLS="off" || SUB_TLS="on"
+    fi
+    [[ "$SUB_TLS" == "on" ]] || SUB_TLS="off"
+
+    # Приём нод: ноды сами подключаются к панели по WSS на этот порт. Сертификат хаба awg-ui
+    # создаёт при первом запуске, его отпечаток зашит в строки подключения. Панели без VPN
+    # приём нод обязателен (иначе ей нечем управлять), у «панели + VPN» — по желанию.
+    NODE_PORT="${NODE_PORT:-$(keep NODE_PORT)}"
+    if [[ -z "$NODE_PORT" ]]; then
+        if [[ "$ROLE" == "core" ]]; then
+            DEF=$(gen_tcp_port "$UI_PORT" "$SUB_PORT")
+            ask_def NODE_PORT "Порт для подключения нод [$DEF]: " "$DEF"
+        else
+            ask NODE_PORT "Порт для подключения нод (Enter — не принимать ноды, «+» — случайный): "
+            [[ "$NODE_PORT" == "+" ]] && NODE_PORT=$(gen_tcp_port "$UI_PORT" "$SUB_PORT")
+        fi
+    fi
+    if [[ -n "$NODE_PORT" ]]; then
+        valid_port "$NODE_PORT" || fail "Порт для нод «$NODE_PORT» — не номер порта"
+        [[ "$NODE_PORT" != "$UI_PORT" && "$NODE_PORT" != "$SUB_PORT" ]] \
+            || fail "Порт для нод совпадает с портом панели или подписки"
+    fi
+fi
+# awg-ctrl слушает только loopback; порт внутренний, при каждой установке новый.
+AWGCTRL_PORT=$(gen_tcp_port "${UI_PORT:-}" "${SUB_PORT:-}" "${NODE_PORT:-}")
+
+# Порт, MTU и параметры обфускации VPN (choose_awg_params).
+[[ "$ROLE" != "core" ]] && choose_awg_params
+
+if [[ "$ROLE" != "node" ]]; then
+    # Секретный путь панели: снаружи она отвечает только на http://IP:PORT/<путь>/, на остальное —
+    # 404, как пустой сервер. Без него сканер узнавал панель по странице логина одним GET.
+    # При переустановке путь прежний; UI_PREFIX=off — без пути, UI_PREFIX=<свой> — свой
+    # (8–64 символа A–Z a–z 0–9 _ -).
+    UI_PREFIX="${UI_PREFIX:-}"
+    UI_PREFIX_NEW="n"
+    if [[ "$UI_PREFIX" == "off" ]]; then
+        UI_PREFIX=""
+    elif [[ -z "$UI_PREFIX" ]]; then
+        UI_PREFIX=$(keep UI_PREFIX)
+        if [[ -z "$UI_PREFIX" ]]; then
+            UI_PREFIX=$(rand_alnum 16)
+            [[ -n "$PREV_CLI_ENV" ]] && UI_PREFIX_NEW="y"
+        fi
+    fi
+    [[ -z "$UI_PREFIX" || "$UI_PREFIX" =~ ^[A-Za-z0-9_-]{8,64}$ ]] \
+        || fail "UI_PREFIX «${UI_PREFIX}» — нужно 8–64 символа A–Z a–z 0–9 _ -"
+    # Путь переехавшей сюда панели (migrate) — её закладкам и API через ретранслятор.
+    UI_PREFIX_MOVED=$(keep UI_PREFIX_MOVED)
+fi
+
+# Нода: к какой панели подключаться (строка awgjoin://… из «Добавить сервер» в панели).
 CORE_HOST=""; CORE_PORT=""; CORE_PIN=""; NODE_ID=""; JOIN_SECRET=""
 if [[ "$ROLE" == "node" ]]; then
     JOIN="${JOIN:-}"
@@ -1039,17 +1220,19 @@ if [[ "$ROLE" == "node" ]]; then
     fi
 fi
 
-# Имя сервера — только там, где есть VPN. Если база уже существует (DB_EXISTS, проверено
-# заранее в preflight) — имя берётся из неё, не спрашиваем. Если базы нет — спрашиваем.
-SERVER_NAME="VPN"
+# Имя сервера — только там, где есть VPN. При сохранённой базе имя хранится в ней (его меняют
+# в панели) — не спрашиваем; иначе спрашиваем, по умолчанию прежнее.
+SERVER_NAME="${SERVER_NAME:-}"
 if [[ "$ROLE" != "core" ]]; then
-    if [[ "$DB_EXISTS" == "y" ]]; then
-        echo "  Server name: берётся из существующей базы (пропускаем)"
+    if [[ "$KEEP_DATA" == "y" ]]; then
+        SERVER_NAME="${SERVER_NAME:-$(prev_val SERVER_NAME)}"
+        info "Имя сервера — из сохранённой базы"
     else
-        ask SERVER_NAME "Server name [VPN]: "
-        SERVER_NAME="${SERVER_NAME:-VPN}"
+        DEF=$(prev_val SERVER_NAME); DEF="${DEF:-VPN}"
+        ask_def SERVER_NAME "Имя сервера [$DEF]: " "$DEF"
     fi
 fi
+SERVER_NAME="${SERVER_NAME:-VPN}"
 
 # Сводка. Метки выровнены пробелами прямо в строках: printf в bash считает ширину в байтах,
 # и кириллица поехала бы.
@@ -1063,7 +1246,7 @@ if [[ "$ROLE" != "core" ]]; then
     echo -e "    ${DIM}VPN            ${NC} ${AWG_PORT}/udp  ${DIM}· MTU ${MTU}${NC}"
 fi
 if [[ "$ROLE" != "node" ]]; then
-    echo -e "    ${DIM}Панель         ${NC} ${UI_PORT}/tcp  ${DIM}· логин $UI_USER${NC}"
+    echo -e "    ${DIM}Панель         ${NC} ${UI_PORT}/tcp  ${DIM}· логин $UI_USER · $([[ -n "$UI_PREFIX" ]] && echo "секретный путь" || echo "без секретного пути")${NC}"
     echo -e "    ${DIM}Подписка sen://${NC} ${SUB_PORT}/tcp  ${DIM}· $([[ "$SUB_TLS" == "on" ]] && echo "HTTPS" || echo "HTTP, ответы подписаны")${NC}"
     if [[ -n "$NODE_PORT" ]]; then
         echo -e "    ${DIM}Приём нод      ${NC} ${NODE_PORT}/tcp"
@@ -1088,6 +1271,14 @@ rule
 ask YN "Продолжить? [Y/n]: "
 [[ "${YN:-y}" =~ ^[Nn]$ ]] && { echo "  Отменено."; exit 0; }
 
+# Переустановка: прежние процессы и каталог убираем только после подтверждения — отказ на
+# «Продолжить?» не должен оставлять сервер без установки. Данные (/etc/amnezia) на месте,
+# cli.env прочитан в начале (PREV_CLI_ENV).
+if [[ -d "$PROJECT" ]]; then
+    kill_related
+    rm -rf "${PROJECT:?}"
+fi
+
 # Совместимость (виртуализация, заголовки ядра, интернет) проверена выше в
 # секции «Проверка совместимости»; $KERNEL задан там же.
 step "1/6  AmneziaWG"
@@ -1095,49 +1286,6 @@ step "1/6  AmneziaWG"
 if [[ "$ROLE" == "core" ]]; then
     skip "пропущено — у панели без VPN AmneziaWG не нужен"
 else
-
-    # Debian: add-apt-repository нет (software-properties-common из Debian 13 убран),
-    # а PPA под Debian-релизы не собирается — подключаем его вручную на Ubuntu-серию
-    # с glibc не новее дебиановской. Модуль приезжает DKMS-исходниками и от серии
-    # не зависит; серия важна только для бинарника amneziawg-tools.
-    #   AMNEZIA_PPA_SUITE — задать серию вручную (focal/jammy/noble).
-    AMNEZIA_PPA_URL="https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu"
-    AMNEZIA_PPA_FPR="75C9DD72C799870E310542E24166F2C257290828"   # Launchpad PPA for Iurii Egorov
-    AMNEZIA_KEYRING="/etc/apt/keyrings/amnezia-ppa.gpg"
-    add_amnezia_ppa_debian() {
-        local suite="${AMNEZIA_PPA_SUITE:-}"
-        if [[ -z "$suite" ]]; then
-            case "$OS_CODENAME" in
-                bullseye) suite="focal" ;;
-                bookworm) suite="jammy" ;;
-                trixie)   suite="noble" ;;
-                *)        suite="noble"
-                          warn "Debian '${OS_CODENAME:-неизвестно}' не сопоставлен с серией PPA — берём noble (задать вручную: AMNEZIA_PPA_SUITE=…)" ;;
-            esac
-        fi
-        info "подключение PPA amnezia (Debian ${OS_CODENAME:-?} → серия $suite)"
-
-        # Ключ берём по полному отпечатку и сверяем отпечаток после загрузки —
-        # apt-key в Debian 12+ уже нет, а доверять ответу keyserver вслепую нельзя.
-        local tmp gh fprs=""
-        tmp=$(mktemp); gh=$(mktemp -d)
-        if curl -fsSL --connect-timeout 15 \
-                "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${AMNEZIA_PPA_FPR}" \
-                | gpg --dearmor > "$tmp" 2>/dev/null; then
-            fprs=$(GNUPGHOME="$gh" gpg --batch --show-keys --with-colons "$tmp" 2>/dev/null || true)
-        fi
-        if ! grep -q "^fpr:::::::::${AMNEZIA_PPA_FPR}:" <<< "$fprs"; then
-            rm -rf "$tmp" "$gh"
-            fail "Не удалось получить ключ PPA amnezia ($AMNEZIA_PPA_FPR) с keyserver.ubuntu.com"
-        fi
-        install -d -m 0755 /etc/apt/keyrings
-        install -m 0644 "$tmp" "$AMNEZIA_KEYRING"
-        rm -rf "$tmp" "$gh"
-
-        echo "deb [signed-by=$AMNEZIA_KEYRING] $AMNEZIA_PPA_URL $suite main" \
-            > /etc/apt/sources.list.d/amnezia-ppa.list
-        ok "PPA amnezia подключён: $suite, ключ $AMNEZIA_KEYRING"
-    }
 
     if command -v awg &>/dev/null && command -v awg-quick &>/dev/null && modinfo amneziawg &>/dev/null; then
         ok "AWG уже установлен (модуль amneziawg: $(modinfo -F version amneziawg 2>/dev/null || echo present))"
@@ -1226,34 +1374,6 @@ else
         ok "AWG установлен, модуль amneziawg собран и загружается"
     fi
 
-    # Поколение протокола: 3.1 требует модуль 3.x и ядро ≥ 5.5.
-    #   - модуль: PPA с 30.07.2026 отдаёт 3.x; на старых установках он может быть 2.0,
-    #     поэтому сначала пробуем обновиться.
-    #   - ядро: header protection использует библиотечный chacha-API
-    #     (chacha_init/chacha20_crypt), которого нет до 5.5 — модуль там не соберётся
-    #     (upstream issue #210). Проблема с nla_put_uint на ядрах < 6.7 уже исправлена.
-    # При AWG_GEN=3.1 (по умолчанию) недоступность — fail с диагностикой: тихий
-    # откат подсунул бы более слабую обфускацию незаметно для оператора.
-    # При AWG_GEN=auto не падаем, а пишем 2.0-конфиг: awg-ctrl определяет поколение
-    # по наличию HeaderProtectionKey в конфиге, так что всё продолжит работать ровно
-    # как раньше, а перейти на 3.1 можно потом из панели.
-
-    kernel_lt_5_5() {
-        local maj min
-        maj=${KERNEL%%.*}
-        min=${KERNEL#*.}; min=${min%%.*}
-        [[ "$maj" -lt 5 || ( "$maj" -eq 5 && "$min" -lt 5 ) ]]
-    }
-
-    # 🛑 Версий у модуля две, и путать их нельзя:
-    #   modinfo                       — что лежит на диске (после apt/DKMS);
-    #   /sys/module/amneziawg/version — что реально загружено в ядро.
-    # `apt --only-upgrade` пересобирает модуль, но НЕ переставляет уже загруженный.
-    # Ориентироваться на modinfo — значит написать 3.1-конфиг, который старый
-    # загруженный модуль отвергнет: `awg setconf` вернёт «Unable to modify
-    # interface: Invalid argument», и awg-quick up упадёт. Решает перезагрузка модуля.
-    disk_mod_ver()   { modinfo -F version amneziawg 2>/dev/null || echo ""; }
-    loaded_mod_ver() { cat /sys/module/amneziawg/version 2>/dev/null || echo ""; }
 
     if [[ "$AWG_GEN" == "2.0" ]]; then
         AWG3="n"
@@ -1571,73 +1691,19 @@ else
     ok "AmneziaWG $GEN_LABEL · модуль ${MOD_VER:-?} · tools ${TOOLS_VER:-?}$([[ "$AWG_PIN" == "y" ]] && echo " · версия закреплена")"
 fi
 
+step "5/6  Фаервол"
+
 # Порты, которые должны быть доступны снаружи. Нода открывает только UDP для клиентов: к панели
 # она подключается сама.
 OPEN_PORTS=()
 [[ "$ROLE" != "core" ]] && OPEN_PORTS+=("${AWG_PORT}/udp")
 [[ "$ROLE" != "node" ]] && OPEN_PORTS+=("${UI_PORT}/tcp" "${SUB_PORT}/tcp")
 [[ "$ROLE" != "node" && -n "$NODE_PORT" ]] && OPEN_PORTS+=("${NODE_PORT}/tcp")
-
-# Закрывает ли голый iptables входящие: политика DROP или правило DROP/REJECT в INPUT.
-iptables_input_closed() {
-    command -v iptables &>/dev/null || return 1
-    iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP|^-A INPUT .*-j (DROP|REJECT)'
-}
-
-# Фаервол на самом сервере. Фаервол хостера (панель провайдера, security group) отсюда не
-# виден — о нём напоминаем в итоге установки.
-if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
-    # UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
-    # цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT
-    # дело не доходит и трафик клиентов наружу режется: в dmesg сыплется
-    # «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
-    # Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
-    info "UFW активен, открываем $([[ "$ROLE" != "core" ]] && echo "маршрут и ")порты"
-    if [[ "$ROLE" != "core" ]]; then
-        run ufw route allow in on "$IFACE" out on "$NET_IFACE" \
-            || warn "ufw route allow не сработал — трафик клиентов может резаться"
-    fi
-    for P in "${OPEN_PORTS[@]}"; do
-        run ufw allow "$P" || warn "не удалось открыть $P"
-    done
-    run ufw reload || true
-    ok "UFW:$([[ "$ROLE" != "core" ]] && echo " форвардинг $IFACE → $NET_IFACE,") порты ${OPEN_PORTS[*]}"
-elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
-    info "firewalld активен, открываем порты"
-    for P in "${OPEN_PORTS[@]}"; do
-        run firewall-cmd --permanent --add-port="$P" || warn "не удалось открыть $P"
-    done
-    run firewall-cmd --reload || true
-    ok "firewalld: порты ${OPEN_PORTS[*]}"
-    if [[ "$ROLE" != "core" ]]; then
-        warn "Если VPN подключается, а интернета нет — firewalld режет форвардинг:"
-        warn "  firewall-cmd --permanent --zone=trusted --add-interface=${IFACE} && firewall-cmd --reload"
-    fi
-elif iptables_input_closed; then
-    # Голый iptables без обёрток: вставляем ACCEPT в начало INPUT (повторно не дублируем).
-    info "iptables закрывает входящие, открываем порты"
-    for P in "${OPEN_PORTS[@]}"; do
-        iptables -C INPUT -p "${P#*/}" --dport "${P%/*}" -j ACCEPT 2>/dev/null \
-            || run iptables -I INPUT -p "${P#*/}" --dport "${P%/*}" -j ACCEPT \
-            || warn "не удалось открыть $P"
-    done
-    if command -v netfilter-persistent &>/dev/null; then
-        run netfilter-persistent save || warn "правила iptables не сохранены — после перезагрузки порты закроются"
-        ok "iptables: порты ${OPEN_PORTS[*]} (сохранено)"
-    else
-        ok "iptables: порты ${OPEN_PORTS[*]}"
-        warn "Правила iptables не переживут перезагрузку: apt install iptables-persistent && netfilter-persistent save"
-    fi
-else
-    info "Фаервол на сервере входящие не закрывает — открывать нечего"
-fi
-
-step "5/6  Команда awg-ctrl"
-
-install_command
+open_firewall
 
 step "6/6  Запуск сервисов"
 
+install_command
 # cli.env по роли. Роль CLI узнаёт отсюда же: CORE_HOST → нода (awg-ctrl + awg-agent),
 # LOCAL_NODE=off → панель без VPN (только awg-ui), иначе — awg-ctrl + awg-ui.
 {
@@ -1743,7 +1809,7 @@ rule
 echo -e "  ${GRN}${BLD}✓ Готово${NC}  ${DIM}${BRAND} ${VERSION} · ${ROLE_LABEL}${NC}"
 rule
 if [[ "$ROLE" != "node" ]]; then
-    echo -e "    ${DIM}Панель   ${NC} ${BLD}http://${SERVER_IP}:${UI_PORT}/${UI_PREFIX:+${UI_PREFIX}/}${NC}"
+    echo -e "    ${DIM}Панель   ${NC} ${BLD}$(panel_url "$SERVER_IP" "$UI_PORT" "$UI_PREFIX")${NC}"
     if [[ -n "$UI_PREFIX" ]]; then
         echo -e "             ${DIM}секретный путь: без него панель отвечает 404 — сохрани адрес целиком${NC}"
         [[ "$UI_PREFIX_NEW" == "y" ]] && \
@@ -1768,5 +1834,6 @@ echo -e "    ${YLW}⚠${NC}  Если у хостера свой фаервол 
 echo -e "       ${BLD}${OPEN_PORTS[*]}${NC}  ${DIM}иначе клиенты не подключатся, а на сервере всё будет выглядеть исправным${NC}"
 rule
 echo -e "    ${DIM}awg-ctrl                     ${NC} меню: запуск, статус, логин и пароль, join/unjoin"
+echo -e "    ${DIM}awg-ctrl status              ${NC} состояние сервисов и адрес панели"
 echo -e "    ${DIM}systemctl restart awg-control${NC} перезапуск ${DIM}(автозапуск на загрузке включён)${NC}"
 echo
