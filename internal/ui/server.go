@@ -847,8 +847,9 @@ func (a *App) routes() *Router {
 
 	app.Post("/login", a.login)
 	app.Post("/logout", auth, a.logout)
-	// Единственный роут без авторизации: вордмарк нужен уже на экране логина.
-	app.Get("/ui/brand", func(c *Ctx) bool {
+	// За авторизацией: без неё сканер одним GET узнавал бы, что на порту панель Forgetting.
+	// Экран логина обходится без вордмарка.
+	app.Get("/ui/brand", auth, func(c *Ctx) bool {
 		return c.JSON(200, jsjson.Object{{Key: "brand", Val: a.brand}, {Key: "channel", Val: a.channel}, {Key: "version", Val: a.version}})
 	})
 	app.Get("/ui/apikeys", auth, a.apiKeysList)

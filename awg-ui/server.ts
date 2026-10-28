@@ -206,9 +206,9 @@ app.post("/logout", requireAuth, (req: Request, res: Response) => {
     res.json({ ok: true });
 });
 
-// Единственный роут без авторизации: вордмарк нужен уже на экране логина,
-// до выдачи JWT. Наружу уходит только имя продукта и версия.
-app.get("/ui/brand", (_req: Request, res: Response) => {
+// За авторизацией: без неё сканер одним GET узнавал бы, что на порту панель Forgetting.
+// Экран логина обходится без вордмарка.
+app.get("/ui/brand", requireAuth, (_req: Request, res: Response) => {
     res.json({ brand: BRAND, channel: CHANNEL, version: VERSION });
 });
 

@@ -187,7 +187,7 @@ TOKEN=$(curl -s -X POST http://HOST:PORT/login \
 
 | Метод | Ответ |
 |---|---|
-| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.4.7" }` — **без авторизации**, панель берёт отсюда вордмарк на экране логина |
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.4.7" }` — требует JWT панели (без авторизации выдавал бы панель сканерам). Вордмарк в шапке после входа |
 | `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
 | `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
 
