@@ -151,7 +151,7 @@ NODE_KEY_FILE="$AWG_DIR/node.key"
 IFACE="awg1"
 AWG_PORT="${AWG_PORT:-}"   # UDP для клиентов; пусто — выбирает choose_awg_params
 SUBNET="10.9"
-MTU="1376"
+MTU="${AWG_MTU:-}"   # MTU туннеля; пусто — выбирает choose_awg_params
 
 # Единый бинарник: сервисы (ctrl/ui/agent) и CLI (start/stop/status/…). Команда awg-ctrl —
 # ссылка на него.
@@ -357,7 +357,7 @@ fi
 DB_EXISTS="n"
 [[ -f "$DB_FILE" ]] && DB_EXISTS="y"
 
-# Параметры обфускации и UDP-порт AWG. На новой установке — случайные, у каждого сервера
+# Параметры обфускации, UDP-порт и MTU AWG. На новой установке — случайные, у каждого сервера
 # свои: известные всем значения по умолчанию — готовая сигнатура для блокировки. При KEEP_DATA=y
 # берутся из прежнего awg1.conf (choose_awg_params ниже): они зашиты во все выданные vpn://
 # ключи, их смена сделала бы каждый ключ невалидным.
@@ -371,10 +371,17 @@ DB_EXISTS="n"
 #   - S4 добавляется к каждому пакету данных — держим маленьким, как прежние 14
 #   - H1–H4: непересекающиеся диапазоны в [10^8, 2^31−1] — далеко от 1–4 (типы сообщений
 #     WireGuard) и не выше прежних значений (некоторые клиенты разбирают их как int32)
-#   - I1–I5 НЕ трогать: в vpn:// ключ уходят пустыми плейсхолдерами
+#   - I1 — пакет-маскировка, его шлёт инициатор handshake, принимающая сторона просто
+#     отбрасывает. Сервер его не сверяет: у каждого ключа может быть свой, поэтому при
+#     KEEP_DATA=y без I1 в конфиге его можно сгенерировать заново — старые ключи не сломаются.
+#     Формат обязан пройти И kernel-модуль (сервер), И amneziawg-go (клиенты) — см. AWG_I1_RE
+#   - I2–I5 НЕ трогать: в vpn:// ключ уходят пустыми плейсхолдерами
+#   - MTU 1320–1376: не выше прежнего (запас под S4, заголовки и IPv6 на пути), не ниже —
+#     лишние накладные расходы. Расхождение MTU сервера и клиента WireGuard переносит
 # Прежние постоянные значения: ими собраны ключи установок до рандомизации — нужны, если
 # при KEEP_DATA=y awg1.conf потерялся.
 LEGACY_AWG_PORT="47619"
+LEGACY_MTU="1376"
 LEGACY_JC=6; LEGACY_JMIN=10; LEGACY_JMAX=50
 LEGACY_S1=90; LEGACY_S2=45; LEGACY_S3=37; LEGACY_S4=14
 LEGACY_H1="1224800044-2116730834"
@@ -401,6 +408,34 @@ gen_awg_params() {
     H1=${r[0]}; H2=${r[1]}; H3=${r[2]}; H4=${r[3]}
 }
 
+# Синтаксис I1, который принимают обе реализации AmneziaWG:
+#   - только теги <b 0xHEX>, <r N>, <rc N>, <rd N>, <t>. <c> не знает amneziawg-go (клиент не
+#     применит ключ), <d>/<ds>/<dz> не знает kernel-модуль;
+#   - ровно ОДИН пробел между именем тега и аргументом: модуль делит по одиночному пробелу;
+#   - у <b> префикс 0x обязателен, hex — чётной длины;
+#   - текст вне <…> обе молча выкидывают — не пишем.
+# Ошибка формата роняет весь `awg-quick up`, а модуль говорит лишь «Invalid argument».
+AWG_I1_RE='^(<b 0x([0-9a-f]{2})+>|<(r|rc|rd) [1-9][0-9]{0,3}>|<t>)+$'
+
+# Домены для I1: популярные, чтобы запрос выглядел обычным.
+I1_DOMAINS=(google.com youtube.com yandex.ru vk.com mail.ru ok.ru apple.com icloud.com
+            microsoft.com cloudflare.com wikipedia.org github.com)
+
+# I1 — DNS-запрос (его шлёт клиент, так что запрос правдоподобнее ответа): <r 2> — ID, новый
+# в каждом пакете; флаги 0100 (стандартный, RD), 1 вопрос; случайный домен, A или AAAA, класс IN.
+# 27–36 байт — меньше любого handshake-пакета (самый короткий, cookie, ≥ 79): по длине не путается.
+gen_awg_i1() {
+    local d label qname="" qtype labels
+    d=${I1_DOMAINS[$(rand_int 0 $(( ${#I1_DOMAINS[@]} - 1 )))]}
+    [[ $(rand_int 0 1) == 1 ]] && d="www.$d"
+    IFS=. read -ra labels <<< "$d"
+    for label in "${labels[@]}"; do
+        qname+=$(printf '%02x' "${#label}")$(printf '%s' "$label" | od -An -tx1 | tr -d ' \n')
+    done
+    qtype=$([[ $(rand_int 0 2) == 0 ]] && echo 001c || echo 0001)
+    I1="<r 2><b 0x01000001000000000000${qname}00${qtype}0001>"
+}
+
 legacy_awg_params() {
     JC=$LEGACY_JC; JMIN=$LEGACY_JMIN; JMAX=$LEGACY_JMAX
     S1=$LEGACY_S1; S2=$LEGACY_S2; S3=$LEGACY_S3; S4=$LEGACY_S4
@@ -416,8 +451,9 @@ gen_awg_port() {
     done
 }
 
-# Порт и обфускация: при KEEP_DATA=y — из прежнего awg1.conf (все J/S/H разом или ни одного:
-# смешивать с новыми нельзя), иначе случайные. AWG_PORT из окружения важнее всего.
+# Порт, MTU и обфускация: при KEEP_DATA=y — из прежнего awg1.conf (все J/S/H разом или ни
+# одного: смешивать с новыми нельзя), иначе случайные. AWG_PORT и AWG_MTU из окружения
+# важнее всего.
 choose_awg_params() {
     local k prev_port=""
     # || true: без файла sed падает, а с pipefail и set -e это молча роняло бы установку.
@@ -436,12 +472,27 @@ choose_awg_params() {
         prev_port=$(conf_val ListenPort)
         [[ -z "$prev_port" ]] && prev_port=$(prev_val SERVER_PORT)
         AWG_PORT="${AWG_PORT:-${prev_port:-$LEGACY_AWG_PORT}}"
+        MTU="${MTU:-$(conf_val MTU)}"
+        MTU="${MTU:-$LEGACY_MTU}"
+        I1=$(conf_val I1)
+        if [[ -n "$I1" && ! "$I1" =~ $AWG_I1_RE ]]; then
+            warn "I1 из $AWG_CONF не пройдёт парсер AmneziaWG — генерируем новый"
+            I1=""
+        fi
+        # Конфиги до рандомизации I1 не содержат: ключи брали общий из awg-ctrl. Новый
+        # безопасен — сервер I1 не сверяет, у старых ключей останется прежний.
+        [[ -z "$I1" ]] && gen_awg_i1
     else
         gen_awg_params
+        gen_awg_i1
         AWG_PORT="${AWG_PORT:-$(gen_awg_port)}"
+        MTU="${MTU:-$(rand_int 1320 1376)}"
     fi
     [[ "$AWG_PORT" =~ ^[0-9]+$ && "$AWG_PORT" -gt 0 && "$AWG_PORT" -lt 65536 ]] \
         || fail "AWG_PORT «${AWG_PORT}» — не номер порта"
+    [[ "$MTU" =~ ^[0-9]+$ && "$MTU" -ge 1280 && "$MTU" -le 1500 ]] \
+        || fail "MTU «${MTU}» — нужно число 1280–1500"
+    [[ "$I1" =~ $AWG_I1_RE ]] || fail "I1 «${I1}» не пройдёт парсер AmneziaWG"
 }
 
 # Поколение протокола и закрепление версии пакета — управляются переменными
@@ -842,7 +893,7 @@ echo -e "    ${DIM}Роль           ${NC} ${BLD}$ROLE_LABEL${NC}"
 echo -e "    ${DIM}Адрес          ${NC} $SERVER_IP  ${DIM}· интерфейс $NET_IFACE${NC}"
 if [[ "$ROLE" != "core" ]]; then
     echo -e "    ${DIM}Имя сервера    ${NC} $SERVER_NAME"
-    echo -e "    ${DIM}VPN            ${NC} ${AWG_PORT}/udp"
+    echo -e "    ${DIM}VPN            ${NC} ${AWG_PORT}/udp  ${DIM}· MTU ${MTU}${NC}"
 fi
 if [[ "$ROLE" != "node" ]]; then
     echo -e "    ${DIM}Панель         ${NC} ${UI_PORT}/tcp  ${DIM}· логин $UI_USER${NC}"
@@ -1247,6 +1298,7 @@ H1 = ${H1}
 H2 = ${H2}
 H3 = ${H3}
 H4 = ${H4}
+I1 = ${I1}
 CONF
 
     [[ -n "$AWG3_LINES" ]] && printf '%s\n' "$AWG3_LINES" >> "$AWG_CONF"

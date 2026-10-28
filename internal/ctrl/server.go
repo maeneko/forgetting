@@ -150,7 +150,7 @@ func New() (*Server, error) {
 	module, tools := readVersions()
 	s.c = Config{
 		ServerIP: ip, ServerPort: sp, ServerName: name,
-		DNS1: "1.1.1.1", DNS2: "1.0.0.1", MTU: 1376, Subnet: "10.9",
+		DNS1: "1.1.1.1", DNS2: "1.0.0.1", MTU: ReadMTU(s.confPath()), Subnet: "10.9",
 		Keepalive: keepaliveByGen[gen], Params: params, Gen: gen,
 		AwgModule: module, AwgTools: tools,
 	}
