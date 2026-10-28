@@ -57,6 +57,23 @@ AWG_GEN=auto bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgettin
 `REPO_BASE`, `REPO_FALLBACK`, `ARCHIVE_URL`, `BRAND` перед запуском установщика
 (подробности — в комментариях `install.sh` и в `.env`).
 
+### Удаление
+
+Тот же установщик: на сервере с установкой — пункт **3 «Удалить»**, без меню —
+`UNINSTALL=y` (подтверждение «удалить» тогда не спрашивается):
+
+```bash
+UNINSTALL=y bash <(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/main/install.sh)
+```
+
+Удаляются сервисы и юнит systemd, интерфейс `awg1`, nft-таблицы шейпинга и блокировки
+торрентов, открытые установщиком порты (UFW, firewalld или iptables), Prometheus из
+`awg-ctrl monitor install`, `/opt/awg-control`, `/etc/amnezia` (пользователи, ключи, базы),
+команда `awg-ctrl`, sysctl-файл и логи установки (в них пароль панели). Перед этим установщик
+предлагает сохранить копию данных в `/root/forgetting-backup-<время>.tar.gz`. AmneziaWG
+(пакеты, модуль, PPA) — по отдельному вопросу; общие зависимости (dkms, build-essential,
+iptables, заголовки ядра) остаются. Ноду после удаления уберите и из списка серверов панели.
+
 ### Секретный путь панели
 
 Установщик выдаёт панели случайный путь: она открывается по `http://IP:PORT/<путь>/`, а на

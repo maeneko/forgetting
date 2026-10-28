@@ -163,19 +163,55 @@ echo -e "    ${DIM}Панель управления VPN на AmneziaWG — ус
 echo -e "    ${DIM}Лог: $LOGFILE${NC}"
 rule
 
+# Сначала корректно через CLI (по PID-файлам), затем добиваем всё, что ещё
+# держит файлы проекта: осиротевшие процессы, ручной запуск или stale PID,
+# которые `stop all` не находит. Вызывать ДО `rm -rf $PROJECT` — иначе сервисы
+# продолжат работать с уже удалёнными файлами и порт/интерфейс останутся занятыми.
+kill_related() {
+    if [[ -x "$BIN" ]]; then
+        "$BIN" stop all 2>/dev/null || true
+    else
+        # Установка до Go-версии: её CLI на tsx.
+        local _tsx="$PROJECT/cli/node_modules/.bin/tsx"
+        local _cli="$PROJECT/cli/src/index.ts"
+        [[ -x "$_tsx" && -f "$_cli" ]] && "$_tsx" "$_cli" stop all 2>/dev/null || true
+    fi
+
+    # cmdline всех сервисов (awg-control <роль>, у старых — tsx …) содержит путь проекта.
+    if command -v pkill &>/dev/null; then
+        pkill -TERM -f "$PROJECT/" 2>/dev/null || true
+        sleep 1
+        pkill -KILL -f "$PROJECT/" 2>/dev/null || true
+    else
+        local _pids
+        _pids=$(ps -eo pid=,args= | awk -v p="$PROJECT/" 'index($0,p){print $1}')
+        [[ -n "$_pids" ]] && kill -TERM $_pids 2>/dev/null || true
+        sleep 1
+        _pids=$(ps -eo pid=,args= | awk -v p="$PROJECT/" 'index($0,p){print $1}')
+        [[ -n "$_pids" ]] && kill -KILL $_pids 2>/dev/null || true
+    fi
+
+    rm -f /tmp/awg-ctrl.pid /tmp/awg-ui.pid /tmp/awg-agent.pid 2>/dev/null || true
+}
+
 # Поверх существующей установки: обновить (настройки, пользователи и роль остаются)
 # или переустановить с нуля. Спрашиваем первым — от ответа зависит, спрашивать ли роль.
+# Или удалить совсем (3; без меню — UNINSTALL=y bash install.sh).
 INSTALL_MODE="fresh"
-if [[ -d "$PROJECT" ]]; then
+if [[ "${UNINSTALL:-}" =~ ^([Yy]|yes|1)$ ]]; then
+    INSTALL_MODE="uninstall"
+elif [[ -d "$PROJECT" ]]; then
     echo
     warn "Уже установлено в $PROJECT"
     echo -e "    ${ACC}${BLD}1${NC}  Обновить         ${DIM}до ${VERSION}; настройки, пользователи и роль сохранятся${NC}"
     echo -e "    ${ACC}${BLD}2${NC}  Переустановить   ${DIM}с нуля; данные можно будет сохранить${NC}"
-    ask INST_CHOICE "Выбери [1/2, Enter — 1]: "
+    echo -e "    ${ACC}${BLD}3${NC}  Удалить          ${DIM}полностью: сервисы, данные, правила фаервола, по желанию AmneziaWG${NC}"
+    ask INST_CHOICE "Выбери [1–3, Enter — 1]: "
     case "${INST_CHOICE:-1}" in
         1) INSTALL_MODE="update" ;;
         2) INSTALL_MODE="fresh" ;;
-        *) fail "Неверный выбор: введи 1 или 2" ;;
+        3) INSTALL_MODE="uninstall" ;;
+        *) fail "Неверный выбор: введи 1, 2 или 3" ;;
     esac
     echo
 fi
@@ -186,6 +222,145 @@ fi
 PREV_CLI_ENV=""
 [[ -f "$PROJECT/cli/cli.env" ]] && PREV_CLI_ENV=$(cat "$PROJECT/cli/cli.env")
 prev_val() { grep "^$1=" <<< "$PREV_CLI_ENV" | tail -1 | cut -d= -f2- || true; }
+# ── Полное удаление ─────────────────────────────────────────────────────────
+# Убирает всё, что ставили установщик и awg-ctrl: сервисы и юнит, интерфейс awg1, nft-таблицы
+# шейпинга и блокировки торрентов, открытые порты в UFW/firewalld/iptables, Prometheus из
+# `awg-ctrl monitor install`, каталог проекта, /etc/amnezia (пользователи, ключи, базы), sysctl,
+# логи установки (в них пароль панели). AmneziaWG (пакеты, модуль, PPA) — по вопросу: он мог
+# стоять и до нас. Общие зависимости (dkms, build-essential, iptables, заголовки) не трогаем.
+uninstall_all() {
+    local role="${PREV_ROLE_HINT:-}" conf="$AWG_CONF" net_iface="" p
+    local awg_port ports=()
+    local unit="/etc/systemd/system/awg-control.service"
+
+    step "Удаление ${BRAND}"
+    echo -e "    ${DIM}Будут удалены сервисы, $PROJECT, $AMNEZIA_DIR (пользователи, ключи, базы),${NC}"
+    echo -e "    ${DIM}юнит systemd, правила фаервола и логи установки. Выданные ключи перестанут работать.${NC}"
+    case "$role" in
+        node) echo -e "    ${DIM}Это нода: после удаления убери сервер и в списке серверов панели.${NC}" ;;
+        *)    [[ -n "$(prev_val NODE_PORT)" ]] && \
+                  echo -e "    ${DIM}Подключённые к этой панели ноды останутся без панели — их VPN продолжит работать.${NC}" ;;
+    esac
+    echo
+    if [[ ! "${UNINSTALL:-}" =~ ^([Yy]|yes|1)$ ]]; then
+        ask CONFIRM "Для подтверждения введи «удалить»: "
+        [[ "$CONFIRM" == "удалить" ]] || fail "Отменено — ничего не тронуто"
+    fi
+
+    # Копия данных — по умолчанию да: без неё выданные ключи не восстановить.
+    if [[ -d "$AMNEZIA_DIR" || -f "$PROJECT/cli/cli.env" ]]; then
+        ask KEEP_BACKUP "Сохранить копию данных (пользователи, ключи, cli.env) в /root? [Y/n]: "
+        if [[ "${KEEP_BACKUP:-y}" =~ ^[Yy]$ ]]; then
+            local bak="/root/forgetting-backup-$(date +%Y%m%d-%H%M%S).tar.gz" items=()
+            [[ -d "$AMNEZIA_DIR" ]] && items+=("${AMNEZIA_DIR#/}")
+            [[ -f "$PROJECT/cli/cli.env" ]] && items+=("${PROJECT#/}/cli/cli.env")
+            ( umask 077; tar -czf "$bak" -C / "${items[@]}" ) \
+                && ok "Копия: $bak" \
+                || fail "Не удалось сохранить копию — удаление отменено, ничего не тронуто"
+        fi
+    fi
+
+    # Что открывали наружу — из прежнего конфига (порты случайные, угадать нельзя).
+    awg_port=$(sed -n 's/^ListenPort *= *//p' "$conf" 2>/dev/null | head -1 || true)
+    [[ -z "$awg_port" ]] && awg_port=$(prev_val SERVER_PORT)
+    [[ -n "$awg_port" ]] && ports+=("${awg_port}/udp")
+    for p in UI_PORT SUB_PORT NODE_PORT; do
+        [[ -n "$(prev_val "$p")" ]] && ports+=("$(prev_val "$p")/tcp")
+    done
+    net_iface=$(grep -oE 'POSTROUTING -o [^ ]+' "$conf" 2>/dev/null | head -1 | awk '{print $3}' || true)
+
+    info "остановка сервисов"
+    if command -v systemctl &>/dev/null && [[ -f "$unit" ]]; then
+        run systemctl disable --now awg-control.service || true
+    fi
+    # Prometheus из `awg-ctrl monitor install` — только наш (метка в конфиге); чужой не трогаем.
+    if [[ -x "$BIN" ]] && grep -qs '^# managed by forgetting' /etc/prometheus/prometheus.yml; then
+        info "Prometheus, поставленный панелью"
+        run "$BIN" monitor remove || warn "Prometheus не удалён — sudo apt purge prometheus"
+    fi
+    kill_related
+    ok "Сервисы остановлены"
+
+    if command -v awg &>/dev/null && awg show "$IFACE" &>/dev/null; then
+        # down выполняет PreDown из конфига — снимает FORWARD/MASQUERADE.
+        run awg-quick down "$IFACE" || ip link delete dev "$IFACE" 2>/dev/null || true
+        ok "Интерфейс $IFACE опущен"
+    fi
+    if command -v nft &>/dev/null; then
+        nft delete table inet awg_shape 2>/dev/null || true
+        nft delete table inet awg_torrent 2>/dev/null || true
+    fi
+
+    if [[ ${#ports[@]} -gt 0 ]]; then
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+            for p in "${ports[@]}"; do run ufw delete allow "$p" || true; done
+            [[ -n "$net_iface" ]] && { run ufw route delete allow in on "$IFACE" out on "$net_iface" || true; }
+            ok "UFW: закрыты ${ports[*]}"
+        elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+            for p in "${ports[@]}"; do run firewall-cmd --permanent --remove-port="$p" || true; done
+            run firewall-cmd --reload || true
+            ok "firewalld: закрыты ${ports[*]}"
+        elif command -v iptables &>/dev/null; then
+            local removed=0
+            for p in "${ports[@]}"; do
+                while iptables -C INPUT -p "${p#*/}" --dport "${p%/*}" -j ACCEPT 2>/dev/null; do
+                    iptables -D INPUT -p "${p#*/}" --dport "${p%/*}" -j ACCEPT && removed=1
+                done
+            done
+            if [[ "$removed" == 1 ]]; then
+                command -v netfilter-persistent &>/dev/null && { run netfilter-persistent save || true; }
+                ok "iptables: закрыты ${ports[*]}"
+            fi
+        fi
+    fi
+
+    if [[ -f /etc/systemd/system/awg-control.service ]]; then
+        rm -f /etc/systemd/system/awg-control.service
+        command -v systemctl &>/dev/null && { run systemctl daemon-reload || true; }
+    fi
+    [[ "$(readlink /usr/local/bin/awg-ctrl 2>/dev/null)" == "$BIN" ]] && rm -f /usr/local/bin/awg-ctrl
+    # Пути — константы из шапки; :? — страховка от пустой переменной.
+    rm -rf "${PROJECT:?}" "${AMNEZIA_DIR:?}"
+    rm -f /etc/sysctl.d/99-awg-control.conf
+    # Логи установок: в них пароль панели. Текущий (удаления) — без секретов, остаётся.
+    find /var/log -maxdepth 1 -name 'awg-install-*.log' ! -path "$LOGFILE" -delete 2>/dev/null || true
+    ok "Удалены $PROJECT, $AMNEZIA_DIR, юнит, команда awg-ctrl, логи установки"
+
+    if dpkg -s amneziawg &>/dev/null || dpkg -s amneziawg-tools &>/dev/null; then
+        echo
+        ask DROP_AWG "Удалить и AmneziaWG (пакеты, модуль ядра, репозиторий)? [y/N]: "
+        if [[ "${DROP_AWG:-n}" =~ ^[Yy]$ ]]; then
+            run apt-mark unhold amneziawg amneziawg-dkms amneziawg-tools || true
+            rmmod amneziawg 2>/dev/null || true
+            DEBIAN_FRONTEND=noninteractive run apt-get purge -y amneziawg amneziawg-dkms amneziawg-tools \
+                || warn "apt-get purge завершился ошибкой — проверь: dpkg -l | grep amneziawg"
+            rm -f /etc/apt/sources.list.d/amnezia-ppa.list /etc/apt/keyrings/amnezia-ppa.gpg
+            if command -v add-apt-repository &>/dev/null \
+                && grep -rqs 'amnezia/ppa' /etc/apt/sources.list /etc/apt/sources.list.d/; then
+                run add-apt-repository -y --remove ppa:amnezia/ppa || true
+            fi
+            ok "AmneziaWG удалён"
+        else
+            skip "AmneziaWG оставлен"
+        fi
+    fi
+
+    rule
+    echo -e "  ${GRN}${BLD}✓ ${BRAND} удалён${NC}"
+    rule
+    echo -e "    ${DIM}IP forwarding (sysctl) выключится после перезагрузки — сейчас: sysctl -w net.ipv4.ip_forward=0,${NC}"
+    echo -e "    ${DIM}если он не нужен другим сервисам. Фаервол хостера (панель провайдера) — закрой порты там сам.${NC}"
+    echo
+}
+
+if [[ "$INSTALL_MODE" == "uninstall" ]]; then
+    if   [[ -n "$(prev_val CORE_HOST)" ]];        then PREV_ROLE_HINT="node"
+    elif [[ "$(prev_val LOCAL_NODE)" == "off" ]]; then PREV_ROLE_HINT="core"
+    else                                               PREV_ROLE_HINT="standalone"
+    fi
+    uninstall_all
+    exit 0
+fi
 
 # Роль сервера (несколько серверов под одной панелью, docs/node-protocol.md):
 #   standalone — панель + VPN на одной машине, как было всегда; может принимать ноды;
@@ -514,37 +689,6 @@ AWG_PIN="${AWG_PIN:-y}"
 
 NET_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
 [[ -z "$NET_IFACE" ]] && fail "Не могу определить сетевой интерфейс"
-
-# Сначала корректно через CLI (по PID-файлам), затем добиваем всё, что ещё
-# держит файлы проекта: осиротевшие процессы, ручной запуск или stale PID,
-# которые `stop all` не находит. Вызывать ДО `rm -rf $PROJECT` — иначе сервисы
-# продолжат работать с уже удалёнными файлами и порт/интерфейс останутся занятыми.
-kill_related() {
-    if [[ -x "$BIN" ]]; then
-        "$BIN" stop all 2>/dev/null || true
-    else
-        # Установка до Go-версии: её CLI на tsx.
-        local _tsx="$PROJECT/cli/node_modules/.bin/tsx"
-        local _cli="$PROJECT/cli/src/index.ts"
-        [[ -x "$_tsx" && -f "$_cli" ]] && "$_tsx" "$_cli" stop all 2>/dev/null || true
-    fi
-
-    # cmdline всех сервисов (awg-control <роль>, у старых — tsx …) содержит путь проекта.
-    if command -v pkill &>/dev/null; then
-        pkill -TERM -f "$PROJECT/" 2>/dev/null || true
-        sleep 1
-        pkill -KILL -f "$PROJECT/" 2>/dev/null || true
-    else
-        local _pids
-        _pids=$(ps -eo pid=,args= | awk -v p="$PROJECT/" 'index($0,p){print $1}')
-        [[ -n "$_pids" ]] && kill -TERM $_pids 2>/dev/null || true
-        sleep 1
-        _pids=$(ps -eo pid=,args= | awk -v p="$PROJECT/" 'index($0,p){print $1}')
-        [[ -n "$_pids" ]] && kill -KILL $_pids 2>/dev/null || true
-    fi
-
-    rm -f /tmp/awg-ctrl.pid /tmp/awg-ui.pid /tmp/awg-agent.pid 2>/dev/null || true
-}
 
 # Скачать архив версии VERSION, распаковать в PROJECT и проверить, что ключевые
 # файлы на месте.
