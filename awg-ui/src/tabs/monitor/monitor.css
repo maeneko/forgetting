@@ -24,6 +24,8 @@ LICENSE file in the root directory of this source tree.
     border-radius: var(--r-table);
     padding: 12px;
 }
+/* Многострочный фрагмент (конфиг): переносы строк сохраняются, длинные — переносятся */
+pre.mon-code { white-space: pre-wrap; margin: 0; }
 
 @media (max-width: 640px) {
     .mon-actions .btn { flex: 1; }

@@ -1389,13 +1389,16 @@ if [[ "$ROLE" != "node" ]]; then
         chmod 600 "$SUB_SIGN_PRIV"
         ok "Ключ подписи sen:// создан"
     fi
+    # Имя в сертификате случайное: одинаковое у всех серверов было бы сигнатурой для сканера.
+    # Клиент сверяет pin ключа, а не имя.
     if [[ "$SUB_TLS" == "on" ]]; then
         if [[ "$KEEP_DATA" == "y" && -f "$SUB_TLS_CRT" && -f "$SUB_TLS_KEY" ]]; then
             ok "Сертификат подписки sen:// сохранён"
         else
             ( umask 077
               openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-                  -keyout "$SUB_TLS_KEY" -out "$SUB_TLS_CRT" -days 3650 -subj "/CN=sen" 2>/dev/null )
+                  -keyout "$SUB_TLS_KEY" -out "$SUB_TLS_CRT" -days 3650 \
+                  -subj "/CN=$(rand_alnum 10 | tr 'A-Z' 'a-z').net" 2>/dev/null )
             chmod 600 "$SUB_TLS_KEY" "$SUB_TLS_CRT"
             ok "Самоподписанный сертификат подписки sen:// создан (10 лет)"
         fi

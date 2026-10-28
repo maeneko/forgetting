@@ -153,14 +153,15 @@ func newNodes(a *App) (*Nodes, error) {
 		}
 		return filepath.Join(a.baseDir, name)
 	}
-	// TLS: самоподписанный сертификат, pin которого зашит в join-строки. Живёт столько же,
+	// TLS: самоподписанный сертификат, pin которого зашит в join-строки. Имя в нём случайное:
+	// одинаковое у всех серверов было бы сигнатурой для сканера (pin — по ключу, не по имени). Живёт столько же,
 	// сколько core: пересоздать = переподключить все ноды.
 	if n.port != 0 {
 		keyF, crtF := file("NODE_TLS_KEY_FILE", "node_tls.key"), file("NODE_TLS_CERT_FILE", "node_tls.crt")
 		if err := func() error {
 			if !exists(keyF) && !exists(crtF) {
 				cmd := exec.Command("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN=awg-node")
+					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN="+randomCN())
 				if err := cmd.Run(); err != nil {
 					return err
 				}
@@ -926,4 +927,16 @@ func (n *Nodes) router() *Router {
 		return c.JSON(200, jsjson.Object{{Key: "success", Val: true}, {Key: "id", Val: id}})
 	})
 	return rt
+}
+
+// randomCN — имя для самоподписанного сертификата: похожее на обычный хост и своё у каждого
+// сервера.
+func randomCN() string {
+	const abc = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 10)
+	rand.Read(b)
+	for i := range b {
+		b[i] = abc[int(b[i])%len(abc)]
+	}
+	return string(b) + ".net"
 }

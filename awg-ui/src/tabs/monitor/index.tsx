@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch, copyText, getServerId, type NodeInfo, type PageProps } from '../../lib/shared';
 import { IcoCopy, IcoTrash } from '../../components/icons';
 import LineChart from '../../components/LineChart';
+import ExternalPrometheus from './ExternalPrometheus';
 import './monitor.css';
 
 // Вкладка «Монитор»: встроенный Prometheus и основные графики.
@@ -360,6 +361,7 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
             {setup}
             {dashboard}
             {manage}
+            <ExternalPrometheus token={token} showMsg={showMsg} />
         </>
     );
 }
