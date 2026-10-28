@@ -464,7 +464,16 @@ awg-ctrl migrate export [файл]            # перенос панели (с�
 awg-ctrl migrate import <архив>
 awg-ctrl migrate cancel
 awg-ctrl update | reinstall | uninstall   # обновить, переустановить, удалить (через install.sh)
+awg-ctrl panel [path new|off|<путь>]      # адрес панели; новый, свой или без секретного пути
+awg-ctrl log [<поиск>] [-n N]             # журнал VPN-подключений этого сервера
+awg-ctrl log seen                         # кто когда был: онлайн, последний раз, не подключался
+awg-ctrl metrics [token|revoke]           # токен и prometheus.yml для своего Prometheus
+awg-ctrl hub [legacy on|off|auto]         # ноды хаба: кто с подписью, кто ещё старый
+awg-ctrl check                            # что на сервере выдаёт его сканеру и DPI
 ```
+
+В меню `awg-ctrl` те же возможности — пункты 10–13: адрес и секретный путь панели, журнал,
+«кто когда был» и проверка скрытности.
 
 `update` и `reinstall` скачивают свежий установщик (`INSTALLER_URL` в `cli.env` — своё
 зеркало), `uninstall` берёт его копию из установки и работает без сети.

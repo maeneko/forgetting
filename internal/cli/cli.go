@@ -638,10 +638,10 @@ func (c *CLI) confirmYes(q string) bool {
 
 // ── Точка входа ─────────────────────────────────────────────────────────────
 
-const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>|update|reinstall|uninstall>"
+const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>|update|reinstall|uninstall|panel [path new|off|<путь>]|log [seen] [поиск] [-n N]|metrics [token|revoke]|hub [legacy on|off|auto]|check>"
 
 // Commands — команды оператора; main передаёт сюда всё, что не роль сервиса.
-var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate", "update", "reinstall", "uninstall"}
+var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate", "update", "reinstall", "uninstall", "panel", "log", "metrics", "hub", "check"}
 
 // Main выполняет команду CLI (args — без имени бинарника). Пусто — интерактивное меню.
 func Main(args []string) {
@@ -686,6 +686,16 @@ func Main(args []string) {
 		c.peersCmd(sub, hasSub, a2, hasA2)
 	case "monitor":
 		c.monitorCmd(sub)
+	case "panel":
+		c.panelCmd(args[1:])
+	case "log":
+		c.logCmd(args[1:])
+	case "metrics":
+		c.metricsCmd(args[1:])
+	case "hub":
+		c.hubCmd(args[1:])
+	case "check":
+		c.checkCmd()
 	case "update", "reinstall", "uninstall":
 		// Из командной строки — без своего вопроса: установщик сам спросит, что нужно.
 		c.runInstaller(args[0], false)
