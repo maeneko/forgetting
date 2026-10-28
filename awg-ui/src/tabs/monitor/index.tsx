@@ -90,6 +90,9 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
     const [loading, setLoading] = useState(false);
     const [pending, setPending] = useState<'install' | 'remove' | null>(null);     // операция запущена из этой вкладки
     const [server, setServer] = useState<NodeInfo | null>(null);     // показанный сервер: выбран в другой вкладке, здесь не меняется
+    // После установки Prometheus отвечает не сразу: на ноде агент только что перезапущен и
+    // переподключается к хабу. Ждём ответа, а не застываем на «не подключён» до перезагрузки.
+    const [waitReady, setWaitReady] = useState<'no' | 'waiting' | 'timeout'>('no');
     const alive = useRef(true);
     // StrictMode монтирует эффект дважды: флаг надо вернуть в true, иначе все ответы отбрасываются
     useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -133,10 +136,25 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
         if (!pending && !status?.job?.running) return;
         const t = setInterval(async () => {
             const s = await loadStatus();
-            if (s && !s.job?.running) setPending(null);
+            if (s && !s.job?.running) {
+                setPending(null);
+                if (s.job?.action === 'install' && s.job.exit === 0 && !s.ready) setWaitReady('waiting');
+            }
         }, 2000);
         return () => clearInterval(t);
     }, [pending, status?.job?.running, loadStatus]);
+
+    // Ждём Prometheus после установки: раз в 3 с, до полутора минут.
+    useEffect(() => {
+        if (waitReady !== 'waiting') return;
+        let tries = 0;
+        const t = setInterval(async () => {
+            const s = await loadStatus();
+            if (s?.ready) setWaitReady('no');
+            else if (++tries >= 30) setWaitReady('timeout');
+        }, 3000);
+        return () => clearInterval(t);
+    }, [waitReady, loadStatus]);
 
     const run = async (action: 'install' | 'remove') => {
         if (action === 'remove' && !confirm('Удалить Prometheus? Он будет остановлен, а накопленные графики (до 31 дня) сотрутся. Панель продолжит отдавать /metrics.')) return;
@@ -203,6 +221,15 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                 </>
             )}
 
+            {waitReady === 'waiting' && (
+                <p className="mon-hint">Prometheus поставлен — ждём, пока панель достучится до него{status.host ? ' через агента ноды' : ''}…</p>
+            )}
+            {waitReady === 'timeout' && (
+                <p className="login-error">
+                    Prometheus поставлен, но панель до него не достучалась. Проверьте {status.host ? <>на сервере <b>{status.host.name}</b></> : 'на сервере'}:{' '}
+                    <b>awg-ctrl monitor status</b>{status.host ? ' и что версия на ноде 0.4.6 или новее (обновить: awg-ctrl update на ноде)' : ''}.
+                </p>
+            )}
             {failureLog()}
         </section>
     );
