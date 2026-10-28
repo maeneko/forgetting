@@ -211,6 +211,18 @@ func (m *Migration) newCode(c *Ctx) bool {
 	return m.status(c)
 }
 
+// awaitsImport — запрос на приём архива, пока выдан код: старая панель шлёт его на
+// /migrate/v1/import без секретного префикса (в коде переноса его нет), prefixGate пропускает.
+// Без кода путь снаружи не виден, как и остальные.
+func (m *Migration) awaitsImport(r *http.Request) bool {
+	if r.Method != "POST" || r.URL.Path != "/migrate/v1/import" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.key != nil && time.Now().Before(m.expires)
+}
+
 // importHandler — POST /migrate/v1/import, без JWT: доступ даёт только ключ кода (тег GCM).
 // Ответ с ошибкой — открытым текстом и только пока ничего не тронуто.
 func (m *Migration) importHandler(c *Ctx) bool {
@@ -420,7 +432,7 @@ func (m *Migration) exportMeta() jsjson.Object {
 		{Key: "version", Val: m.a.version}, {Key: "created_at", Val: now()},
 		{Key: "server_name", Val: name}, {Key: "server_ip", Val: ip},
 		{Key: "ui_port", Val: m.a.port}, {Key: "sub_port", Val: m.a.sub.port}, {Key: "sub_tls", Val: m.a.sub.useTLS},
-		{Key: "node_port", Val: m.a.nodes.port},
+		{Key: "node_port", Val: m.a.nodes.port}, {Key: "ui_prefix", Val: os.Getenv("UI_PREFIX")},
 	}
 }
 

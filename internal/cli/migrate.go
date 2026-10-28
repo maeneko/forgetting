@@ -127,7 +127,7 @@ func (c *CLI) writeExport(out, dbFile string) error {
 		return err
 	}
 	err = migrate.Write(f, db, c.paths(), exportMeta(c.version, name, ip, envPort("UI_PORT"), envPort("SUB_PORT"),
-		strings.ToLower(env("SUB_TLS", "off")) == "on", envPort("NODE_PORT")))
+		strings.ToLower(env("SUB_TLS", "off")) == "on", envPort("NODE_PORT"), env("UI_PREFIX", "")))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -135,11 +135,12 @@ func (c *CLI) writeExport(out, dbFile string) error {
 }
 
 // exportMeta — meta.json архива (v и panel_id добавляет migrate.Write).
-func exportMeta(version, name, ip string, uiPort, subPort int, subTLS bool, nodePort int) jsjson.Object {
+func exportMeta(version, name, ip string, uiPort, subPort int, subTLS bool, nodePort int, uiPrefix string) jsjson.Object {
 	return jsjson.Object{
 		{Key: "version", Val: version}, {Key: "created_at", Val: time.Now().Unix()},
 		{Key: "server_name", Val: name}, {Key: "server_ip", Val: ip},
 		{Key: "ui_port", Val: uiPort}, {Key: "sub_port", Val: subPort}, {Key: "sub_tls", Val: subTLS}, {Key: "node_port", Val: nodePort},
+		{Key: "ui_prefix", Val: uiPrefix},
 	}
 }
 
@@ -247,6 +248,9 @@ func (c *CLI) migrateImport(file string) {
 	fmt.Println()
 	fmt.Println("  " + dim("Старый сервер станет нодой #0 и будет пересылать сюда прежние порты — ссылки sen://, ноды и"))
 	fmt.Println("  " + dim("внешний API продолжат работать. Логин и пароль панели — этой установки, а не старой."))
+	if !migrate.ValidUIPrefix(b.Str("ui_prefix")) && env("UI_PREFIX", "") != "" {
+		fmt.Println("  " + dim("У старой панели не было секретного пути: её закладкам и внешнему API нужен путь этой — /"+env("UI_PREFIX", "")+"/"))
+	}
 }
 
 // ── cancel (старый сервер) ─────────────────────────────────────────────────

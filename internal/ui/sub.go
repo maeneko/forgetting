@@ -288,6 +288,13 @@ func (s *Sub) initSchema() error {
             rekey_requested INTEGER NOT NULL DEFAULT 0,
             UNIQUE (master_id, device_id)
         );
+        -- Удалённые устройства: ключ авторизации, чтобы проверить подпись их опроса и ответить
+        -- 410 только им (stealth). Устройства, удалённые до таблицы, получают тихий 404.
+        CREATE TABLE IF NOT EXISTS revoked_devices (
+            id         INTEGER PRIMARY KEY,
+            auth_pub   TEXT    NOT NULL,
+            revoked_at INTEGER NOT NULL
+        );
         -- Серверы мастер-ключа. master_keys.server_id остался от времени одного сервера и
         -- дальше не читается (кроме переноса ниже).
         CREATE TABLE IF NOT EXISTS master_servers (
@@ -749,6 +756,9 @@ func (s *Sub) forgetDevice(q queryer, dev *deviceRow) []int {
 			q.Exec("INSERT OR IGNORE INTO peer_tombstones (server_id, pub_key) VALUES (?, ?)", l.ServerID, l.PeerPub.String)
 		}
 	}
+	// Ключ авторизации удалённого устройства — чтобы на его подписанный опрос ответить 410
+	// (снять конфиг), а на подобранный id без подписи — тихим 404.
+	q.Exec("INSERT OR REPLACE INTO revoked_devices (id, auth_pub, revoked_at) VALUES (?, ?, ?)", dev.ID, dev.AuthPub, now())
 	q.Exec("DELETE FROM devices WHERE id = ?", dev.ID) // device_peers уйдут каскадом
 	ids := []int{}
 	for _, l := range links {
@@ -903,21 +913,23 @@ func reqPath(r *http.Request) string {
 }
 
 // signFailure — подпись запроса и защита от повторов. "" — всё верно, иначе причина (для лога).
-func (s *Sub) signFailure(c *Ctx, authPub []byte) string {
+// signed — подпись сама по себе верна (провал только по времени или повтору): запрос сделан
+// ключом устройства, ему можно отвечать по протоколу. Без неё — тихий 404 (stealth).
+func (s *Sub) signFailure(c *Ctx, authPub []byte) (why string, signed bool) {
 	tsF := jsToNumber(strings.Join(c.R.Header["X-Sen-Ts"], ", "))
 	if _, has := c.R.Header["X-Sen-Ts"]; !has {
 		tsF = jsToNumber("x")
 	}
 	sig := c.R.Header.Get("X-Sen-Sig")
 	if tsF != float64(int64(tsF)) || sig == "" {
-		return "no_signature"
+		return "no_signature", false
 	}
 	ts := int64(tsF)
-	if d := ts - now(); d > tsWindow || d < -tsWindow {
-		return fmt.Sprintf("ts_window (часы клиента расходятся на %d с)", d)
-	}
 	if !verifyRequest(c.R.Method, reqPath(c.R), ts, c.RawBody, sig, authPub) {
-		return "bad_signature"
+		return "bad_signature", false
+	}
+	if d := ts - now(); d > tsWindow || d < -tsWindow {
+		return fmt.Sprintf("ts_window (часы клиента расходятся на %d с)", d), true
 	}
 	s.sigMu.Lock()
 	defer s.sigMu.Unlock()
@@ -928,10 +940,27 @@ func (s *Sub) signFailure(c *Ctx, authPub []byte) string {
 		}
 	}
 	if _, ok := s.seenSigs[sig]; ok {
-		return "replay"
+		return "replay", true
 	}
 	s.seenSigs[sig] = t.Add(2 * tsWindow * time.Second)
-	return ""
+	return "", true
+}
+
+// stealth — ответ тому, кто не доказал знание ни секрета ссылки, ни ключа устройства: как у
+// пустого Go-сервера, без подписи и JSON. Иначе сканер одним запросом узнавал бы подписку (а с
+// публичным ключом из любой ссылки — и конкретный сервер). Клиенту с верной ссылкой это не мешает.
+func stealth(c *Ctx) bool {
+	http.NotFound(c.W, c.R)
+	return false
+}
+
+// frozenFor — перенос панели идёт: доказавшему клиенту — подписанный 502 (он повторит позже).
+func (s *Sub) frozenFor(c *Ctx) bool {
+	if s.frozen.Load() {
+		s.sendC(c, 502, subErr("unavailable"))
+		return true
+	}
+	return false
 }
 
 func (s *Sub) deviceAuth(c *Ctx) bool {
@@ -942,16 +971,31 @@ func (s *Sub) deviceAuth(c *Ctx) bool {
 	if valid {
 		dev = s.deviceByID(s.a.db, int64(f))
 	}
+	if !valid {
+		return stealth(c)
+	}
 	// Устройства нет — его удалили (id не переиспользуются). 410, чтобы клиент снял конфиг, и
 	// не в лимит неудач: такие клиенты опрашивают по таймеру и выбивали бы лимит соседям за NAT.
-	if dev == nil && valid {
+	// Только если запрос подписан ключом удалённого устройства (revoked_devices): иначе на
+	// подобранный id сканер получал бы ответ протокола.
+	if dev == nil {
+		var authPub string
+		if s.a.db.QueryRow("SELECT auth_pub FROM revoked_devices WHERE id = ?", int64(f)).Scan(&authPub) != nil {
+			return stealth(c)
+		}
+		if _, signed := s.signFailure(c, fromB64url(authPub)); !signed {
+			return stealth(c)
+		}
 		return s.sendC(c, 410, subErr("revoked"))
 	}
-	why := "no_device"
-	if dev != nil {
-		why = s.signFailure(c, fromB64url(dev.AuthPub))
+	why, signed := s.signFailure(c, fromB64url(dev.AuthPub))
+	if !signed {
+		return stealth(c)
 	}
 	if why == "" {
+		if s.frozenFor(c) {
+			return false
+		}
 		c.device = dev
 		return true
 	}
@@ -959,11 +1003,7 @@ func (s *Sub) deviceAuth(c *Ctx) bool {
 	if !s.failLimit.allow(ip) {
 		return s.sendC(c, 429, subErr("rate_limited"))
 	}
-	hdr := c.R.Header.Get("X-Sen-Device")
-	if !hasHdr {
-		hdr = "-"
-	}
-	warnf("sub: 401 %s %s device=%s %s ip=%s", c.R.Method, reqPath(c.R), hdr, why, ip)
+	warnf("sub: 401 %s %s device=%s %s ip=%s", c.R.Method, reqPath(c.R), c.R.Header.Get("X-Sen-Device"), why, ip)
 	return s.sendC(c, 401, subErr("unauthorized"))
 }
 
@@ -986,10 +1026,6 @@ var errLimit = errors.New("limit")
 
 func (s *Sub) register(c *Ctx) error {
 	ip := c.remoteIP()
-	if !s.registerLimit.allow(ip) {
-		s.sendC(c, 429, subErr("rate_limited"))
-		return nil
-	}
 	b := c.Obj()
 	strRe := func(k string, re *regexp.Regexp) (string, bool) {
 		v, ok := b.Get2(k).(string)
@@ -1010,7 +1046,23 @@ func (s *Sub) register(c *Ctx) error {
 	if !ok5 {
 		version = ""
 	}
-	if !ok1 || !ok2 || !ok3 || !ok4 {
+	// Доказательство — секрет ссылки: без верного секрета ответа протокола нет (stealth).
+	var master *masterRow
+	if ok1 {
+		master = s.masterBySecret(fromB64url(secretB))
+	}
+	if master == nil {
+		stealth(c)
+		return nil
+	}
+	if s.frozenFor(c) {
+		return nil
+	}
+	if !s.registerLimit.allow(ip) {
+		s.sendC(c, 429, subErr("rate_limited"))
+		return nil
+	}
+	if !ok2 || !ok3 || !ok4 {
 		s.sendC(c, 400, subErr("bad_request"))
 		return nil
 	}
@@ -1019,7 +1071,7 @@ func (s *Sub) register(c *Ctx) error {
 	authPub := fromB64url(authPubS)
 	why := "bad_auth_pub"
 	if len(authPub) == 32 {
-		why = s.signFailure(c, authPub)
+		why, _ = s.signFailure(c, authPub)
 	}
 	if why != "" {
 		warnf("sub: 401 register %s ip=%s", why, ip)
@@ -1027,11 +1079,6 @@ func (s *Sub) register(c *Ctx) error {
 		return nil
 	}
 
-	master := s.masterBySecret(fromB64url(secretB))
-	if master == nil {
-		s.sendC(c, 404, subErr("not_found"))
-		return nil
-	}
 	var serverIDs []int
 	for _, id := range s.serverIDsOf(s.a.db, master.ID) {
 		if s.a.nodes.Exists(id) {
@@ -1092,23 +1139,18 @@ func (s *Sub) register(c *Ctx) error {
 
 // peek — сколько мест у ключа занято, по секрету из ссылки (устройства ещё нет).
 func (s *Sub) peek(c *Ctx) error {
-	ip := c.remoteIP()
 	secretB, ok := c.Obj().Get2("sub").(string)
 	ok = ok && reSubSecret.MatchString(secretB)
 	var master *masterRow
 	if ok {
 		master = s.masterBySecret(fromB64url(secretB))
 	}
+	// Секрет не тот — ответа протокола нет (stealth): иначе сканер отличал бы подписку.
 	if master == nil {
-		if !s.failLimit.allow(ip) {
-			s.sendC(c, 429, subErr("rate_limited"))
-			return nil
-		}
-		if ok {
-			s.sendC(c, 404, subErr("not_found"))
-		} else {
-			s.sendC(c, 400, subErr("bad_request"))
-		}
+		stealth(c)
+		return nil
+	}
+	if s.frozenFor(c) {
 		return nil
 	}
 	s.sendC(c, 200, jsjson.Object{{Key: "key_uuid", Val: master.UUID}, {Key: "devices", Val: s.deviceCount(s.a.db, master.ID)},
@@ -1199,18 +1241,12 @@ func (s *Sub) publicRouter() *Router {
 	rt := newRouter()
 	rt.bodyLimit = 4 * 1024
 	// Битый JSON и т. п.: ответ всё равно подписан, чтобы клиент мог ему доверять.
-	rt.badBody = func(w http.ResponseWriter, r *http.Request, _ int, _ string) {
-		s.send(w, r, 400, subErr("bad_request"))
-	}
-	rt.notFound = func(c *Ctx) { s.sendC(c, 404, subErr("not_found")) }
-	// Перенос панели: изменения сейчас остались бы только в уезжающей базе. 502 unavailable
-	// клиент понимает как «подписка недоступна» — туннель не трогает и повторит позже.
-	rt.Use("/", func(c *Ctx) bool {
-		if s.frozen.Load() {
-			return s.sendC(c, 502, subErr("unavailable"))
-		}
-		return true
-	})
+	// Всё, что не доказало знание секрета ссылки или ключа устройства, получает ответ пустого
+	// Go-сервера (stealth): битое тело, чужой путь, чужой метод. Подписанные ответы — только
+	// своим. Перенос панели (frozen) — тоже только им: 502 unavailable клиент понимает как
+	// «подписка недоступна», туннель не трогает и повторит позже (frozenFor).
+	rt.badBody = func(w http.ResponseWriter, r *http.Request, _ int, _ string) { http.NotFound(w, r) }
+	rt.notFound = func(c *Ctx) { stealth(c) }
 	rt.Post("/sub/v1/register", s.wrapSub(s.register))
 	rt.Post("/sub/v1/peek", s.wrapSub(s.peek))
 	rt.Get("/sub/v1/config", s.deviceAuth, s.wrapSub(s.config))

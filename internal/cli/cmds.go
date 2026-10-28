@@ -454,6 +454,9 @@ func (c *CLI) setCredentials(field string) {
 	if pass != nil {
 		fmt.Printf("  %s Пароль: %s\n", green("✓"), *pass)
 	}
+	if u := panelURL(); u != "" {
+		fmt.Printf("  %s Панель: %s\n", green("✓"), u)
+	}
 	fmt.Printf("\n  %s\n", dim("Перезапусти UI чтобы изменения вступили в силу."))
 }
 
@@ -488,9 +491,19 @@ func (c *CLI) interactiveMenu() {
   %s  Сменить логин UI
   %s  Сменить пароль UI
   %s
+  %s  Обновить
+  %s  Переустановить
+  %s  Удалить
+  %s
+  %s  Адрес панели и секретный путь
+  %s  Журнал подключений
+  %s  Кто когда был в VPN
+  %s  Проверка скрытности
+  %s
   %s  Выход
 
-`, bold("1"), bold("2"), bold("3"), bold("4"), sep, bold("5"), bold("6"), sep, bold("0"))
+`, bold("1"), bold("2"), bold("3"), bold("4"), sep, bold("5"), bold("6"), sep, bold("7"), bold("8"), bold("9"), sep,
+			bold("10"), bold("11"), bold("12"), bold("13"), sep, bold("0"))
 	}
 	for {
 		printMenu()
@@ -515,6 +528,20 @@ func (c *CLI) interactiveMenu() {
 			c.setCredentials("user")
 		case "6":
 			c.setCredentials("pass")
+		case "7":
+			c.runInstaller("update", true)
+		case "8":
+			c.runInstaller("reinstall", true)
+		case "9":
+			c.runInstaller("uninstall", true)
+		case "10":
+			c.panelMenu()
+		case "11":
+			c.logCmd(nil)
+		case "12":
+			c.logCmd([]string{"seen"})
+		case "13":
+			c.checkCmd()
 		case "0":
 			os.Exit(0)
 		default:
