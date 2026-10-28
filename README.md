@@ -119,14 +119,16 @@ sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/ma
 | `UI_PREFIX` | свой секретный путь панели (8–64 символа `A–Z a–z 0–9 _ -`); `off` — без пути |
 | `SERVER_NAME` | имя VPN-сервера — без вопроса |
 | `SUB_PORT`, `SUB_TLS`, `NODE_PORT` | порт и HTTPS подписки, порт хаба нод — без вопросов |
-| `UNINSTALL` | `y` — удалить, см. ниже |
+| `ACTION` | `update`, `reinstall` или `uninstall` — действие без меню |
+| `UNINSTALL` | `y` — удалить без меню и без подтверждения |
 | `AMNEZIA_PPA_SUITE` | серия PPA для Debian (`focal`/`jammy`/`noble`) |
 | `REPO_BASE`, `REPO_FALLBACK`, `ARCHIVE_URL`, `AWG_LOCAL_TARBALL` | откуда брать архив релиза (своё зеркало, локальный файл) |
 | `BRAND`, `CHANNEL` | имя продукта в баннерах и панели |
 
 ### Обновление и удаление
 
-Повторный запуск установщика на сервере с установкой предлагает:
+Повторный запуск установщика на сервере с установкой — или пункты **7–9** меню `awg-ctrl`, или
+команды `awg-ctrl update | reinstall | uninstall` — предлагает:
 
 1. **Обновить** — новая версия, настройки, пользователи и роль сохраняются. Установке без
    секретного пути панели он выдаётся, и установщик печатает новый адрес: закладки и адрес
@@ -461,7 +463,11 @@ awg-ctrl monitor install|status|remove    # встроенный Prometheus
 awg-ctrl migrate export [файл]            # перенос панели (см. «Несколько серверов»)
 awg-ctrl migrate import <архив>
 awg-ctrl migrate cancel
+awg-ctrl update | reinstall | uninstall   # обновить, переустановить, удалить (через install.sh)
 ```
+
+`update` и `reinstall` скачивают свежий установщик (`INSTALLER_URL` в `cli.env` — своё
+зеркало), `uninstall` берёт его копию из установки и работает без сети.
 
 Через systemd (автозапуск на загрузке):
 
@@ -485,6 +491,7 @@ systemctl start|stop|restart awg-control
 | `TRUST_PROXY` | IP или сети reverse-proxy, кроме loopback: от них верим `X-Forwarded-For` |
 | `METRICS_PEERS` | `on` — метрики по отдельным пирам |
 | `AUDIT` | `off` — выключить периодический аудит пиров |
+| `INSTALLER_URL` | откуда `awg-ctrl update`/`reinstall` берут установщик (своё зеркало) |
 
 ## Лицензия
 [MIT](LICENSE) © 2026 Ivan Vasilev

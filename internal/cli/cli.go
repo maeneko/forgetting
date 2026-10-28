@@ -638,10 +638,10 @@ func (c *CLI) confirmYes(q string) bool {
 
 // ── Точка входа ─────────────────────────────────────────────────────────────
 
-const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>>"
+const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>|update|reinstall|uninstall>"
 
 // Commands — команды оператора; main передаёт сюда всё, что не роль сервиса.
-var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate"}
+var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate", "update", "reinstall", "uninstall"}
 
 // Main выполняет команду CLI (args — без имени бинарника). Пусто — интерактивное меню.
 func Main(args []string) {
@@ -686,6 +686,9 @@ func Main(args []string) {
 		c.peersCmd(sub, hasSub, a2, hasA2)
 	case "monitor":
 		c.monitorCmd(sub)
+	case "update", "reinstall", "uninstall":
+		// Из командной строки — без своего вопроса: установщик сам спросит, что нужно.
+		c.runInstaller(args[0], false)
 	default:
 		fmt.Println(usage)
 		os.Exit(1)

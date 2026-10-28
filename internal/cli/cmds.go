@@ -491,9 +491,13 @@ func (c *CLI) interactiveMenu() {
   %s  Сменить логин UI
   %s  Сменить пароль UI
   %s
+  %s  Обновить
+  %s  Переустановить
+  %s  Удалить
+  %s
   %s  Выход
 
-`, bold("1"), bold("2"), bold("3"), bold("4"), sep, bold("5"), bold("6"), sep, bold("0"))
+`, bold("1"), bold("2"), bold("3"), bold("4"), sep, bold("5"), bold("6"), sep, bold("7"), bold("8"), bold("9"), sep, bold("0"))
 	}
 	for {
 		printMenu()
@@ -518,6 +522,12 @@ func (c *CLI) interactiveMenu() {
 			c.setCredentials("user")
 		case "6":
 			c.setCredentials("pass")
+		case "7":
+			c.runInstaller("update", true)
+		case "8":
+			c.runInstaller("reinstall", true)
+		case "9":
+			c.runInstaller("uninstall", true)
 		case "0":
 			os.Exit(0)
 		default:

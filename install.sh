@@ -13,6 +13,12 @@
 
 set -euo pipefail
 
+# Запущен из меню awg-ctrl — с временной копии (internal/cli/installer.go): убираем её сразу,
+# bash дочитает скрипт из уже открытого файла.
+case "${BASH_SOURCE[0]:-}" in
+    */awg-install-[0-9]*.sh) rm -f -- "${BASH_SOURCE[0]}" ;;
+esac
+
 # Цвета — настоящие ESC-символы ($'…'), а не '\033' строкой: так они работают и в echo -e,
 # и в приглашениях read -p. ACC — фиолетовый акцент панели (design.md). Без терминала
 # (перенаправили в файл) или с NO_COLOR — без цветов.
@@ -821,11 +827,22 @@ echo -e "    ${DIM}Лог: $LOGFILE${NC}"
 rule
 
 # Поверх существующей установки: обновить (настройки, пользователи и роль остаются),
-# переустановить с нуля или удалить совсем (без меню — UNINSTALL=y). Спрашиваем первым —
-# от ответа зависит, спрашивать ли роль.
+# переустановить с нуля или удалить совсем. Спрашиваем первым — от ответа зависит, спрашивать
+# ли роль. Без меню: ACTION=update|reinstall|uninstall (так запускают пункты меню awg-ctrl)
+# или UNINSTALL=y — удалить без вопроса-подтверждения.
 INSTALL_MODE="fresh"
+ACTION="${ACTION:-}"
+[[ "$ACTION" =~ ^(|update|reinstall|uninstall)$ ]] \
+    || fail "ACTION должен быть update, reinstall или uninstall (задано: $ACTION)"
 if [[ "${UNINSTALL:-}" =~ ^([Yy]|yes|1)$ ]]; then
     INSTALL_MODE="uninstall"
+elif [[ -n "$ACTION" ]]; then
+    [[ -d "$PROJECT" || "$ACTION" == "uninstall" ]] || fail "Обновлять нечего: в $PROJECT ничего не установлено"
+    case "$ACTION" in
+        update)    INSTALL_MODE="update" ;;
+        reinstall) INSTALL_MODE="fresh" ;;
+        uninstall) INSTALL_MODE="uninstall" ;;
+    esac
 elif [[ -d "$PROJECT" ]]; then
     echo
     warn "Уже установлено в $PROJECT"
@@ -1833,7 +1850,7 @@ rule
 echo -e "    ${YLW}⚠${NC}  Если у хостера свой фаервол (панель провайдера, security group) — открой там:"
 echo -e "       ${BLD}${OPEN_PORTS[*]}${NC}  ${DIM}иначе клиенты не подключатся, а на сервере всё будет выглядеть исправным${NC}"
 rule
-echo -e "    ${DIM}awg-ctrl                     ${NC} меню: запуск, статус, логин и пароль, join/unjoin"
+echo -e "    ${DIM}awg-ctrl                     ${NC} меню: запуск, статус, логин и пароль, обновление и удаление"
 echo -e "    ${DIM}awg-ctrl status              ${NC} состояние сервисов и адрес панели"
 echo -e "    ${DIM}systemctl restart awg-control${NC} перезапуск ${DIM}(автозапуск на загрузке включён)${NC}"
 echo
