@@ -101,6 +101,26 @@ func initSchema(db *sql.DB) error {
             owner      TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL
         )`,
+		// Журнал VPN-подключений (connlog.go). name/owner/ip — на момент события: пользователя
+		// могут удалить, а запись о нём остаётся.
+		`CREATE TABLE IF NOT EXISTS conn_log (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            at       INTEGER NOT NULL,
+            event    TEXT    NOT NULL,
+            pub_key  TEXT    NOT NULL,
+            name     TEXT    NOT NULL DEFAULT '',
+            owner    TEXT    NOT NULL DEFAULT '',
+            ip       TEXT    NOT NULL DEFAULT '',
+            duration INTEGER,
+            rx       INTEGER,
+            tx       INTEGER
+        )`,
+		"CREATE INDEX IF NOT EXISTS idx_conn_log_at ON conn_log (at)",
+		"CREATE INDEX IF NOT EXISTS idx_conn_log_pub ON conn_log (pub_key, id)",
+		`CREATE TABLE IF NOT EXISTS peer_seen (
+            pub_key TEXT PRIMARY KEY,
+            at      INTEGER NOT NULL
+        )`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			return err

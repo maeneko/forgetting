@@ -56,6 +56,7 @@ type Server struct {
 
 	shaping *Shaping
 	torrent *Torrent
+	connlog *ConnLog
 	metrics metricsCache
 	monitor monitorJob
 	cliPath string
@@ -157,6 +158,7 @@ func New() (*Server, error) {
 	s.log.Info("awg params loaded from conf", "Jc", params.Jc, "H1", params.H1, "gen", gen)
 	s.shaping = newShaping(s)
 	s.torrent = newTorrent(s)
+	s.connlog = newConnLog(s)
 	return s, nil
 }
 
@@ -185,5 +187,6 @@ func (s *Server) Run() error {
 	go s.shaping.Apply()
 	s.shaping.Start()
 	go s.torrent.Apply() // nft-таблицы после перезагрузки нет — ставим заново
+	s.connlog.Start()
 	return <-errc
 }

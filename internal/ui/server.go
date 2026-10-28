@@ -879,6 +879,7 @@ func (a *App) routes() *Router {
 	app.Use("/ui/metrics-token", auth)
 	app.Mount("/ui/metrics-token", a.metrics.router())
 	app.Get("/metrics", a.metrics.requireToken, a.metrics.handler)
+	app.Get("/ui/connlog", auth, a.connlog)
 	app.Use("/ui/monitor", auth)
 	app.Mount("/ui/monitor", a.monitor.router())
 	// Перенос панели: приём архива — без JWT, его пускает только ключ из кода переноса.

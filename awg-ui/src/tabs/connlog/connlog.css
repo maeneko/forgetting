@@ -1,0 +1,46 @@
+/* Вкладка «Подключения»: лента событий и список «кто когда был». Строки — гибкие, без таблицы:
+   на телефоне колонки сами переносятся. */
+.cl { display: flex; flex-direction: column; gap: 12px; }
+
+.cl-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cl-views { display: flex; gap: 8px; }
+.cl-view {
+    min-height: 44px; padding: 0 18px;
+    font: inherit; font-size: 14px; color: var(--on-surface);
+    background: var(--surface-bright);
+    border: 1px solid var(--outline); border-radius: var(--r-pill);
+    cursor: pointer;
+}
+.cl-view:hover { background: var(--state-primary); }
+.cl-view--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: 500; }
+.cl-search { flex: 1; min-width: 200px; width: auto; }
+
+.cl-hint { margin: 0; font-size: 13px; color: var(--neutral-text); }
+.cl-err { text-align: left; }
+
+.cl-list {
+    list-style: none; margin: 0; padding: 0;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant); border-radius: var(--r-card);
+    overflow: hidden;
+}
+.cl-row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--outline-variant);
+}
+.cl-row:first-child { border-top: none; }
+.cl-time { flex: 0 0 110px; font-size: 13px; color: var(--neutral-text); font-variant-numeric: tabular-nums; }
+.cl-chip { flex: none; }
+.cl-who { flex: 1 1 200px; display: flex; flex-direction: column; min-width: 0; }
+.cl-who b { font-weight: 500; overflow-wrap: anywhere; }
+.cl-sub { font-size: 12px; color: var(--neutral-text); overflow-wrap: anywhere; }
+.cl-session, .cl-seen { font-size: 13px; color: var(--on-surface); font-variant-numeric: tabular-nums; }
+.cl-empty { padding: 24px 16px; text-align: center; color: var(--neutral-text); }
+.cl-more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--outline-variant); }
+
+@media (max-width: 640px) {
+    .cl-time { flex-basis: auto; }
+    .cl-views { width: 100%; }
+    .cl-view { flex: 1; }
+}
