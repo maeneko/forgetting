@@ -198,6 +198,26 @@ func authMsg(nonce string, nodeID int) []byte {
 	return []byte("awg-node-v1\n" + nonce + "\n" + strconv.Itoa(nodeID))
 }
 
+// preauthMsg — подпись в заголовке запроса на WebSocket: хаб проверяет её до апгрейда и без неё
+// отвечает 404, как пустой сервер (internal/ui/hub_preauth.go, там же копия).
+func preauthMsg(nodeID int, ts int64) []byte {
+	return []byte("awg-node-pre-v1\n" + strconv.Itoa(nodeID) + "\n" + strconv.FormatInt(ts, 10))
+}
+
+// preauthHeader — подпись ноды (и при первой привязке — секрет с ключом) для запроса на WebSocket.
+func (a *Agent) preauthHeader() http.Header {
+	ts := time.Now().Unix()
+	h := http.Header{}
+	h.Set("X-Node-Id", strconv.Itoa(a.c.NodeID))
+	h.Set("X-Node-Ts", strconv.FormatInt(ts, 10))
+	h.Set("X-Node-Sig", b64.EncodeToString(ed25519.Sign(a.nodeKey, preauthMsg(a.c.NodeID, ts))))
+	if s := a.secret(); s != "" {
+		h.Set("X-Node-Join", s)
+		h.Set("X-Node-Pub", a.nodePubRaw)
+	}
+	return h
+}
+
 // ── Запросы core → awg-ctrl ────────────────────────────────────────────────
 
 var methods = map[string]bool{"GET": true, "POST": true, "PUT": true, "DELETE": true}
@@ -476,13 +496,20 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 
 	tr := &http.Transport{Proxy: nil, TLSClientConfig: a.tlsConfig(), TLSHandshakeTimeout: handshakeTimeout}
 	dctx, dcancel := context.WithTimeout(ctx, handshakeTimeout)
-	ws, _, err := websocket.Dial(dctx, fmt.Sprintf("wss://%s/node/v1", a.addr()), &websocket.DialOptions{
+	ws, resp, err := websocket.Dial(dctx, fmt.Sprintf("wss://%s/node/v1", a.addr()), &websocket.DialOptions{
 		HTTPClient:      &http.Client{Transport: tr},
+		HTTPHeader:      a.preauthHeader(),
 		CompressionMode: websocket.CompressionDisabled,
 		OnPingReceived:  func(context.Context, []byte) bool { armDead(); return true },
 	})
 	dcancel()
 	if err != nil {
+		// 404 до апгрейда — хаб не принял подпись (или IP временно заблокирован за неудачи):
+		// как отказ в auth, переподключение — не чаще раза в минуту.
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			a.c.Errorf("agent: core отклонил ноду до подключения (неверный ключ, просроченная или использованная ссылка, часы ноды сильно расходятся)")
+			return true
+		}
 		if errors.Is(err, errPin) {
 			a.c.Errorf("agent: %v", errPin)
 		} else {

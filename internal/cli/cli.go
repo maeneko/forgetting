@@ -185,6 +185,8 @@ func New() *CLI {
 				{"SUB_HOST", env("SUB_HOST", "")},
 				// Приём нод (core): без NODE_PORT хаб выключен. LOCAL_NODE=off — core без своего VPN.
 				{"NODE_PORT", env("NODE_PORT", "")},
+				// Хаб: пускать ли агентов без подписи до апгрейда (on/off; пусто — пока не обновлены все).
+				{"HUB_LEGACY", env("HUB_LEGACY", "")},
 				// IP ретрансляторов (старый сервер после переноса): им — доверие к заголовку PROXY.
 				{"RELAY_FROM", env("RELAY_FROM", "")},
 				// Reverse-proxy перед панелью (кроме loopback): от них — X-Forwarded-For / X-Real-IP.
