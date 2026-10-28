@@ -454,6 +454,9 @@ func (c *CLI) setCredentials(field string) {
 	if pass != nil {
 		fmt.Printf("  %s Пароль: %s\n", green("✓"), *pass)
 	}
+	if u := panelURL(); u != "" {
+		fmt.Printf("  %s Панель: %s\n", green("✓"), u)
+	}
 	fmt.Printf("\n  %s\n", dim("Перезапусти UI чтобы изменения вступили в силу."))
 }
 

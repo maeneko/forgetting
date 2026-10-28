@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -243,6 +244,11 @@ type Plan struct {
 	Env                       [][2]string
 }
 
+var reUIPrefix = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
+
+// ValidUIPrefix — годится ли строка в секретный префикс панели (UI_PREFIX).
+func ValidUIPrefix(s string) bool { return reUIPrefix.MatchString(s) }
+
 // NewPlan — env(k) → текущий порт этой панели (0 — не задан), host — её публичный адрес.
 func NewPlan(b *Bundle, env func(k string) int, uiPort int, host string) (*Plan, error) {
 	p := &Plan{SubPort: b.Num("sub_port"), NodePort: b.Num("node_port"), UIPort: uiPort, Host: host}
@@ -270,6 +276,11 @@ func NewPlan(b *Bundle, env func(k string) int, uiPort int, host string) (*Plan,
 	p.Env = append(p.Env, [2]string{"SUB_TLS", tlsOn})
 	// С этого момента панель считает, кто из клиентов и нод узнал её новый адрес.
 	p.Env = append(p.Env, [2]string{"MOVED_IN_AT", strconv.FormatInt(time.Now().Unix(), 10)})
+	// Секретный путь старой панели: по нему ходят её закладки и внешний API через ретранслятор.
+	// Свой префикс новая панель не меняет (иначе потеряла бы открытую вкладку) — принимает оба.
+	if px := b.Str("ui_prefix"); ValidUIPrefix(px) {
+		p.Env = append(p.Env, [2]string{"UI_PREFIX_MOVED", px})
+	}
 	// Заголовку PROXY от ретранслятора верим только с адреса старого сервера.
 	if ip := b.Str("server_ip"); ip != "" {
 		p.Env = append(p.Env, [2]string{"RELAY_FROM", ip})

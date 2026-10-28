@@ -165,6 +165,9 @@ func New() *CLI {
 			name: "ui", label: "awg-ui", cwd: filepath.Join(c.root, "awg-ui"), legacy: "server.ts",
 			env: [][2]string{
 				{"PORT", env("UI_PORT", "8080")},
+				// Секретный путь панели; _MOVED — путь панели, переехавшей сюда (принимаются оба).
+				{"UI_PREFIX", env("UI_PREFIX", "")},
+				{"UI_PREFIX_MOVED", env("UI_PREFIX_MOVED", "")},
 				{"AWGCTRL_PORT", env("AWGCTRL_PORT", "3005")},
 				{"INTERNAL_AUTH_KEY_FILE", env("INTERNAL_AUTH_KEY_FILE", "/etc/amnezia/amneziawg/internal_auth_private.key")},
 				{"BRAND", c.brand}, {"CHANNEL", c.channel}, {"VERSION", c.version},
@@ -477,10 +480,32 @@ func (c *CLI) serviceLine(name string, menu bool) string {
 	return fmt.Sprintf("  %s %-12s %s", dot, c.svc[name].label, info)
 }
 
+// panelURL — адрес панели с секретным путём; без UI_PORT (нода) — пусто.
+func panelURL() string {
+	port := env("UI_PORT", "")
+	if port == "" {
+		return ""
+	}
+	host := env("SUB_HOST", env("SERVER_IP", "IP"))
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	u := "http://" + host + ":" + port + "/"
+	if p := env("UI_PREFIX", ""); p != "" {
+		u += p + "/"
+	}
+	return u
+}
+
 func (c *CLI) status() {
 	fmt.Println()
 	for _, n := range c.all {
 		fmt.Println(c.serviceLine(n, false))
+	}
+	if contains(c.all, "ui") {
+		if u := panelURL(); u != "" {
+			fmt.Println("  " + dim("Панель "+u))
+		}
 	}
 	if c.isRunning("awgctrl") {
 		h := fetchHealth("http://127.0.0.1:" + c.envOf("awgctrl") + "/health")

@@ -804,6 +804,29 @@ fi
 
 [[ "$ROLE" != "core" ]] && choose_awg_params
 
+if [[ "$ROLE" != "node" ]]; then
+    # Секретный путь панели: снаружи она отвечает только на http://IP:PORT/<путь>/, на остальное —
+    # 404, как пустой сервер. Без него сканер узнавал панель по странице логина одним GET.
+    # При переустановке путь прежний; UI_PREFIX=off — без пути, UI_PREFIX=<свой> — свой
+    # (8–64 символа A–Z a–z 0–9 _ -).
+    UI_PREFIX="${UI_PREFIX:-}"
+    UI_PREFIX_NEW="n"
+    if [[ "$UI_PREFIX" == "off" ]]; then
+        UI_PREFIX=""
+    elif [[ -z "$UI_PREFIX" ]]; then
+        [[ "$KEEP_DATA" == "y" ]] && UI_PREFIX="$(prev_val UI_PREFIX)"
+        if [[ -z "$UI_PREFIX" ]]; then
+            UI_PREFIX=$(rand_alnum 16)
+            [[ -n "$PREV_CLI_ENV" ]] && UI_PREFIX_NEW="y"
+        fi
+    fi
+    [[ -z "$UI_PREFIX" || "$UI_PREFIX" =~ ^[A-Za-z0-9_-]{8,64}$ ]] \
+        || fail "UI_PREFIX «${UI_PREFIX}» — нужно 8–64 символа A–Z a–z 0–9 _ -"
+    # Путь переехавшей сюда панели (migrate) — её закладкам и API через ретранслятор.
+    UI_PREFIX_MOVED=""
+    [[ "$KEEP_DATA" == "y" ]] && UI_PREFIX_MOVED="$(prev_val UI_PREFIX_MOVED)"
+fi
+
 # Нода: к какой панели подключаться. Строку awgjoin://… даёт панель («Добавить сервер»):
 # base64url от JSON {v, h, p, pin, n, s}. Разбираем здесь, до установки, чтобы опечатка не
 # обнаружилась через десять минут сборки модуля. Значения в строке ограничены
@@ -1498,6 +1521,8 @@ cat <<ENV
 
 # ── ui (Ring 4) ───────────────────────────────────────────────────────────
 UI_PORT=${UI_PORT}
+UI_PREFIX=${UI_PREFIX}
+UI_PREFIX_MOVED=${UI_PREFIX_MOVED}
 UI_USER=${UI_USER}
 UI_PASS=${UI_PASS}
 JWT_SECRET=${JWT_SECRET}
@@ -1571,7 +1596,12 @@ rule
 echo -e "  ${GRN}${BLD}✓ Готово${NC}  ${DIM}${BRAND} ${VERSION} · ${ROLE_LABEL}${NC}"
 rule
 if [[ "$ROLE" != "node" ]]; then
-    echo -e "    ${DIM}Панель   ${NC} ${BLD}http://${SERVER_IP}:${UI_PORT}${NC}"
+    echo -e "    ${DIM}Панель   ${NC} ${BLD}http://${SERVER_IP}:${UI_PORT}/${UI_PREFIX:+${UI_PREFIX}/}${NC}"
+    if [[ -n "$UI_PREFIX" ]]; then
+        echo -e "             ${DIM}секретный путь: без него панель отвечает 404 — сохрани адрес целиком${NC}"
+        [[ "$UI_PREFIX_NEW" == "y" ]] && \
+            echo -e "             ${YLW}путь новый: обнови закладки и адрес внешнего API (/${UI_PREFIX}/api/v1/…)${NC}"
+    fi
     echo -e "    ${DIM}Логин    ${NC} ${UI_USER}"
     echo -e "    ${DIM}Пароль   ${NC} ${YLW}${UI_PASS}${NC}  ${DIM}сменить: awg-ctrl credentials${NC}"
     echo
