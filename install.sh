@@ -902,6 +902,8 @@ card_line "$ACC"
 # (WIPE=y): пользователи, мастер-ключи, ключи API, ключи сервера и ноды — всё заново. Старые базы
 # уходят в бэкап (*.bak-…), как при обычной переустановке, но перенести их нельзя. Версия — из
 # .env прежней установки (он есть с 0.2.0); нет его — версия неизвестна и тоже считается устаревшей.
+# ALLOW_048=y — исключение для 0.4.8: её данные 0.5.0 переносит, и её можно обновить как обычно
+# (через меню awg-ctrl — ALLOW_048=y awg-ctrl, окружение доходит до установщика).
 MIN_UPGRADE_VERSION="0.5.0"
 version_lt() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$1" ]]; }
 WIPE="n"
@@ -911,6 +913,11 @@ if [[ -d "$PROJECT" ]]; then
     PREV_VERSION=$(sed -n 's/^VERSION=//p' "$PROJECT/.env" 2>/dev/null | head -1 | tr -d "\"' " || true)
     if [[ -z "$PREV_VERSION" ]] || version_lt "${PREV_VERSION%%-*}" "$MIN_UPGRADE_VERSION"; then
         OUTDATED="y"
+    fi
+    if [[ "$OUTDATED" == "y" && "${PREV_VERSION%%-*}" == "0.4.8" && "${ALLOW_048:-}" =~ ^([Yy]|yes|1)$ ]]; then
+        OUTDATED="n"
+        echo
+        warn "Версия 0.4.8 старше ${MIN_UPGRADE_VERSION}, но задан ALLOW_048 — обновление без сброса данных"
     fi
 fi
 outdated_card() {
@@ -926,6 +933,10 @@ outdated_card() {
     card_line "$RED"
     card_line "$RED" "Выданные ключи перестанут работать — клиентам нужно будет выдать новые."
     card_line "$RED" "${DIM}Старые базы останутся в бэкапе (*.bak-…), но перенести их в ${VERSION} нельзя.${NC}"
+    if [[ "${PREV_VERSION%%-*}" == "0.4.8" ]]; then
+        card_line "$RED"
+        card_line "$RED" "Для 0.4.8 есть исключение: ${BLD}ALLOW_048=y bash install.sh${NC} — обновление с сохранением данных."
+    fi
     card_line "$RED"
     echo
 }
