@@ -2,11 +2,11 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useRef, useCallback } from 'react';
-import QRCode from 'qrcode';
 import {
     apiFetch, vpnKeyToConf, downloadFile, copyText, bytes, timeAgo, genLabel,
     type User, type PageProps, type AwgGen,
 } from '../../lib/shared';
+import { qrDataUrl } from '../../lib/qr';
 import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe } from '../../components/icons';
 import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
@@ -109,12 +109,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
             const vpnKey  = u.vpn_key ?? '';
             // errorCorrectionLevel 'L' (а не 'H'): ключ vpn:// длинный (~1.3 КБ),
             // при 'H' ёмкость QR падает до ~1273 байт и кодирование падает.
-            const dataUrl = await QRCode.toDataURL(vpnKey, {
-                width: 560,
-                margin: 2,
-                errorCorrectionLevel: 'L',
-            });
-            setQrModal({ name, dataUrl, vpnKey });
+            setQrModal({ name, dataUrl: qrDataUrl(vpnKey, 'L'), vpnKey });
         } catch {
             showMsg('Не удалось сгенерировать QR-код');
         }
@@ -297,6 +292,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                         />
                         <p className="qr-hint">Отсканируй в AmneziaVPN · нажми на QR чтобы скопировать</p>
                         <div className="qr-actions">
+                            <button className="btn btn--text" onClick={() => setQrModal(null)}>Закрыть</button>
                             <button className="btn btn--tonal" onClick={async () => {
                                 try {
                                     const conf = await vpnKeyToConf(qrModal.vpnKey);
@@ -305,7 +301,6 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                     showMsg('Конфиг скачан');
                                 } catch { showMsg('Не удалось декодировать ключ'); }
                             }}>Скачать .conf</button>
-                            <button className="btn btn--tonal" onClick={() => setQrModal(null)}>Закрыть</button>
                         </div>
                     </div>
                 </div>

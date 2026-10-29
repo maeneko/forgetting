@@ -15,37 +15,90 @@ else
     GRN=""; YLW=""; RED=""; ACC=""; BLD=""; DIM=""; NC=""
 fi
 
+# Терминал ли на выводе — запоминаем до перенаправления в лог (после него stdout — уже труба).
+# Ширина — чтобы строка спиннера не переносилась.
+TTY_OUT=""
+[[ -t 1 ]] && TTY_OUT="y"
+COLS=$(stty size 2>/dev/null </dev/tty | cut -d' ' -f2 || true)
+[[ "$COLS" =~ ^[0-9]+$ && "$COLS" -ge 40 ]] || COLS=80
+
 ok()   { echo -e "  ${GRN}✓${NC}  $*"; }
 warn() { echo -e "  ${YLW}⚠${NC}  $*"; }
 fail() { trap - ERR; echo -e "\n  ${RED}✗${NC}  $*" >&2; exit 1; }
 info() { echo -e "  ${DIM}→  $*${NC}"; }
 skip() { echo -e "  ${DIM}–  $*${NC}"; }
-rule() { echo -e "  ${DIM}────────────────────────────────────────────────────────${NC}"; }
-# Заголовок шага: step "1/6  AmneziaWG" → «▍ AmneziaWG   1 из 6»; без номера — просто заголовок.
+# Заголовок шага — полоса прогресса фиксированной ширины, затем название (так названия стоят
+# в один столбец): step "4/6  Запуск AWG" → «━━━━━━━━──── Запуск AWG  4/6». Шаг без номера
+# (проверки, вопросы) — с пустой полосой той же ширины.
+STEP_W=12
 step() {
+    local n=0 t=1 title="$*" full="" left="" bar i f
     if [[ "$1" =~ ^([0-9]+)/([0-9]+)\ +(.*)$ ]]; then
-        echo -e "\n${ACC}▍${NC}${BLD} ${BASH_REMATCH[3]}${NC}  ${DIM}${BASH_REMATCH[1]} из ${BASH_REMATCH[2]}${NC}"
+        n="${BASH_REMATCH[1]}"; t="${BASH_REMATCH[2]}"; title="${BASH_REMATCH[3]}"
+    fi
+    # Две половины собираем отдельно: срез ${bar:0:f} в C-локали режет байты, а «━» — три байта.
+    f=$(( n * STEP_W / t ))
+    for (( i = 0; i < STEP_W; i++ )); do
+        if (( i < f )); then full+="━"; else left+="─"; fi
+    done
+    bar="${ACC}${full}${NC}${DIM}${left}${NC}"
+    if (( n > 0 )); then
+        echo -e "\n  ${bar}  ${BLD}${title}${NC}  ${DIM}${n}/${t}${NC}"
     else
-        echo -e "\n${ACC}▍${NC}${BLD} $*${NC}"
+        echo -e "\n  ${bar}  ${BLD}${title}${NC}"
     fi
 }
+# Карточка — строки с цветной полосой слева (правой рамки нет: ширину кириллицы в C-локали
+# bash не посчитает, и рамка бы поехала). card_line ЦВЕТ "текст".
+card_line() { echo -e "  ${1}┃${NC} ${2:-}"; }
 # Приглашение к вводу — для read -p.
 Q="  ${ACC}›${NC} "
 
-# Вывод команд — полностью, на экран и в лог, приглушённым блоком «│» под шагом.
-#   run cmd …   — выполнить, показать всё, что она пишет (stdout+stderr); код возврата — её.
+# Вывод команд. В лог — всегда полностью, приглушённым блоком «│». На экране (терминал) — одна
+# строка: спиннер, последняя строка вывода и время; упала команда — её последние 30 строк.
+# Без терминала или с VERBOSE=1 — весь вывод и на экран, как в логе.
+#   run cmd …   — выполнить; код возврата — её.
 #   … | logblock — то же оформление для готового текста (хвост make.log, dmesg).
 # Переменные перед вызовом функции bash передаёт и в неё, и в её команды:
 #   DEBIAN_FRONTEND=noninteractive run apt-get install -y …
+# Дескрипторы (открываются ниже, вместе с логом): 3 — только в лог, 4 — только на экран.
+# Командам 3 закрываем: демон, унаследовавший его, держал бы лог открытым после выхода.
 logblock() {
     local line
     while IFS= read -r line || [[ -n "$line" ]]; do
         printf '  %s│ %s%s\n' "$DIM" "$line" "$NC"
     done
 }
+SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 run() {
-    "$@" 2>&1 | logblock
-    return "${PIPESTATUS[0]}"
+    if [[ -z "$TTY_OUT" || -n "${VERBOSE:-}" ]] || ! { true >&3; } 2>/dev/null; then
+        "$@" 2>&1 3>&- | logblock
+        return "${PIPESTATUS[0]}"
+    fi
+    local out pid rc=0 i=0 t0=$SECONDS last el w name="$1"
+    [[ "$name" == */* ]] && name="${name##*/}"
+    [[ -n "${2:-}" && "$2" != -* ]] && name+=" $2"
+    w=$(( COLS - ${#name} - 20 )); (( w < 10 )) && w=10
+    out=$(mktemp)
+    printf '  %s$ %s%s\n' "$DIM" "$*" "$NC" >&3
+    "$@" > "$out" 2>&1 3>&- &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        el=$(( SECONDS - t0 ))
+        last=$(tail -n 1 "$out" 2>/dev/null | tr -d '\r\033\t' | cut -c1-"$w" || true)
+        printf '\r\033[K  %s%s%s %s  %s%s  %d:%02d%s' "$ACC" "${SPIN[i++ % 10]}" "$NC" "$name" "$DIM" "$last" $(( el / 60 )) $(( el % 60 )) "$NC" >&4
+        sleep 0.12
+    done
+    wait "$pid" || rc=$?
+    printf '\r\033[K' >&4
+    logblock < "$out" >&3
+    (( rc != 0 )) && printf '  ✗  код %d\n' "$rc" >&3
+    if (( rc != 0 )); then
+        printf '  %s✗%s  %s — код %d, последние строки (весь вывод — в логе):\n' "$RED" "$NC" "$name" "$rc" >&4
+        tail -n 30 "$out" | logblock >&4
+    fi
+    rm -f "$out"
+    return "$rc"
 }
 
 # Случайная строка из [a-zA-Z0-9]. Вход конечный: при `tr < /dev/urandom | head` tr получает
@@ -92,15 +145,22 @@ LOGFILE="/var/log/awg-install-$(date +%Y%m%d-%H%M%S).log"
 # LC_ALL=C: sed режет байты, а не символы — на битом UTF-8 из чужого вывода (make.log, dmesg) он
 # не спотыкается. tee -p: если запись лога вдруг умрёт, tee не падает от SIGPIPE и продолжает
 # писать на экран — иначе вслед за ним молча умер бы и сам установщик.
-exec > >(tee -p >(LC_ALL=C sed -u -e $'s/\033\\[[0-9;]*[A-Za-z]//g' -e $'s/.*\r//' >> "$LOGFILE")) 2>&1
+# Три потока: 4 — сам терминал (спиннер run и хвост упавшей команды — только на экран);
+# 3 — только лог (полный вывод команд под спиннером); stdout/stderr — и туда, и туда (tee).
+exec 4>&1
+exec 3> >(LC_ALL=C sed -u -e $'s/\033\\[[0-9;]*[A-Za-z]//g' -e $'s/.*\r//' >> "$LOGFILE")
+LOG_SED_PID="${!:-}"
+exec > >(tee -p /dev/fd/3) 2>&1
 LOG_PID="${!:-}"
-# Дождаться, пока tee допишет хвост, — иначе последние строки вылезут уже после приглашения шелла.
-trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true' EXIT
+# Дождаться, пока tee и sed допишут хвост, — иначе последние строки вылезут уже после приглашения
+# шелла. sed ждём не дольше 2 с: если какой-то процесс всё же унаследовал fd 3, выход не повиснет.
+trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true; exec 3>&-
+      for _ in {1..20}; do kill -0 "$LOG_SED_PID" 2>/dev/null || break; sleep 0.1; done' EXIT
 
 # ⚠️ Дублирует .env из репозитория: установщик собирает URL релиза и печатает
 # баннер ДО того, как архив с .env скачан, поэтому взять их оттуда не может.
 # При бампе версии правь оба места.
-VERSION="0.4.7"
+VERSION="0.5.0"
 CHANNEL="${CHANNEL:-Beta}"
 
 # Откуда брать архив и как называется продукт. По умолчанию — релизы на GitHub; источник
@@ -158,25 +218,57 @@ MTU="1376"
 BIN="$PROJECT/awg-control"
 
 echo
-echo -e "  ${ACC}◆${NC} ${BLD}${BRAND}${NC}  ${DIM}${CHANNEL} · ${VERSION}${NC}"
-echo -e "    ${DIM}Панель управления VPN на AmneziaWG — установка${NC}"
-echo -e "    ${DIM}Лог: $LOGFILE${NC}"
-rule
+card_line "$ACC"
+card_line "$ACC" "${ACC}◆${NC} ${BLD}${BRAND}${NC}   ${DIM}${CHANNEL} · ${VERSION}${NC}"
+card_line "$ACC" "${DIM}Панель управления VPN на AmneziaWG — установка${NC}"
+card_line "$ACC"
+card_line "$ACC" "${DIM}лог   $LOGFILE${NC}"
+card_line "$ACC"
 
 # Поверх существующей установки: обновить (настройки, пользователи и роль остаются)
 # или переустановить с нуля. Спрашиваем первым — от ответа зависит, спрашивать ли роль.
+#
+# Установку старше MIN_UPGRADE_VERSION не обновить и не перенести: с ней несовместимы и данные,
+# и выданные ключи. Для неё — только полная переустановка со сбросом всех данных (WIPE=y):
+# пользователи, мастер-ключи, ключи API, ключи сервера и ноды — всё заново. Старые базы уходят
+# в бэкап (*.bak-…), как при обычной переустановке, но перенести их нельзя. Версия — из .env
+# прежней установки (он есть с 0.2.0); нет его — версия неизвестна и тоже считается устаревшей.
+MIN_UPGRADE_VERSION="0.5.0"
+version_lt() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$1" ]]; }
 INSTALL_MODE="fresh"
+WIPE="n"
+PREV_VERSION=""
 if [[ -d "$PROJECT" ]]; then
+    PREV_VERSION=$(sed -n 's/^VERSION=//p' "$PROJECT/.env" 2>/dev/null | head -1 | tr -d "\"' " || true)
     echo
-    warn "Уже установлено в $PROJECT"
-    echo -e "    ${ACC}${BLD}1${NC}  Обновить         ${DIM}до ${VERSION}; настройки, пользователи и роль сохранятся${NC}"
-    echo -e "    ${ACC}${BLD}2${NC}  Переустановить   ${DIM}с нуля; данные можно будет сохранить${NC}"
-    ask INST_CHOICE "Выбери [1/2, Enter — 1]: "
-    case "${INST_CHOICE:-1}" in
-        1) INSTALL_MODE="update" ;;
-        2) INSTALL_MODE="fresh" ;;
-        *) fail "Неверный выбор: введи 1 или 2" ;;
-    esac
+    if [[ -z "$PREV_VERSION" ]] || version_lt "${PREV_VERSION%%-*}" "$MIN_UPGRADE_VERSION"; then
+        card_line "$RED"
+        card_line "$RED" "${RED}${BLD}✗ Установлена устаревшая версия ${PREV_VERSION:-(неизвестна)}${NC}"
+        card_line "$RED"
+        card_line "$RED" "Обновить её до ${VERSION} нельзя: версии старше ${MIN_UPGRADE_VERSION} нужна полная переустановка."
+        card_line "$RED" "Будут удалены все ключи и данные:"
+        card_line "$RED" "  ${DIM}·${NC} пользователи и их vpn:// ключи"
+        card_line "$RED" "  ${DIM}·${NC} мастер-ключи и ссылки sen://, ключи API"
+        card_line "$RED" "  ${DIM}·${NC} ключи сервера и подключение к панели (ноду придётся добавить заново)"
+        card_line "$RED"
+        card_line "$RED" "Выданные ключи перестанут работать — клиентам нужно будет выдать новые."
+        card_line "$RED" "${DIM}Старые базы останутся в бэкапе (*.bak-…), но перенести их в ${VERSION} нельзя.${NC}"
+        card_line "$RED"
+        echo
+        ask WIPE_YN "Переустановить с удалением всех ключей? [y/N]: "
+        [[ "${WIPE_YN:-n}" =~ ^[Yy]$ ]] || { echo "  Отменено — ничего не изменено."; exit 0; }
+        WIPE="y"
+    else
+        warn "Уже установлено в $PROJECT ${DIM}(версия ${PREV_VERSION})${NC}"
+        echo -e "    ${ACC}${BLD}1${NC}  Обновить         ${DIM}до ${VERSION}; настройки, пользователи и роль сохранятся${NC}"
+        echo -e "    ${ACC}${BLD}2${NC}  Переустановить   ${DIM}с нуля; данные можно будет сохранить${NC}"
+        ask INST_CHOICE "Выбери [1/2, Enter — 1]: "
+        case "${INST_CHOICE:-1}" in
+            1) INSTALL_MODE="update" ;;
+            2) INSTALL_MODE="fresh" ;;
+            *) fail "Неверный выбор: введи 1 или 2" ;;
+        esac
+    fi
     echo
 fi
 
@@ -371,7 +463,9 @@ DB_EXISTS="n"
 #   - S4 добавляется к каждому пакету данных — держим маленьким, как прежние 14
 #   - H1–H4: непересекающиеся диапазоны в [10^8, 2^31−1] — далеко от 1–4 (типы сообщений
 #     WireGuard) и не выше прежних значений (некоторые клиенты разбирают их как int32)
-#   - I1–I5 НЕ трогать: в vpn:// ключ уходят пустыми плейсхолдерами
+#   - I1 здесь не задаётся и в awg1.conf не пишется: он нужен только клиентам, его выбирает
+#     awg-ctrl (свой у каждого сервера, хранится в users.db — KEEP_DATA его сохраняет;
+#     internal/ctrl/i1.go). I2–I5 в vpn:// ключ уходят пустыми плейсхолдерами
 # Прежние постоянные значения: ими собраны ключи установок до рандомизации — нужны, если
 # при KEEP_DATA=y awg1.conf потерялся.
 LEGACY_AWG_PORT="47619"
@@ -632,9 +726,10 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     install_command
     start_and_status
 
-    rule
-    echo -e "  ${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}  ${DIM}${ROLE_LABEL}${NC}"
-    rule
+    echo
+    card_line "$GRN"
+    card_line "$GRN" "${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}   ${DIM}${BRAND} · ${ROLE_LABEL}${NC}"
+    card_line "$GRN"
     echo
     exit 0
 fi
@@ -683,7 +778,9 @@ fi
 #   vpn:// ключи пользователей привязаны к ключу сервера. ui.db следует за ними.
 #   Панель без VPN (core): её данные — ui.db (серверы, ключи API, мастер-ключи).
 KEEP_DATA="n"
-if [[ "$ROLE" == "core" ]]; then
+if [[ "$WIPE" == "y" ]]; then
+    :   # устаревшая установка: сохранять нечего, сброс уже подтверждён
+elif [[ "$ROLE" == "core" ]]; then
     if [[ -f "$UI_DB_FILE" ]]; then
         echo
         warn "Найдены данные панели: $UI_DB_FILE"
@@ -793,7 +890,7 @@ if [[ "$ROLE" == "node" ]]; then
     JOIN="${JOIN:-}"
     # Переустановка ноды: ключ ноды на месте, панель её уже знает — можно не выпускать
     # новую строку, а оставить прежнее подключение.
-    if [[ -z "$JOIN" && "$PREV_ROLE" == "node" && -n "$(prev_val CORE_HOST)" && -f "$NODE_KEY_FILE" ]]; then
+    if [[ -z "$JOIN" && "$WIPE" != "y" && "$PREV_ROLE" == "node" && -n "$(prev_val CORE_HOST)" && -f "$NODE_KEY_FILE" ]]; then
         ask KJ "Оставить подключение к панели $(prev_val CORE_HOST):$(prev_val CORE_PORT) (нода #$(prev_val NODE_ID))? [Y/n]: "
         if [[ "${KJ:-y}" =~ ^[Yy]$ ]]; then
             CORE_HOST="$(prev_val CORE_HOST)"; CORE_PORT="$(prev_val CORE_PORT)"
@@ -836,36 +933,39 @@ fi
 # Сводка. Метки выровнены пробелами прямо в строках: printf в bash считает ширину в байтах,
 # и кириллица поехала бы.
 echo
-echo -e "  ${BLD}Будет установлено${NC}"
-rule
-echo -e "    ${DIM}Роль           ${NC} ${BLD}$ROLE_LABEL${NC}"
-echo -e "    ${DIM}Адрес          ${NC} $SERVER_IP  ${DIM}· интерфейс $NET_IFACE${NC}"
+card_line "$ACC" "${BLD}Будет установлено${NC}"
+card_line "$ACC"
+card_line "$ACC" "${DIM}Роль           ${NC} ${BLD}$ROLE_LABEL${NC}"
+card_line "$ACC" "${DIM}Адрес          ${NC} $SERVER_IP  ${DIM}· интерфейс $NET_IFACE${NC}"
 if [[ "$ROLE" != "core" ]]; then
-    echo -e "    ${DIM}Имя сервера    ${NC} $SERVER_NAME"
-    echo -e "    ${DIM}VPN            ${NC} ${AWG_PORT}/udp"
+    card_line "$ACC" "${DIM}Имя сервера    ${NC} $SERVER_NAME"
+    card_line "$ACC" "${DIM}VPN            ${NC} ${AWG_PORT}/udp"
 fi
 if [[ "$ROLE" != "node" ]]; then
-    echo -e "    ${DIM}Панель         ${NC} ${UI_PORT}/tcp  ${DIM}· логин $UI_USER${NC}"
-    echo -e "    ${DIM}Подписка sen://${NC} ${SUB_PORT}/tcp  ${DIM}· $([[ "$SUB_TLS" == "on" ]] && echo "HTTPS" || echo "HTTP, ответы подписаны")${NC}"
+    card_line "$ACC" "${DIM}Панель         ${NC} ${UI_PORT}/tcp  ${DIM}· логин $UI_USER${NC}"
+    card_line "$ACC" "${DIM}Подписка sen://${NC} ${SUB_PORT}/tcp  ${DIM}· $([[ "$SUB_TLS" == "on" ]] && echo "HTTPS" || echo "HTTP, ответы подписаны")${NC}"
     if [[ -n "$NODE_PORT" ]]; then
-        echo -e "    ${DIM}Приём нод      ${NC} ${NODE_PORT}/tcp"
+        card_line "$ACC" "${DIM}Приём нод      ${NC} ${NODE_PORT}/tcp"
     else
-        echo -e "    ${DIM}Приём нод      ${NC} ${DIM}выключен${NC}"
+        card_line "$ACC" "${DIM}Приём нод      ${NC} ${DIM}выключен${NC}"
     fi
 else
-    echo -e "    ${DIM}Панель         ${NC} $CORE_HOST:$CORE_PORT  ${DIM}· нода #$NODE_ID${NC}"
+    card_line "$ACC" "${DIM}Панель         ${NC} $CORE_HOST:$CORE_PORT  ${DIM}· нода #$NODE_ID${NC}"
 fi
 if [[ "$KEEP_DATA" == "y" ]]; then
     if [[ "$ROLE" == "core" ]]; then
-        echo -e "    ${DIM}Данные         ${NC} ${GRN}сохраняются: серверы и ключи панели${NC}"
+        card_line "$ACC" "${DIM}Данные         ${NC} ${GRN}сохраняются: серверы и ключи панели${NC}"
     else
-        echo -e "    ${DIM}Данные         ${NC} ${GRN}сохраняются: пользователи и ключ сервера${NC}"
+        card_line "$ACC" "${DIM}Данные         ${NC} ${GRN}сохраняются: пользователи и ключ сервера${NC}"
     fi
+elif [[ "$WIPE" == "y" ]]; then
+    card_line "$ACC" "${DIM}Данные         ${NC} ${RED}все ключи и данные удаляются${NC} ${DIM}(устаревшая версия ${PREV_VERSION:-?}; базы — в бэкап)${NC}"
 elif [[ "$ROLE" != "core" && -f "$DB_FILE" ]] || [[ "$ROLE" == "core" && -f "$UI_DB_FILE" ]]; then
-    echo -e "    ${DIM}Данные         ${NC} ${YLW}с нуля, старая база уйдёт в бэкап${NC}"
+    card_line "$ACC" "${DIM}Данные         ${NC} ${YLW}с нуля, старая база уйдёт в бэкап${NC}"
 fi
-echo -e "    ${DIM}Каталог        ${NC} ${DIM}$PROJECT${NC}"
-rule
+card_line "$ACC" "${DIM}Каталог        ${NC} ${DIM}$PROJECT${NC}"
+card_line "$ACC"
+echo
 
 ask YN "Продолжить? [Y/n]: "
 [[ "${YN:-y}" =~ ^[Nn]$ ]] && { echo "  Отменено."; exit 0; }
@@ -1110,6 +1210,13 @@ step "3/6  Ключи и конфиг AWG"
 
 mkdir -p "$AWG_DIR" "$AMNEZIA_DIR"
 
+# Сброс устаревшей установки: ключ ноды — тоже в бэкап, агент создаст новый (ноду добавляют в
+# панель заново). Остальное (базы, ключи сервера и подписи) сбрасывается как при KEEP_DATA=n ниже.
+if [[ "$WIPE" == "y" && -f "$NODE_KEY_FILE" ]]; then
+    mv "$NODE_KEY_FILE" "${NODE_KEY_FILE}.bak-$(date +%Y%m%d-%H%M%S)"
+    warn "Старый ключ ноды убран в бэкап — ноду нужно заново добавить в панели"
+fi
+
 # ui.db (серверы, API-ключи, мастер-ключи awg-ui) — в бэкап, чтобы awg-ui создал чистую БД.
 if [[ "$KEEP_DATA" != "y" && -f "$UI_DB_FILE" ]]; then
     UI_DB_BAK="${UI_DB_FILE}.bak-$(date +%Y%m%d-%H%M%S)"
@@ -1175,9 +1282,10 @@ if [[ "$ROLE" != "node" ]]; then
         if [[ "$KEEP_DATA" == "y" && -f "$SUB_TLS_CRT" && -f "$SUB_TLS_KEY" ]]; then
             ok "Сертификат подписки sen:// сохранён"
         else
+            # CN случайный (12 hex, как имя хоста контейнера): постоянный CN — готовый отпечаток для DPI.
             ( umask 077
               openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-                  -keyout "$SUB_TLS_KEY" -out "$SUB_TLS_CRT" -days 3650 -subj "/CN=sen" 2>/dev/null )
+                  -keyout "$SUB_TLS_KEY" -out "$SUB_TLS_CRT" -days 3650 -subj "/CN=$(openssl rand -hex 6)" 2>/dev/null )
             chmod 600 "$SUB_TLS_KEY" "$SUB_TLS_CRT"
             ok "Самоподписанный сертификат подписки sen:// создан (10 лет)"
         fi
@@ -1515,29 +1623,32 @@ if [[ "$ROLE" == "node" ]]; then
     fi
 fi
 
-rule
-echo -e "  ${GRN}${BLD}✓ Готово${NC}  ${DIM}${BRAND} ${VERSION} · ${ROLE_LABEL}${NC}"
-rule
+echo
+card_line "$GRN"
+card_line "$GRN" "${GRN}${BLD}✓ Готово${NC}   ${DIM}${BRAND} ${VERSION} · ${ROLE_LABEL}${NC}"
+card_line "$GRN"
 if [[ "$ROLE" != "node" ]]; then
-    echo -e "    ${DIM}Панель   ${NC} ${BLD}http://${SERVER_IP}:${UI_PORT}${NC}"
-    echo -e "    ${DIM}Логин    ${NC} ${UI_USER}"
-    echo -e "    ${DIM}Пароль   ${NC} ${YLW}${UI_PASS}${NC}  ${DIM}сменить: awg-ctrl credentials${NC}"
-    echo
-    echo -e "    ${DIM}sen://   ${NC} $([[ "$SUB_TLS" == "on" ]] && echo https || echo http)://${SERVER_IP}:${SUB_PORT}  ${DIM}подписка SenAWG${NC}"
-    [[ -n "$NODE_PORT" ]] && echo -e "    ${DIM}Ноды     ${NC} wss://${SERVER_IP}:${NODE_PORT}  ${DIM}«Добавить сервер» в панели${NC}"
+    card_line "$GRN" "${DIM}Панель   ${NC} ${BLD}http://${SERVER_IP}:${UI_PORT}${NC}"
+    card_line "$GRN" "${DIM}Логин    ${NC} ${UI_USER}"
+    card_line "$GRN" "${DIM}Пароль   ${NC} ${YLW}${UI_PASS}${NC}  ${DIM}сменить: awg-ctrl credentials${NC}"
+    card_line "$GRN"
+    card_line "$GRN" "${DIM}sen://   ${NC} $([[ "$SUB_TLS" == "on" ]] && echo https || echo http)://${SERVER_IP}:${SUB_PORT}  ${DIM}подписка SenAWG${NC}"
+    [[ -n "$NODE_PORT" ]] && card_line "$GRN" "${DIM}Ноды     ${NC} wss://${SERVER_IP}:${NODE_PORT}  ${DIM}«Добавить сервер» в панели${NC}"
 fi
 if [[ "$ROLE" != "core" ]]; then
-    echo -e "    ${DIM}VPN      ${NC} ${SERVER_IP}:${AWG_PORT}/udp  ${DIM}· awg-ctrl на 127.0.0.1:${AWGCTRL_PORT}${NC}"
+    card_line "$GRN" "${DIM}VPN      ${NC} ${SERVER_IP}:${AWG_PORT}/udp  ${DIM}· awg-ctrl на 127.0.0.1:${AWGCTRL_PORT}${NC}"
 fi
 if [[ "$ROLE" == "node" ]]; then
-    echo -e "    ${DIM}Панель   ${NC} wss://${CORE_HOST}:${CORE_PORT}  ${DIM}исходящее подключение${NC}"
-    echo
-    echo -e "    Сервер «${SERVER_NAME}» появится в списке серверов панели — управляй им оттуда."
+    card_line "$GRN" "${DIM}Панель   ${NC} wss://${CORE_HOST}:${CORE_PORT}  ${DIM}исходящее подключение${NC}"
+    card_line "$GRN"
+    card_line "$GRN" "Сервер «${SERVER_NAME}» появится в списке серверов панели — управляй им оттуда."
 fi
-rule
-echo -e "    ${YLW}⚠${NC}  Если у хостера свой фаервол (панель провайдера, security group) — открой там:"
-echo -e "       ${BLD}${OPEN_PORTS[*]}${NC}  ${DIM}иначе клиенты не подключатся, а на сервере всё будет выглядеть исправным${NC}"
-rule
+card_line "$GRN"
+echo
+card_line "$YLW" "${YLW}⚠${NC}  Если у хостера свой фаервол (панель провайдера, security group) — открой там:"
+card_line "$YLW" "   ${BLD}${OPEN_PORTS[*]}${NC}"
+card_line "$YLW" "   ${DIM}иначе клиенты не подключатся, а на сервере всё будет выглядеть исправным${NC}"
+echo
 echo -e "    ${DIM}awg-ctrl                     ${NC} меню: запуск, статус, логин и пароль, join/unjoin"
 echo -e "    ${DIM}systemctl restart awg-control${NC} перезапуск ${DIM}(автозапуск на загрузке включён)${NC}"
 echo

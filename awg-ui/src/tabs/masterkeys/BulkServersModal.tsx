@@ -109,12 +109,12 @@ export default function BulkServersModal({ token, nodes, keys, defaults, onClose
                 {preview?.hidden.map(h => (
                     <p className="mk-notice" key={h.id}>
                         Ключ API «{h.label}» перестанет видеть {h.keys} мастер-ключ(ей): у них появится сервер вне его области.
-                        Расширьте его область на вкладке «API-ключи», если он ими управляет.
+                        Расширьте его область в «Настройках», на вкладке «API-ключи», если он ими управляет.
                     </p>
                 ))}
                 {error && <p className="login-error">{error}</p>}
                 <div className="node-modal-actions">
-                    <button className="btn btn--outline" onClick={onClose}>Отмена</button>
+                    <button className="btn btn--text" onClick={onClose}>Отмена</button>
                     <button className="btn btn--primary" disabled={busy || nothing || !!error} onClick={apply}>
                         {busy ? 'Применяем…' : 'Применить'}
                     </button>

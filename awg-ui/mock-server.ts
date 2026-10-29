@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.3.3";
+const MOCK_VERSION = "0.5.0";
 
 // ── пользователи (vpn://) ──
 interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
@@ -37,9 +37,10 @@ const srv = (q: express.Request) => { const n = Number(q.headers["x-server-id"])
 const U_ = (q: express.Request) => usersOf[srv(q)];
 interface MNode { id: number; name: string; ip: string; gen: string; online: boolean; pending: boolean; version: string | null }
 const mnodes: MNode[] = [
-    { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.3.2" },   // отстаёт от панели
+    { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
-    { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: true, pending: false, version: null },  // старый агент: версию не шлёт
+    { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.1" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
@@ -53,8 +54,8 @@ interface Dev { id: number; device_id: string; device_name: string; platform: st
 interface MK { id: number; uuid: string; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
 let mkId = 1, devId = 1;
 const dev = (name: string, platform: string, online: boolean, version = "0.6.5"): Dev => ({ id: devId++, device_id: crypto.randomUUID(), device_name: name, platform, version, created_at: now() - 86400, last_seen: now() - rnd(900), rekey_requested: false, online, lastHandshake: now() - rnd(300), rx: rnd(9e8), tx: rnd(3e8) });
-const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 3, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1] },
-    { id: mkId++, uuid: crypto.randomUUID(), label: "Офис", device_limit: 5, created_at: now() - 86400, secret: crypto.randomBytes(16), devs: [], servers: [0] },
+const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 2, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1, 2] },   // все места заняты; Tokyo (2) ещё не получил устройства
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Офис", device_limit: 5, created_at: now() - 86400, secret: crypto.randomBytes(16), devs: [], servers: [0, 1] },   // «все серверы»
     { id: mkId++, uuid: crypto.randomUUID(), label: "Друзья", device_limit: 3, created_at: now() - 3600, secret: crypto.randomBytes(16), devs: [], servers: [1] }];
 const signPub = crypto.randomBytes(32);
 const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
@@ -75,9 +76,17 @@ app.get("/health", (q, r) => {
 });
 
 // ── серверы ──
+// Как MinNodeVersion в хабе: ноду старше хаб не подключает (в моке она просто offline + outdated)
+const MIN_NODE = "0.5.0";
+const cmpVer = (a: string, b: string) => {
+    const pa = a.split("-")[0].split(".").map(Number), pb = b.split("-")[0].split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; }
+    return 0;
+};
 const nodeView = () => [
     { id: 0, name: "VPN (mock)", local: true, online: true, pending: false, last_seen: null, version: MOCK_VERSION, health: { server: "VPN (mock)", ip: "203.0.113.7", gen: GEN, peers: users.length, awg_up: true, module: "3.0.1", tools: "1.0.0" } },
     ...mnodes.map(n => ({ id: n.id, name: n.name, local: false, online: n.online, pending: n.pending, last_seen: n.online ? now() - 5 : null, version: n.version,
+        outdated: !n.pending && (!n.version || cmpVer(n.version, MIN_NODE) < 0),
         health: n.online ? { server: n.name, ip: n.ip, gen: n.gen, peers: (usersOf[n.id] ?? []).length, awg_up: true, module: "3.0.1", tools: "1.0.0" } : null })),
 ];
 app.get("/ui/nodes", (_q, r) => r.json({ hub: true, local: true, version: MOCK_VERSION, nodes: nodeView() }));
@@ -106,23 +115,46 @@ const MON_LOGS = {
     install: ["1/4  установка пакета prometheus", "Reading package lists…", "Setting up prometheus (2.45.0)…", "2/4  токен и конфиг", "3/4  слушаем только 127.0.0.1:9090, хранение 31d", "4/4  запуск", "✓ Prometheus работает на 127.0.0.1:9090, метрики панели скрейпятся каждые 15 с."],
     remove:  ["1/3  остановка сервиса", "2/3  токен", "3/3  удаление пакета и накопленных данных", "Removing prometheus (2.45.0)…", "Purging configuration files…", "✓ Prometheus удалён вместе с накопленными графиками."],
 };
-let monJob: { action: "install" | "remove"; start: number } | null = null;
+// Как internal/ui/monitor.go: Prometheus у панели один. target — чей awg-ctrl ставит и удаляет его:
+// где он уже стоит; если нигде — свой (панель + VPN) или ?server= (панель без VPN, MOCK_ROLE=core).
+// Ход операции у каждого сервера свой (его awg-ctrl). Ставить можно, только если awg-ctrl сервера
+// на связи и новый: Tokyo без связи, у Amsterdam старый агент (/api/monitor/job → 404) — у них
+// can_install: false и команда вручную; у Frankfurt осталась неудачная прошлая установка.
+type MonJob = { action: "install" | "remove"; start: number; lines?: string[]; exit?: number };
+const monJobs: Record<number, MonJob> = {
+    1: { action: "install", start: now() * 1000 - 86400e3, exit: 100, lines: ["1/4  установка пакета prometheus", "Reading package lists…",
+        "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1873 (unattended-upgr)", "E: Unable to acquire the dpkg frontend lock, is another process using it?"] },
+};
 let monReady = false;
+let monHost = 0;   // где стоит (для панели без VPN — нода; у панели с VPN всегда 0, «этот сервер»)
+const monHostOf = (id: number) => ({ id, name: nodeView().find(n => n.id === id)?.name ?? `#${id}` });
 const MON_MS = 6000;
-const monRunning = () => !!monJob && Date.now() - monJob.start < MON_MS;
-app.get("/ui/monitor", (_q, r) => {
-    if (monJob && !monRunning()) monReady = monJob.action === "install";
-    let job = null;
-    if (monJob) {
-        const lines = MON_LOGS[monJob.action];
-        const n = monRunning() ? Math.max(1, Math.floor(((Date.now() - monJob.start) / MON_MS) * lines.length)) : lines.length;
-        job = { action: monJob.action, running: monRunning(), exit: monRunning() ? null : 0, log: lines.slice(0, n).join("\n") };
+const monRunning = (j?: MonJob) => !!j && j.exit === undefined && Date.now() - j.start < MON_MS;
+const monTarget = (q: express.Request) => monReady || !MOCK_CORE ? monHost : Number(q.query.server ?? 0);
+const monCan = (id: number) => { const n = mnodes.find(x => x.id === id); return !n || (n.online && n.version !== null); };
+app.get("/ui/monitor", (q, r) => {
+    const target = monTarget(q), can = monCan(target), mj = monJobs[target];
+    if (mj && mj.exit === undefined && !monRunning(mj)) {   // операция дошла до конца
+        mj.exit = 0;
+        monReady = mj.action === "install";
+        if (monReady) monHost = target;
     }
-    // MOCK_ROLE=core/retire — панель без VPN: Prometheus на ноде #0 (сервер, с которого она переехала)
-    r.json({ ready: monReady, can_install: true, command: "awg-ctrl monitor install", host: MOCK_CORE ? { id: 0, name: "VPN" } : null, job });
+    let job = null;
+    if (can && mj) {
+        const lines = mj.lines ?? MON_LOGS[mj.action];
+        const n = monRunning(mj) ? Math.max(1, Math.floor(((Date.now() - mj.start) / MON_MS) * lines.length)) : lines.length;
+        job = { action: mj.action, running: monRunning(mj), exit: monRunning(mj) ? null : mj.exit ?? 0, log: lines.slice(0, n).join("\n") };
+    }
+    r.json({ ready: monReady, can_install: can, command: "awg-ctrl monitor install", host: MOCK_CORE ? monHostOf(target) : null, job });
 });
 for (const action of ["install", "remove"] as const) {
-    app.post(`/ui/monitor/${action}`, (_q, r) => { if (!monRunning()) monJob = { action, start: Date.now() }; r.status(202).json({ running: true, action }); });
+    app.post(`/ui/monitor/${action}`, (q, r) => {
+        const target = monTarget(q), n = mnodes.find(x => x.id === target);
+        if (n && !n.online) return r.status(502).json({ error: "awg-ctrl недоступен" });
+        if (n && n.version === null) return r.status(501).json({ error: "awg-ctrl старой версии не умеет этого: обновите сервер или выполните команду вручную" });
+        if (!monRunning(monJobs[target])) monJobs[target] = { action, start: Date.now() };
+        r.status(202).json({ running: true, action });
+    });
 }
 // Перенос панели (internal/ui/migrate.go). Мок — standalone: переносить можно, принимать нельзя;
 // MOCK_ROLE=core — наоборот (код «принимается» через 10 с, ещё через 10 с — «перезапуск»);
@@ -183,19 +215,38 @@ app.get("/ui/monitor/overview", (q, r) => {
     const cpu = pts((_, t) => 38 + 22 * wave(t, per * 0.8, 2) + 12 * wave(t, per / 5) + rnd(6));
     const mem = pts((_, t) => 54 + 6 * wave(t, per * 3) + rnd(2));
     const scale = (a: [number, number][], k: number) => a.map(([t, v]) => [t, v * k] as [number, number]);
-    // Один сервер — тот, что выбран в сервер-баре (?server=<id>): ядро (0) или нода
-    const id = Number(q.query.server ?? 0);
-    const k = id === 0 ? 0.7 : 0.3;
-    const down1 = scale(down, k), up1 = scale(up, k);
     const used = (a: [number, number][]) => a.reduce((n, [, v]) => n + v, 0) * step / 8;   // бит/с × с → байты
-    if (id === 3) return r.json({ range: q.query.range ?? "1h", step, from, to, servers: [], total: { down: [], up: [], online: [], heavy: [], drops: [], cpu: [], mem: [] } });
-    r.json({ range: q.query.range ?? "1h", step, from, to,
-        servers: [{ id, name: id === 0 ? "VPN (mock)" : "Frankfurt", ok: true, down: down1.at(-1)![1], up: up1.at(-1)![1], online: id === 0 ? 7 : 3,
-            heavy: id === 0 ? heavy.at(-1)![1] : 0, congested: id === 0 && heavy.at(-1)![1] > 0,
-            cpu: id === 0 ? cpu.at(-1)![1] : cpu.at(-1)![1] * 0.5, mem: id === 0 ? mem.at(-1)![1] : 31, cores: id === 0 ? 4 : 2, mem_total: (id === 0 ? 4 : 2) * 2 ** 30,
-            used_down: used(down1), used_up: used(up1) }],
-        total: { down: down1, up: up1, online: scale(online, k), heavy: id === 0 ? heavy : scale(heavy, 0), drops: id === 0 ? drops : scale(drops, 0),
-            cpu: id === 0 ? cpu : scale(cpu, 0.5), mem: id === 0 ? mem : scale(mem, 0.55) } });
+    // Ряды одного сервера: ядро (0) — основная нагрузка, нода Frankfurt (1) — поменьше
+    const one = (id: number) => {
+        const k = id === 0 ? 0.7 : 0.3;
+        const d = scale(down, k), u = scale(up, k);
+        return {
+            row: { id, name: id === 0 ? "VPN (mock)" : "Frankfurt", ok: true, down: d.at(-1)![1], up: u.at(-1)![1], online: id === 0 ? 7 : 3,
+                heavy: id === 0 ? heavy.at(-1)![1] : 0, congested: id === 0 && heavy.at(-1)![1] > 0,
+                cpu: id === 0 ? cpu.at(-1)![1] : cpu.at(-1)![1] * 0.5, mem: id === 0 ? mem.at(-1)![1] : 31, cores: id === 0 ? 4 : 2, mem_total: (id === 0 ? 4 : 2) * 2 ** 30,
+                used_down: used(d), used_up: used(u) },
+            series: { down: d, up: u, online: scale(online, k), heavy: id === 0 ? heavy : scale(heavy, 0), drops: id === 0 ? drops : scale(drops, 0),
+                cpu: id === 0 ? cpu : scale(cpu, 0.5), mem: id === 0 ? mem : scale(mem, 0.55) },
+        };
+    };
+    const empty = { down: [], up: [], online: [], heavy: [], drops: [], cpu: [], mem: [] };
+    // Без ?server= — все серверы (как monitor.go): ряды трафика, устройств и потерь суммируются, процессор
+    // и память — среднее. Метрики отдают ядро и Frankfurt; у Amsterdam (3) старый агент — его нет.
+    if (q.query.server === undefined) {
+        const all = [one(0), one(1)];
+        const zip = (key: keyof typeof empty, avg: boolean) => all[0].series[key].map(([t], n) => {
+            const sum = all.reduce((acc, x) => acc + x.series[key][n][1], 0);
+            return [t, avg ? sum / all.length : sum] as [number, number];
+        });
+        return r.json({ range: q.query.range ?? "1h", step, from, to, servers: all.map(x => x.row),
+            total: { down: zip("down", false), up: zip("up", false), online: zip("online", false), heavy: zip("heavy", false),
+                drops: zip("drops", false), cpu: zip("cpu", true), mem: zip("mem", true) } });
+    }
+    // Один сервер (?server=<id>)
+    const id = Number(q.query.server);
+    if (id !== 0 && id !== 1) return r.json({ range: q.query.range ?? "1h", step, from, to, servers: [], total: empty });
+    const x = one(id);
+    r.json({ range: q.query.range ?? "1h", step, from, to, servers: [x.row], total: x.series });
 });
 
 // Prometheus: токен метрик и сам /metrics (без проверки токена — мок).
@@ -211,7 +262,9 @@ app.delete("/ui/metrics-token", (_q, r) => { promTok = null; r.json(promView());
 app.get("/metrics", (_q, r) => r.type("text/plain").send('awg_panel_info{version="mock"} 1\nawg_servers 4\n'));
 
 // Деление канала: состояние по серверам; usersOf[1] играет «старую ноду» без маршрута (404 → «обнови сервер»).
-const shapingOf: Record<number, { enabled: boolean; downMbit: number; upMbit: number; auto: boolean }> = {};
+// На сервере 0 деление канала включено сразу — чтобы был пример «фонового» приоритета: пользователь
+// 10.9.0.2 и «MacBook Ивана» в мастер-ключе «Семья».
+const shapingOf: Record<number, { enabled: boolean; downMbit: number; upMbit: number; auto: boolean }> = { 0: { enabled: true, downMbit: 100, upMbit: 50, auto: true } };
 const shapingView = (id: number) => {
     const settings = shapingOf[id] ?? { enabled: false, downMbit: 0, upMbit: 0, auto: true };
     const on = settings.enabled;
@@ -252,6 +305,25 @@ app.put("/api/torrent", (q, r) => {
     if (typeof b.enabled !== "boolean") return r.status(400).json({ error: "enabled должен быть true/false" });
     torrentOf[id] = { enabled: b.enabled, since: b.enabled && !torrentOf[id]?.enabled ? now() : (torrentOf[id]?.since ?? now()) };
     r.json(torrentView(id));
+});
+
+// Маскировка первого пакета (I1): у каждого сервера своя; Frankfurt (1) — старая нода без маршрута (404).
+// «Сменить» берёт случайный шаблон из примеров — как GenI1 в awg-ctrl, только без случайных полей.
+const I1_SAMPLES = [
+    { kind: "dns",  label: "DNS-запрос к ya.ru",            i1: "<r 2><b 0x01000001000000000001027961027275000001000100002904d0000000000000>" },
+    { kind: "quic", label: "QUIC Initial, 1250 байт",       i1: "<b 0xc30000000108><r 8><b 0x00><b 0x0044e2><r 1232>" },
+    { kind: "stun", label: "STUN binding request",          i1: "<b 0x000100002112a442><r 12>" },
+    { kind: "dns",  label: "DNS-запрос к www.google.com",   i1: "<r 2><b 0x010000010000000000000377777706676f6f676c6503636f6d0000410001>" },
+    { kind: "quic", label: "QUIC Initial, 1200 байт",       i1: "<b 0xc90000000108><r 8><b 0x08><r 8><b 0x0044a6><r 1190>" },
+];
+const maskingOf: Record<number, number> = { 0: 0, 2: 1, 3: 2 };
+app.get("/api/masking", (q, r) => tsid(q) === 1 ? r.status(404).json({ error: "Not found" }) : r.json(I1_SAMPLES[maskingOf[tsid(q)] ?? 3]));
+app.post("/api/masking", (q, r) => {
+    const id = tsid(q);
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    const cur = maskingOf[id] ?? 3;
+    maskingOf[id] = (cur + 1 + Math.floor(Math.random() * (I1_SAMPLES.length - 1))) % I1_SAMPLES.length;
+    r.json(I1_SAMPLES[maskingOf[id]]);
 });
 
 app.get("/api/users", (q, r) => r.json({ users: U_(q) }));

@@ -8,11 +8,11 @@ LICENSE file in the root directory of this source tree.
 /* Открытый API-ключ (показывается один раз при создании) */
 .apikey-value {
     font-family: var(--mono);
-    font-size: 13px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
     color: var(--on-surface);
     background: var(--surface-container);
     border: 1px solid var(--outline-variant);
-    border-radius: 12px;
+    border-radius: var(--shape-medium);
     padding: 12px 14px;
     width: 100%;
     word-break: break-all;
@@ -21,9 +21,9 @@ LICENSE file in the root directory of this source tree.
 
 .apikey-cards-list { display: none; flex-direction: column; gap: 12px; }
 
-.apikey-count { font-size: 12px; color: var(--neutral-text); }
+.apikey-count { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .apikey-empty {
-    font-size: 14px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
     color: var(--neutral-text);
     text-align: center;
     padding: 48px 0;
@@ -31,7 +31,7 @@ LICENSE file in the root directory of this source tree.
 .apikey-card {
     background: var(--surface-bright);
     border: 1px solid var(--outline-variant);
-    border-radius: var(--r-card);
+    border-radius: var(--shape-extra-large);
     padding: 16px;
     display: flex;
     flex-direction: column;
@@ -49,10 +49,10 @@ LICENSE file in the root directory of this source tree.
     gap: 8px;
     min-width: 0;
 }
-.apikey-card-num   { font-size: 12px; color: var(--neutral-dot); flex-shrink: 0; }
+.apikey-card-num   { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-dot); flex-shrink: 0; }
 .apikey-card-label {
-    font-size: 16px;
-    font-weight: 500;
+    font-size: var(--title-medium-size); line-height: var(--title-medium-line);
+    font-weight: var(--weight-medium);
     color: var(--on-surface);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -60,7 +60,7 @@ LICENSE file in the root directory of this source tree.
 }
 .apikey-card-prefix {
     font-family: var(--mono);
-    font-size: 13px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
     color: var(--neutral-text);
     word-break: break-all;
 }
@@ -68,12 +68,15 @@ LICENSE file in the root directory of this source tree.
     display: flex;
     justify-content: space-between;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
     color: var(--neutral-text);
 }
 
-@media (max-width: 640px) {
-    .apikey-cards-list { display: flex; }
+/* compact и medium (< 840px): карточки вместо таблицы, на планшете — сеткой */
+@media (max-width: 839px) {
+    .apikey-cards-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    /* счётчик и «пусто» — на всю строку сетки */
+    :is(.apikey-count, .apikey-empty) { grid-column: 1 / -1; }
 }
 
 /* Настройки ключа: какие серверы он видит */
@@ -82,13 +85,13 @@ LICENSE file in the root directory of this source tree.
     display: flex; flex-direction: column; gap: 10px;
     background: var(--surface-bright);
     border: 1px solid var(--outline-variant);
-    border-radius: 16px;
+    border-radius: var(--shape-large);
     padding: 12px 16px 14px;
     margin: 6px 0 8px;
 }
-.apikey-tools-title { margin: 0; font-size: 13px; font-weight: 500; color: var(--label); }
-.apikey-tools-hint { margin: 0; font-size: 12px; color: var(--neutral-text); }
+.apikey-tools-title { margin: 0; font-size: var(--title-small-size); line-height: var(--title-small-line); font-weight: var(--weight-medium); color: var(--on-surface-variant); }
+.apikey-tools-hint { margin: 0; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .apikey-card-btns { display: flex; gap: 8px; flex-shrink: 0; }
-.apikey-card-servers { font-size: 12px; color: var(--neutral-text); }
+.apikey-card-servers { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 
 .apikey-new-servers { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 16px; }

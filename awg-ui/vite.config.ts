@@ -4,6 +4,8 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const api = `http://localhost:${process.env.MOCK_PORT || 8080}`;
+
 export default defineConfig({
     // Ресурсы — от адреса страницы, а не от корня домена: собранная панель работает и в корне, и в
     // подпапке за reverse-proxy (example.com/forgetting/) без пересборки. Запросы к API — так же
@@ -12,11 +14,11 @@ export default defineConfig({
     plugins: [react()],
     server: {
         proxy: {
-            '/api':    'http://localhost:8080',
-            '/ui':     'http://localhost:8080',
-            '/health': 'http://localhost:8080',
-            '/login':  'http://localhost:8080',
-            '/logout': 'http://localhost:8080',
+            '/api':    api,
+            '/ui':     api,
+            '/health': api,
+            '/login':  api,
+            '/logout': api,
         },
     },
 });

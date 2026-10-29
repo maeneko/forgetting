@@ -300,6 +300,12 @@ func (s *Server) routes() []route {
 				{"keepalive", cfg.Keepalive}, {"mtu", cfg.MTU}, {"awg", profileAwg(cfg.Params)}})
 		}),
 
+		// Маскировка первого пакета (I1): посмотреть и сменить. Путь под /api/ — его пропускает
+		// awg-agent нод. Интерфейс не трогается: I1 нужен только клиентам (см. i1.go).
+		R("GET", "/api/masking", false, a, func(c *rctx) (result, error) { return ok(maskingInfo(s.cfg().Params.I1)) }),
+
+		R("POST", "/api/masking", true, a, func(c *rctx) (result, error) { return ok(maskingInfo(s.regenI1())) }),
+
 		R("POST", "/awg/restart", true, a, func(c *rctx) (result, error) {
 			if err := s.restartAwg(); err != nil {
 				return result{}, err

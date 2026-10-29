@@ -2,11 +2,11 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useCallback } from 'react';
-import { apiFetch, copyText, type PageProps } from '../../lib/shared';
-import { IcoCopy } from '../../components/icons';
+import { apiFetch, copyText, type PageProps } from '../../../lib/shared';
+import { IcoCopy } from '../../../components/icons';
 import './migrate.css';
 
-// Вкладка «Перенос»: панель уезжает с сервера «панель + VPN» на отдельную панель без VPN, а
+// Раздел «Перенос» вкладки «Настройки»: панель уезжает с сервера «панель + VPN» на отдельную панель без VPN, а
 // старый сервер остаётся её нодой #0. Новая панель выдаёт одноразовый код, старая по нему сама
 // отправляет туда базу и ключи подписки — у пользователей не меняется ничего. Логика — в
 // internal/ui/migrate.go (/ui/migrate*), порядок — docs/node-protocol.md, «Перенос панели».
@@ -160,7 +160,7 @@ export default function MigratePage({ token, showMsg }: PageProps) {
                     </p>
                     <ol className="mv-steps">
                         <li>На новом сервере установите Forgetting с ролью «только панель».</li>
-                        <li>Там на вкладке «Перенос» нажмите «Получить код».</li>
+                        <li>Там в «Настройках», на вкладке «Перенос», нажмите «Получить код».</li>
                         <li>Вставьте код сюда и нажмите «Перенести».</li>
                     </ol>
                     {info.state === 'uncertain' ? (
@@ -190,7 +190,7 @@ export default function MigratePage({ token, showMsg }: PageProps) {
                 info.code ? (
                     <>
                         <p className="mv-text">
-                            Вставьте код на вкладке «Перенос» старой панели. Он одноразовый и действует
+                            Вставьте код в «Настройках» старой панели, на вкладке «Перенос». Он одноразовый и действует
                             ещё {Math.max(1, Math.round(info.code.expires_in / 60))} мин. Архив придёт зашифрованным ключом из кода.
                         </p>
                         <code className="node-modal-cmd">{info.code.code}</code>

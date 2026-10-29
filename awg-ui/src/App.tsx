@@ -3,15 +3,17 @@
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
+import './tokens.css';
 import './App.css';
 import {
-    TOKEN_KEY, THEME_KEY, SERVER_KEY, BRAND_FALLBACK, apiFetch, setServerId, getServerId,
+    TOKEN_KEY, SERVER_KEY, BRAND_FALLBACK, apiFetch, setServerId, getServerId, serversLabel, openTab, MIN_NODE_VERSION,
     type NodeInfo, type Brand,
 } from './lib/shared';
-import { IcoMenu, IcoLogout, IcoSun, IcoMoon, IcoRefresh } from './components/icons';
+import { IcoMenu, IcoLogout, IcoSun, IcoMoon, IcoRefresh, IcoChevronDown } from './components/icons';
 import ServerBar from './components/ServerBar';
+import DrumTitle from './components/DrumTitle';
+import { useTheme, setThemeMode } from './lib/theme';
 import AddServerModal from './components/AddServerModal';
-import ServerSettingsModal from './components/ServerSettingsModal';
 import { TABS, TABS_BY_GROUP } from './tabs';
 
 // Оболочка приложения: логин, тема, drawer/сайдбар, общая сессия (token,
@@ -27,14 +29,17 @@ export default function App() {
     const [panelVersion, setPanelVersion] = useState<string | null>(null);
     const [serverId, setServerIdState] = useState<number | null>(null);
     const [modal, setModal]           = useState<{ node?: NodeInfo } | null>(null);
-    const [settingsFor, setSettingsFor] = useState<NodeInfo | null>(null);
     const [msg, setMsg]               = useState('');
     const [drawerOpen, setDrawerOpen] = useState(false);
+    const [serversOpen, setServersOpen] = useState(false);   // выпадающий список серверов
+    const serverSelectRef = useRef<HTMLDivElement>(null);
     const [activeTab, setActiveTab]   = useState(TABS[0].id);
+    // Встроенный Prometheus: null — ещё не знаем; fresh — только что поставили (пункт «Монитор» въезжает в меню);
+    // leaving — только что удалили (пункт ещё в меню, пока доигрывает уход)
+    const [prom, setProm]             = useState<{ ready: boolean; fresh: boolean; leaving: boolean } | null>(null);
     const [restarting, setRestarting] = useState(false);
     const [brand, setBrand]           = useState<Brand>({ brand: BRAND_FALLBACK, channel: '', version: '' });
-    const [theme, setTheme]           = useState<'light' | 'dark'>(() =>
-        localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light');
+    const { theme }                   = useTheme();
     const touchStartX                 = useRef(0);
     const touchCurrentX               = useRef(0);
 
@@ -197,17 +202,77 @@ export default function App() {
             .catch(() => { /* остаётся фолбэк */ });
     }, []);
 
-    // Применять и сохранять тему
-    useEffect(() => {
-        document.documentElement.setAttribute('data-theme', theme);
-        localStorage.setItem(THEME_KEY, theme);
-    }, [theme]);
-
     // Блокировать прокрутку фона когда drawer открыт
     useEffect(() => {
         document.body.style.overflow = drawerOpen ? 'hidden' : '';
         return () => { document.body.style.overflow = ''; };
     }, [drawerOpen]);
+
+    // На широком окне (≥1200px) меню постоянное — модальный drawer там не нужен
+    useEffect(() => {
+        const mq = window.matchMedia('(min-width: 1200px)');
+        const h = () => { if (mq.matches) setDrawerOpen(false); };
+        mq.addEventListener('change', h);
+        return () => mq.removeEventListener('change', h);
+    }, []);
+
+    // Список серверов закрывается кликом мимо него и по Escape
+    useEffect(() => {
+        if (!serversOpen) return;
+        const down = (e: MouseEvent) => {
+            if (!serverSelectRef.current?.contains(e.target as Node)) setServersOpen(false);
+        };
+        const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setServersOpen(false); };
+        document.addEventListener('mousedown', down);
+        document.addEventListener('keydown', key);
+        return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key); };
+    }, [serversOpen]);
+
+    // Есть ли встроенный Prometheus — от него зависит пункт «Монитор» (requires: 'prometheus').
+    // Узнаём при входе, раз в минуту (могли поставить из CLI) и сразу от вкладок (announcePrometheus).
+    // Анимации — только при переходах «не было → есть» и «было → нет», не при каждой загрузке страницы.
+    const notePrometheus = useCallback((ready: boolean) => {
+        setProm(p => (p?.ready === ready ? p : { ready, fresh: p !== null && ready, leaving: !!p?.ready && !ready }));
+    }, []);
+    // Уход длится --duration-medium2 (300 мс); потом пункт убираем из меню совсем
+    useEffect(() => {
+        if (!prom?.leaving) return;
+        const t = setTimeout(() => setProm(p => (p?.leaving ? { ...p, leaving: false } : p)), 300);
+        return () => clearTimeout(t);
+    }, [prom?.leaving]);
+    useEffect(() => {
+        if (!token) { setProm(null); return; }
+        const load = () => apiFetch('GET', `/ui/monitor?server=${getServerId() ?? 0}`, token)
+            .then(r => notePrometheus(!!r.ready))
+            .catch(() => { /* не знаем — меню не трогаем */ });
+        void load();
+        const t = setInterval(load, 60000);
+        const h = (e: Event) => notePrometheus((e as CustomEvent<boolean>).detail);
+        window.addEventListener('awg:prometheus', h);
+        return () => { clearInterval(t); window.removeEventListener('awg:prometheus', h); };
+    }, [token, notePrometheus]);
+    // tabVisible — вкладка доступна; в меню она ещё и на время ухода
+    const tabVisible = (t: { requires?: 'prometheus' }) => t.requires !== 'prometheus' || !!prom?.ready;
+    const tabLeaving = (t: { requires?: 'prometheus' }) => t.requires === 'prometheus' && !!prom?.leaving;
+    const navGroups = TABS_BY_GROUP
+        .map(g => ({ ...g, tabs: g.tabs.filter(t => tabVisible(t) || tabLeaving(t)) }))
+        .filter(g => g.tabs.length > 0);
+
+    // Активная вкладка пропала из меню (Prometheus удалили) — на первую
+    useEffect(() => {
+        const t = TABS.find(x => x.id === activeTab);
+        if (t && !tabVisible(t)) setActiveTab(TABS[0].id);
+    });
+
+    // Переход на другую вкладку из самой вкладки (openTab в lib/shared)
+    useEffect(() => {
+        const h = (e: Event) => {
+            const id = (e as CustomEvent<string>).detail;
+            if (TABS.some(t => t.id === id)) setActiveTab(id);
+        };
+        window.addEventListener('awg:open-tab', h);
+        return () => window.removeEventListener('awg:open-tab', h);
+    }, []);
 
     // Закрывать drawer по Escape
     useEffect(() => {
@@ -223,31 +288,25 @@ export default function App() {
     const chrome = tab.chrome ?? {};
     const showServerBar = chrome.serverBar !== false;
     const showRestart   = chrome.restart   !== false;
+    const current = nodes.find(n => n.id === serverId) ?? null;
+    // Позиция вкладки в меню (по группам) — направление прокрутки заголовка-барабана
+    const tabOrder = navGroups.flatMap(g => g.tabs).findIndex(t => t.id === tab.id);
+
+    const themeToggle = (
+        <button
+            className="theme-toggle"
+            aria-label={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}
+            onClick={() => setThemeMode(theme === 'dark' ? 'light' : 'dark')}
+        >
+            {theme === 'dark' ? <IcoSun /> : <IcoMoon />}
+        </button>
+    );
 
     return (
         <div className="app">
-            <button
-                className="theme-toggle"
-                aria-label={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}
-                onClick={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))}
-            >
-                {theme === 'dark' ? <IcoSun /> : <IcoMoon />}
-            </button>
-
-            {token && showRestart && serverId !== null && (
-                <button
-                    className={`awg-restart${restarting ? ' spinning' : ''}`}
-                    aria-label="Перезапустить AWG"
-                    title="Перезапустить AWG-интерфейс"
-                    onClick={restartAwg}
-                    disabled={restarting}
-                >
-                    <IcoRefresh /> {restarting ? 'Перезапуск…' : 'Перезапустить AWG'}
-                </button>
-            )}
-
             {!token ? (
                 <div className="login-screen">
+                    <span className="theme-toggle--fixed">{themeToggle}</span>
                     <div className="login-card">
                         <span className="logo-name">{brand.brand}</span>
                         <p className="login-sub">Войдите, чтобы продолжить</p>
@@ -285,7 +344,8 @@ export default function App() {
                         >
                             <IcoMenu />
                         </button>
-                        <span className="top-bar-title">{tab.label}</span>
+                        <span className="top-bar-title"><DrumTitle text={tab.label} order={tabOrder} /></span>
+                        <span className="top-bar-end">{themeToggle}</span>
                     </header>
 
                     {/* Затемнение под drawer */}
@@ -301,6 +361,15 @@ export default function App() {
                             onTouchMove={handleTouchMove}
                             onTouchEnd={handleTouchEnd}
                         >
+                            {/* Кнопка меню rail (600–1199px): раскрывает его в модальный drawer */}
+                            <button
+                                className="rail-menu"
+                                aria-label={drawerOpen ? 'Свернуть меню' : 'Развернуть меню'}
+                                aria-expanded={drawerOpen}
+                                onClick={() => setDrawerOpen(o => !o)}
+                            >
+                                <IcoMenu />
+                            </button>
                             <div className="sidebar-logo">
                                 <span className="logo-name">{brand.brand}</span>
                                 <span className="sidebar-version">
@@ -308,48 +377,105 @@ export default function App() {
                                 </span>
                             </div>
                             <hr className="drawer-divider" />
-                            {TABS_BY_GROUP.map(g => (
+                            {navGroups.map(g => (
                                 <nav key={g.id} className="nav-group" aria-label={g.label}>
                                     <span className="nav-group-title">{g.label}</span>
                                     {g.tabs.map(t => (
-                                        <div
+                                        <button
                                             key={t.id}
-                                            className={`nav-item${t.id === activeTab ? ' nav-item--active' : ''}`}
+                                            type="button"
+                                            className={`nav-item${t.id === activeTab ? ' nav-item--active' : ''}${tabLeaving(t) ? ' nav-item--leave' : t.requires === 'prometheus' && prom?.fresh ? ' nav-item--enter' : ''}`}
+                                            aria-current={t.id === activeTab ? 'page' : undefined}
+                                            aria-hidden={tabLeaving(t) || undefined}
+                                            tabIndex={tabLeaving(t) ? -1 : undefined}
                                             onClick={() => { setActiveTab(t.id); setDrawerOpen(false); }}
                                         >
-                                            <t.Icon /> {t.label}
-                                        </div>
+                                            <span className="nav-icon"><t.Icon /></span>
+                                            <span className="nav-label">{t.label}</span>
+                                        </button>
                                     ))}
                                 </nav>
                             ))}
 
                             <div className="sidebar-spacer" />
 
-                            <button className="btn btn--danger" onClick={logout}>
-                                <IcoLogout /> Выйти
+                            <button className="btn btn--danger sidebar-logout" aria-label="Выйти" onClick={logout}>
+                                <IcoLogout /> <span className="nav-label">Выйти</span>
                             </button>
                         </aside>
 
                         <main className="main">
-                            <h2 className="page-title">{tab.label}</h2>
-                            {/* Общий хром над вкладкой — App владеет им сам, вкладки про него не знают */}
-                            {showServerBar && (
-                                <ServerBar
-                                    nodes={nodes}
-                                    serverId={serverId}
-                                    hubEnabled={hubEnabled}
-                                    panelVersion={panelVersion}
-                                    onSelect={pickServer}
-                                    onAdd={() => setModal({})}
-                                    onJoin={n => setModal({ node: n })}
-                                    onDelete={deleteNode}
-                                    // Сначала выбираем сервер: запросы модалки идут с X-Server-Id выбранного
-                                    onSettings={n => { pickServer(n.id); setSettingsFor(n); }}
-                                    onRestartAwg={restartAwg}
-                                    restarting={restarting}
-                                    showRestart={showRestart}
-                                />
-                            )}
+                            {/* Шапка страницы: заголовок слева; справа — выбор сервера, перезапуск AWG и тема.
+                                На телефоне заголовок и тема — в верхнем баре, выбор сервера — во всю ширину. */}
+                            <div className="page-head">
+                                <h2 className="page-title"><DrumTitle text={tab.label} order={tabOrder} /></h2>
+                                <div className="page-actions">
+                                    {/* Общий хром над вкладкой — App владеет им сам, вкладки про него не знают.
+                                        Текущий сервер — кнопкой, остальные — выпадающим списком под ней. */}
+                                    {showServerBar && (
+                                        <div className="server-select" ref={serverSelectRef}>
+                                            <button
+                                                type="button"
+                                                className={`server-current${serversOpen ? ' server-current--open' : ''}`}
+                                                aria-expanded={serversOpen}
+                                                aria-controls="server-menu"
+                                                onClick={() => setServersOpen(o => !o)}
+                                            >
+                                                <span
+                                                    className={`status-dot${current?.online ? ' status-dot--online' : ''}`}
+                                                    role="img"
+                                                    aria-label={current?.online ? 'на связи' : 'нет связи'}
+                                                />
+                                                <span className="server-current-info">
+                                                    <span className="server-card-name">
+                                                        {current ? (current.health?.server || current.name) : 'Сервер не выбран'}
+                                                    </span>
+                                                    <span className="server-card-ip">
+                                                        {!current ? 'добавьте ноду'
+                                                            : current.pending ? 'ждёт подключения'
+                                                            : current.outdated ? `нужно обновить до ${MIN_NODE_VERSION}`
+                                                            : !current.online ? 'нет связи'
+                                                            : current.health?.ip}
+                                                    </span>
+                                                </span>
+                                                <span className="server-current-count">{serversLabel(nodes.length)}</span>
+                                                <span className="server-current-caret"><IcoChevronDown /></span>
+                                            </button>
+                                            {serversOpen && (
+                                                <div className="server-menu" id="server-menu" aria-label="Серверы">
+                                                    <ServerBar
+                                                        nodes={nodes}
+                                                        serverId={serverId}
+                                                        hubEnabled={hubEnabled}
+                                                        panelVersion={panelVersion}
+                                                        onSelect={id => { pickServer(id); setServersOpen(false); }}
+                                                        onAdd={() => { setServersOpen(false); setModal({}); }}
+                                                        onJoin={n => { setServersOpen(false); setModal({ node: n }); }}
+                                                        onDelete={deleteNode}
+                                                        // Сначала выбираем сервер: запросы модалки идут с X-Server-Id выбранного
+                                                        onSettings={n => { setServersOpen(false); pickServer(n.id); openTab('settings', 'server'); }}
+                                                        onRestartAwg={restartAwg}
+                                                        restarting={restarting}
+                                                        showRestart={showRestart}
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                    {showRestart && serverId !== null && (
+                                        <button
+                                            className={`awg-restart${restarting ? ' spinning' : ''}`}
+                                            aria-label="Перезапустить AWG"
+                                            title="Перезапустить AWG-интерфейс"
+                                            onClick={restartAwg}
+                                            disabled={restarting}
+                                        >
+                                            <IcoRefresh /> {restarting ? 'Перезапуск…' : 'Перезапустить AWG'}
+                                        </button>
+                                    )}
+                                    <span className="page-theme">{themeToggle}</span>
+                                </div>
+                            </div>
                             {serverId === null && showServerBar ? (
                                 <p className="login-sub">
                                     Серверов пока нет. Добавьте ноду: она сама подключится к этой панели.
@@ -369,15 +495,6 @@ export default function App() {
                     node={modal.node}
                     onClose={() => setModal(null)}
                     onChanged={() => { loadNodes(token).catch(() => { /* следующий тик */ }); }}
-                    showMsg={showMsg}
-                />
-            )}
-
-            {settingsFor && (
-                <ServerSettingsModal
-                    token={token}
-                    node={settingsFor}
-                    onClose={() => setSettingsFor(null)}
                     showMsg={showMsg}
                 />
             )}

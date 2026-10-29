@@ -1,0 +1,10 @@
+{
+  "id": "settings",
+  "label": "Настройки",
+  "icon": "settings",
+  "group": "server",
+  "order": 9,
+  "chrome": {
+    "restart": false
+  }
+}

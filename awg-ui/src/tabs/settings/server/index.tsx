@@ -3,17 +3,13 @@
 // LICENSE file in the root directory of this source tree.
 import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { apiFetch, type NodeInfo, type ShapingStatus, type TorrentStatus } from '../lib/shared';
+import { apiFetch, type PageProps, type ShapingStatus, type TorrentStatus } from '../../../lib/shared';
+import './server.css';
 
-// Настройки сервера: деление канала между устройствами (CAKE) и блокировка BitTorrent. Сами
-// настройки живут в awg-ctrl этого сервера — запрос идёт обычным прокси с X-Server-Id (App выбирает сервер
-// до открытия модалки), так что ядро и ноды настраиваются одинаково.
-export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
-    token:   string;
-    node:    NodeInfo;
-    onClose: () => void;
-    showMsg: (text: string) => void;
-}) {
+// Раздел «Сервер» вкладки «Настройки»: деление канала между устройствами (CAKE) и блокировка BitTorrent
+// для сервера из шапки (при его смене вкладка перемонтируется). Сами настройки живут в awg-ctrl этого
+// сервера — запрос идёт обычным прокси с X-Server-Id, так что ядро и ноды настраиваются одинаково.
+export default function ServerSettings({ token, showMsg }: PageProps) {
     const [st, setSt]           = useState<ShapingStatus | null>(null);
     const [enabled, setEnabled] = useState(false);
     const [auto, setAuto]       = useState(true);
@@ -63,12 +59,6 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
         return () => { alive = false; };
     }, [token]);
 
-    useEffect(() => {
-        const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-        document.addEventListener('keydown', h);
-        return () => document.removeEventListener('keydown', h);
-    }, [onClose]);
-
     const downN = Number(down), upN = Number(up);
     const valid = !enabled || (Number.isInteger(downN) && downN >= 1 && Number.isInteger(upN) && upN >= 1);
 
@@ -99,18 +89,17 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
     };
 
     return (
-        <div className="node-scrim" onClick={onClose}>
-            <div className="node-modal" role="dialog" aria-modal="true" aria-label="Настройки сервера" onClick={e => e.stopPropagation()}>
-                <h3 className="node-modal-title">Настройки сервера: {node.name}</h3>
-                <h4 className="ss-section">Деление канала</h4>
+        <>
+            <section className="st-section ss-card">
+                <h3 className="ss-section">Деление канала</h3>
 
                 {unsupported ? (
-                    <p className="node-modal-hint">
+                    <p className="st-hint">
                         Этот сервер не поддерживает деление канала: обновите его (install.sh → «Обновить»).
                     </p>
                 ) : (
                     <>
-                        <p className="node-modal-hint">
+                        <p className="st-hint">
                             Канал делится поровну между устройствами, но не простаивает: кто берёт мало, получает всё
                             нужное, остальное достаётся тем, кто качает много. Звонки и игры не ждут за чужими закачками.
                         </p>
@@ -134,7 +123,7 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                                     value={up} disabled={!st || busy} onChange={e => setUp(e.target.value)} />
                             </label>
                         </div>
-                        <p className="node-modal-hint">
+                        <p className="st-hint">
                             Укажите около 90–95% реального канала сервера. Если задать больше, очередь копится у провайдера
                             и деление перестаёт работать.
                         </p>
@@ -142,7 +131,7 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                         <label className="ss-setting">
                             <span className="ss-setting-text">
                                 <span className="ss-setting-name">Снижать приоритет тяжёлых</span>
-                                <span className="node-modal-hint">
+                                <span className="st-hint">
                                     Когда канал занят, устройства, которые долго качают заметно больше своей доли, временно
                                     уходят в фоновый класс. Работает на загрузку; свободный канал они по-прежнему занимают.
                                 </span>
@@ -167,10 +156,12 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                     </>
                 )}
 
-                <hr className="ss-divider" />
-                <h4 className="ss-section">Торренты</h4>
+            </section>
+
+            <section className="st-section ss-card">
+                <h3 className="ss-section">Торренты</h3>
                 {tUnsupported ? (
-                    <p className="node-modal-hint">
+                    <p className="st-hint">
                         Этот сервер не умеет блокировать торренты: обновите его (install.sh → «Обновить»).
                     </p>
                 ) : (
@@ -178,12 +169,12 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                         <label className="ss-setting">
                             <span className="ss-setting-text">
                                 <span className="ss-setting-name">Блокировать BitTorrent</span>
-                                <span className="node-modal-hint">
+                                <span className="st-hint">
                                     Режет поиск пиров (DHT), трекеры и начало торрент-соединений — как блокировка в 3x-ui.
                                     Клиент с шифрованием и HTTPS-трекерами может частично её обойти, но без DHT и открытых
                                     трекеров большинство торрентов не стартуют. Остальной трафик не режется.
                                 </span>
-                                <span className="node-modal-hint">
+                                <span className="st-hint">
                                     {enabled
                                         ? 'Кто пытается качать, на 10 минут после последней попытки уходит в фоновый приоритет: уступает остальным, когда канал занят.'
                                         : 'Включите деление канала — тогда кто пытается качать, на 10 минут уйдёт ещё и в фоновый приоритет.'}
@@ -199,14 +190,14 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                                 </span>
                                 <span className="ss-mono">заблокировано попыток: {tst.hits.toLocaleString('ru-RU')}</span>
                                 {tst.active && !tst.tcp && (
-                                    <span className="node-modal-hint">
+                                    <span className="st-hint">
                                         TCP не проверяется: на сервере старый nftables. DHT, трекеры и uTP блокируются.
                                     </span>
                                 )}
-                                {tst.error && <span className="node-modal-hint">{tst.error}</span>}
+                                {tst.error && <span className="st-hint">{tst.error}</span>}
                                 {tst.seen.length > 0 && (
                                     <>
-                                        <span className="node-modal-hint">Пытались качать за последние 10 минут:</span>
+                                        <span className="st-hint">Пытались качать за последние 10 минут:</span>
                                         <span className="ss-seen">
                                             {tst.seen.map(p => (
                                                 <span key={p.ip} className="chip chip--error">
@@ -221,17 +212,17 @@ export default function ServerSettingsModal({ token, node, onClose, showMsg }: {
                     </>
                 )}
 
-                {error && <p className="login-error">{error}</p>}
+            </section>
 
-                <div className="node-modal-actions">
-                    {!(unsupported && tUnsupported) && (
-                        <button className="btn btn--primary" onClick={save} disabled={busy || !valid || !(shapingDirty || torrentDirty)}>
-                            Сохранить
-                        </button>
-                    )}
-                    <button className="btn btn--outline" onClick={onClose}>Закрыть</button>
+            {error && <p className="login-error">{error}</p>}
+
+            {!(unsupported && tUnsupported) && (
+                <div className="ss-actions">
+                    <button className="btn btn--primary" onClick={save} disabled={busy || !valid || !(shapingDirty || torrentDirty)}>
+                        Сохранить
+                    </button>
                 </div>
-            </div>
-        </div>
+            )}
+        </>
     );
 }

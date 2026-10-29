@@ -1,0 +1,11 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Раздел «Сервер» вкладки «Настройки»: бывший диалог «Настройки сервера», строки .ss-* — из App.css */
+.ss-card { gap: 12px; padding: 16px; }
+.ss-card .ss-section { margin: 0; }
+.ss-card .ss-status { background: var(--surface-container-lowest); }
+.ss-actions { display: flex; justify-content: flex-end; }
+.ss-card .ss-grid { max-width: 480px; }

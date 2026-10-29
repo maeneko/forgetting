@@ -4,6 +4,7 @@
   "icon": "pulse",
   "group": "server",
   "order": 1.7,
+  "requires": "prometheus",
   "chrome": {
     "serverBar": false,
     "restart": false

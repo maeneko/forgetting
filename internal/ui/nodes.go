@@ -159,8 +159,11 @@ func newNodes(a *App) (*Nodes, error) {
 		keyF, crtF := file("NODE_TLS_KEY_FILE", "node_tls.key"), file("NODE_TLS_CERT_FILE", "node_tls.crt")
 		if err := func() error {
 			if !exists(keyF) && !exists(crtF) {
+				// CN случайный (12 hex, как имя хоста контейнера): постоянный CN — готовый отпечаток для DPI.
+				cn := make([]byte, 6)
+				rand.Read(cn)
 				cmd := exec.Command("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN=awg-node")
+					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", fmt.Sprintf("/CN=%x", cn))
 				if err := cmd.Run(); err != nil {
 					return err
 				}
@@ -473,6 +476,30 @@ func (n *Nodes) dropConn(id int64, c *nodeConn) {
 	n.mu.Unlock()
 }
 
+// MinNodeVersion — самая старая версия ноды, с которой работает панель (в UI — MIN_NODE_VERSION).
+const MinNodeVersion = "0.5.0"
+
+// closeOutdated — код закрытия для ноды старше MinNodeVersion.
+const closeOutdated = 4026
+
+// cmpVersion сравнивает версии вида 0.5.0 (хвост после «-» не учитывается): <0 — a старше b.
+func cmpVersion(a, b string) int {
+	pa, pb := strings.Split(strings.SplitN(a, "-", 2)[0], "."), strings.Split(strings.SplitN(b, "-", 2)[0], ".")
+	for i := 0; i < max(len(pa), len(pb)); i++ {
+		var x, y int
+		if i < len(pa) {
+			x, _ = strconv.Atoi(pa[i])
+		}
+		if i < len(pb) {
+			y, _ = strconv.Atoi(pb[i])
+		}
+		if x != y {
+			return x - y
+		}
+	}
+	return 0
+}
+
 func closeWS(ws *websocket.Conn, code int, reason string) {
 	go ws.Close(websocket.StatusCode(code), reason)
 }
@@ -540,6 +567,13 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			version = v
 		}
 		n.a.db.Exec("UPDATE nodes SET last_seen = ?, version = ? WHERE id = ?", now(), version, row.ID)
+		// Нода старше MinNodeVersion (или без версии — агент старше 0.3.4) с этой панелью не работает:
+		// соединение не принимаем, для панели она «нет связи», пока её не обновят (агент переподключится сам).
+		if v, _ := version.(string); v == "" || cmpVersion(v, MinNodeVersion) < 0 {
+			logf("nodes: «%s» (#%d) — версия %q, нужна не ниже %s: соединение отклонено", row.Name, row.ID, v, MinNodeVersion)
+			closeWS(ws, closeOutdated, "outdated "+MinNodeVersion)
+			return
+		}
 
 		conn = &nodeConn{ws: ws, alive: true, pending: map[int64]*pending{}}
 		nodeID = row.ID
@@ -775,7 +809,8 @@ func (n *Nodes) List() []serverInfo {
 	}
 	for _, r := range n.all() {
 		out = append(out, serverInfo{ID: int(r.ID), Name: r.Name, Online: online[r.ID], Pending: !r.Pub.Valid,
-			LastSeen: nullInt(r.LastSeen), Version: nullStr(r.Version), Health: hs[r.ID]})
+			LastSeen: nullInt(r.LastSeen), Version: nullStr(r.Version), Health: hs[r.ID],
+			Outdated: r.Pub.Valid && (!r.Version.Valid || cmpVersion(r.Version.String, MinNodeVersion) < 0)})
 	}
 	return out
 }
@@ -789,11 +824,12 @@ type serverInfo struct {
 	LastSeen any
 	Version  any
 	Health   *health
+	Outdated bool // старше MinNodeVersion: хаб её не подключает, пока не обновят
 }
 
 func (s serverInfo) json() jsjson.Object {
 	return jsjson.Object{{Key: "id", Val: s.ID}, {Key: "name", Val: s.Name}, {Key: "local", Val: s.Local}, {Key: "online", Val: s.Online},
-		{Key: "pending", Val: s.Pending}, {Key: "last_seen", Val: s.LastSeen}, {Key: "version", Val: s.Version}, {Key: "health", Val: s.Health.json()}}
+		{Key: "pending", Val: s.Pending}, {Key: "last_seen", Val: s.LastSeen}, {Key: "version", Val: s.Version}, {Key: "health", Val: s.Health.json()}, {Key: "outdated", Val: s.Outdated}}
 }
 
 func (n *Nodes) idOf(c *Ctx) (int64, bool) {

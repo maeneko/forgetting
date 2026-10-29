@@ -56,6 +56,19 @@ export interface Brand { brand: string; channel: string; version: string }
 export const TOKEN_KEY  = 'awg_token';
 export const THEME_KEY  = 'awg_theme';
 export const SERVER_KEY = 'awg_server';
+export const SETTINGS_SECTION_KEY = 'awg_settings_section';   // открытый раздел «Настроек»
+
+// Встроенный Prometheus установлен или удалён: вкладка «Монитор» в меню есть только при нём.
+// Кто узнал состояние (раздел установки, сам «Монитор») — сообщает App, тот прячет или показывает пункт.
+export const announcePrometheus = (ready: boolean) =>
+    window.dispatchEvent(new CustomEvent('awg:prometheus', { detail: ready }));
+
+// Открыть другую вкладку панели (App слушает событие). section — раздел «Настроек»: его вкладка
+// читает из SETTINGS_SECTION_KEY при монтировании, поэтому пишем до перехода.
+export function openTab(id: string, section?: string) {
+    if (section) try { localStorage.setItem(SETTINGS_SECTION_KEY, section); } catch { /* не критично */ }
+    window.dispatchEvent(new CustomEvent('awg:open-tab', { detail: id }));
+}
 
 // Сервер (core или нода) в списке ServerBar: то, что отдаёт GET /ui/nodes.
 export interface NodeInfo {
@@ -66,6 +79,7 @@ export interface NodeInfo {
     pending:   boolean;        // нода создана, но ещё ни разу не подключалась
     last_seen: number | null;
     version:   string | null;  // версия Forgetting на сервере; null — нода ещё не подключалась или агент старше 0.3.4
+    outdated?: boolean;        // старше MIN_NODE_VERSION: панель её не подключает, пока не обновят
     health:    { server: string; ip: string; gen: AwgGen; peers: number; awg_up: boolean; module: string; tools: string } | null;
 }
 
@@ -89,6 +103,18 @@ export interface TorrentStatus {
     seen:     { ip: string; name: string }[];   // кто пытался за последние 10 минут
     error?:   string;
 }
+
+// «1 сервер», «3 сервера», «5 серверов»
+export function serversLabel(n: number): string {
+    const m10 = n % 10, m100 = n % 100;
+    const word = m10 === 1 && m100 !== 11 ? 'сервер'
+        : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? 'сервера' : 'серверов';
+    return `${n} ${word}`;
+}
+
+// Минимальная версия Forgetting на ноде (в хабе — MinNodeVersion, internal/ui/nodes.go): старше — хаб
+// ноду не подключает, чип версии красный; между ней и версией панели — жёлтый (просто стоит обновить).
+export const MIN_NODE_VERSION = '0.5.0';
 
 // Сравнение версий вида 0.3.3 (хвост после «-» не учитывается): <0 — a старше b.
 export function cmpVersion(a: string, b: string): number {

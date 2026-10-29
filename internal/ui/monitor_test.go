@@ -91,7 +91,7 @@ func TestPrometheusOnNodeZero(t *testing.T) {
 	ag, err := agent.New(agent.Config{
 		CoreHost: "127.0.0.1", CorePort: hubPort, CorePin: b64url.EncodeToString(a.nodes.pin), NodeID: 0,
 		Ctrl: ctrl.URL, NodeKeyFile: keyFile, InternalKey: filepath.Join(dir, "none"),
-		PromURL: prom.URL, MetricsPort: metricsPort, MonitorHash: hashFile,
+		PromURL: prom.URL, MetricsPort: metricsPort, MonitorHash: hashFile, Version: MinNodeVersion,
 		Logf: t.Logf, Errorf: t.Logf,
 	})
 	if err != nil {

@@ -2,15 +2,15 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback } from 'react';
-import { apiFetch, copyText, timeAgo, getServerId, type ApiKey, type NodeInfo, type PageProps } from '../../lib/shared';
-import { IcoPlus, IcoTrash, IcoCopy, IcoSettings } from '../../components/icons';
-import ServerPicker, { serverName } from '../../components/ServerPicker';
+import { apiFetch, copyText, timeAgo, getServerId, type ApiKey, type NodeInfo, type PageProps } from '../../../lib/shared';
+import { IcoPlus, IcoTrash, IcoCopy, IcoSettings } from '../../../components/icons';
+import ServerPicker, { serverName } from '../../../components/ServerPicker';
 import './apikeys.css';
 
 // Вкладка «API-ключи»: ключи внешнего API (/api/v1). Открытый ключ показывается
-// один раз при создании (в БД хранится только хэш). Сервер-бар сверху рендерит App.
+// один раз при создании (в БД хранится только хэш). Раздел вкладки «Настройки».
 // Ключ видит набор серверов: на них он заводит vpn://-пользователей и в их пределах
-// управляет мастер-ключами. Создаётся на выбранном в сервер-баре сервере, набор
+// управляет мастер-ключами. По умолчанию новый ключ видит выбранный в панели сервер, набор
 // правится в настройках ключа.
 export default function ApiKeysPage({ token, showMsg }: PageProps) {
     const [keys, setKeys]       = useState<ApiKey[]>([]);
@@ -18,7 +18,7 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
     const [label, setLabel]     = useState('');
     const [created, setCreated] = useState<{ label: string; key: string } | null>(null);
     const [tools, setTools]     = useState<number | null>(null);   // ключ с открытыми настройками
-    const [picked, setPicked]   = useState<number[] | null>(null);   // серверы нового ключа; null — только выбранный в сервер-баре
+    const [picked, setPicked]   = useState<number[] | null>(null);   // серверы нового ключа; null — только выбранный в панели
 
     const load = useCallback(async () => {
         try {
@@ -77,7 +77,6 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
 
     return (
         <>
-            {/* Сервер-бар сверху рендерит App; новый ключ получает выбранный в нём сервер. */}
             <div className="toolbar">
                 <input
                     className="field"
@@ -194,11 +193,11 @@ export default function ApiKeysPage({ token, showMsg }: PageProps) {
                         </p>
                         <code className="apikey-value">{created.key}</code>
                         <div className="qr-actions">
+                            <button className="btn btn--text" onClick={() => setCreated(null)}>Закрыть</button>
                             <button className="btn btn--primary" onClick={async () => {
                                 await copyText(created.key);
                                 showMsg('Ключ скопирован');
                             }}><IcoCopy /> Скопировать</button>
-                            <button className="btn btn--tonal" onClick={() => setCreated(null)}>Закрыть</button>
                         </div>
                     </div>
                 </div>

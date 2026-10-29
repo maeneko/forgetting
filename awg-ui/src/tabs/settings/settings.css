@@ -1,0 +1,119 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Стили вкладки «Настройки». Общая дизайн-система — в App.css (там же .segmented). */
+
+/* Вкладки разделов (MD3 primary tabs, прокручиваемые): 48px, подпись title-small, прижаты влево;
+   активная — цветом primary и полосой 3px снизу, которая переезжает между вкладками (left/width
+   ставит компонент). Под вкладками — линия outline-variant во всю ширину. */
+.st-tabs {
+    position: relative;
+    display: flex;
+    box-shadow: inset 0 -1px var(--outline-variant);   /* линия — тенью: рамка ушла бы в прокрутку */
+    /* MD3 scrollable tabs: не влезли — прокручиваются вбок, без полосы прокрутки */
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.st-tabs::-webkit-scrollbar { display: none; }
+.st-tab {
+    flex: 0 0 auto;
+    height: 48px;
+    padding: 0 20px;
+    border: none;
+    background: transparent;
+    color: var(--on-surface-variant);
+    font-family: var(--font);
+    font-size: var(--title-small-size); line-height: var(--title-small-line);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color var(--duration-short3) var(--ease-standard);
+}
+.st-tab[aria-selected="true"] { color: var(--primary); }
+.st-tab:focus-visible { outline-offset: -3px; }
+.st-tabs-indicator {
+    position: absolute;
+    bottom: 0;
+    height: 3px;
+    border-radius: 3px 3px 0 0;
+    background: var(--primary);
+    transition: left var(--duration-medium2) var(--ease-standard), width var(--duration-medium2) var(--ease-standard);
+}
+@media (prefers-reduced-motion: reduce) { .st-tabs-indicator { transition: none; } }
+
+/* Содержимое раздела — с тем же шагом, что у страницы. При смене вкладки въезжает на 32px со стороны
+   выбранной (--st-dir: 1 — справа, -1 — слева, 0 — только проявляется), как MD3 shared axis X.
+   Только backwards: после анимации transform не остаётся — иначе fixed-диалоги внутри (QR, ключи)
+   отсчитывались бы от раздела, а не от окна. */
+.st-view {
+    display: flex; flex-direction: column; gap: 20px; min-width: 0;
+    animation: st-view-in var(--duration-medium2) var(--ease-emphasized-decelerate) backwards;
+}
+@keyframes st-view-in {
+    from { opacity: 0; transform: translateX(calc(var(--st-dir, 0) * 32px)); }
+}
+@media (prefers-reduced-motion: reduce) { .st-view { animation: none; } }
+/* въезжающий раздел на миг шире страницы — без горизонтальной прокрутки */
+.main:has(.st-view) { overflow-x: hidden; }
+
+/* Раздел — блок на surface-container; строки внутри разделены линией outline-variant */
+.st-section {
+    display: flex; flex-direction: column;
+    background: var(--surface-container);
+    border-radius: var(--shape-large);
+    padding: 12px 16px;
+}
+.st-lead { margin: 4px 0; }
+.st-row {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    gap: 8px 16px;
+    padding: 12px 0;
+}
+.st-row + .st-row, .st-lead + .st-row { border-top: 1px solid var(--outline-variant); }
+.st-row:first-child { padding-top: 4px; }
+.st-row:last-child { padding-bottom: 4px; }
+.st-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 240px; }
+.st-row-name { font-size: var(--body-large-size); line-height: var(--body-large-line); color: var(--on-surface); }
+.st-row-ctl  { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+.st-hint { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); overflow-wrap: anywhere; }
+.st-code {
+    font-family: var(--mono);
+    font-size: 0.95em;
+    background: var(--surface-container-highest);
+    border-radius: var(--shape-extra-small);
+    padding: 0 4px;
+    overflow-wrap: anywhere;
+}
+
+
+/* О панели: пары «название — значение» */
+.st-facts { display: flex; flex-direction: column; margin: 0; }
+.st-facts > div { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; }
+.st-facts > div + div { border-top: 1px solid var(--outline-variant); }
+.st-facts > div:first-child { padding-top: 4px; }
+.st-facts > div:last-child  { padding-bottom: 4px; }
+.st-facts dt { font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--neutral-text); }
+.st-facts dd { margin: 0; font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface); text-align: right; }
+
+/* Открытый токен (один раз после выпуска) — как ключ API */
+.st-secret {
+    font-family: var(--mono);
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface);
+    background: var(--surface-container-lowest);
+    border-radius: var(--shape-medium);
+    padding: 12px 14px;
+    width: 100%;
+    word-break: break-all;
+    user-select: all;
+}
+
+/* compact: переключатель темы и кнопки — на всю ширину строки */
+@media (max-width: 599px) {
+    .st-row > .segmented { width: 100%; }
+    .st-row > .segmented .segmented-item { flex: 1; padding: 0 8px; }
+    .st-row-ctl { width: 100%; }
+    .st-row-ctl .btn { flex: 1; }
+}

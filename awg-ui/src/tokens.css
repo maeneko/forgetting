@@ -1,0 +1,164 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Токены дизайн-системы Material 3 (design.md, часть I). Компоненты берут значения только
+   отсюда — без литеральных цветов, размеров шрифта, радиусов и длительностей.
+   Цвета — тёплая палитра Forgetting, разложенная по ролям MD3: роли, которых раньше не было
+   (secondary, tertiary, лестница surface-container, inverse), достроены в тех же оттенках. */
+
+:root {
+    /* ── Цвет: роли MD3 ── */
+    --primary:                   #6a45b8;
+    --on-primary:                #ffffff;
+    --primary-container:         #ebddff;
+    --on-primary-container:      #5a2da8;
+    --inverse-primary:           #cbb3ff;
+
+    --secondary:                 #645a73;
+    --on-secondary:              #ffffff;
+    --secondary-container:       #e8dff5;
+    --on-secondary-container:    #4c425a;
+
+    --tertiary:                  #8b5a1f;
+    --on-tertiary:               #ffffff;
+    --tertiary-container:        #ffdcad;
+    --on-tertiary-container:     #7a4a14;
+
+    --error:                     #ba1a1a;
+    --on-error:                  #ffffff;
+    --error-container:           #ffdad6;
+    --on-error-container:        #410002;
+
+    --surface:                   #faf6f0;
+    --surface-dim:               #e2d9cc;
+    --surface-bright:            #fdfaf6;   /* рабочая зона: карточки, поля, диалоги */
+    --surface-container-lowest:  #ffffff;
+    --surface-container-low:     #f5efe6;
+    --surface-container:         #f0e8dd;
+    --surface-container-high:    #ece2d3;
+    --surface-container-highest: #e4dac9;
+    --on-surface:                #3a2e22;
+    --on-surface-variant:        #5a4a3a;
+    --inverse-surface:           #3a2e22;
+    --inverse-on-surface:        #fdfaf6;
+
+    --outline:                   #d8cdbe;
+    --outline-variant:           #ece2d3;
+
+    /* ── Цвет: статусы (custom colors MD3), тёплый подтон ── */
+    --success-bg:   #c0dd97; --success-text: #2c4d0a; --success-dot: #639922;
+    --neutral-bg:   #e4dac9; --neutral-text: #7a6a55; --neutral-dot:  #a99a85;
+    --error-dot:    #ba1a1a;
+    --warn-dot:     #e08a2c;
+
+    /* ── State layers: непрозрачность слоя MD3 (цвет слоя — цвет содержимого, App.css) ── */
+    --state-hover:   .08;
+    --state-focus:   .10;
+    --state-pressed: .10;
+    --state-dragged: .16;
+    /* недоступные элементы: содержимое и контейнер (on-surface 38% / 12%) */
+    --disabled-content:   color-mix(in srgb, var(--on-surface) 38%, transparent);
+    --disabled-container: color-mix(in srgb, var(--on-surface) 12%, transparent);
+    --state-row:     rgba(106, 69, 184, .035);
+
+    --scrim:  rgba(58, 46, 34, .45);
+    --shadow: rgba(58, 46, 34, .15);
+
+    /* ── Типографика: шкала MD3 (размер / интерлиньяж); веса — только 400 и 500.
+       label-small (11px) не заводим: минимальный размер шрифта — 12px (design.md, 6) ── */
+    --font: system-ui, -apple-system, 'Inter', sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+    --weight-regular: 400;
+    --weight-medium:  500;
+
+    --headline-small-size: 24px; --headline-small-line: 32px;
+    --title-large-size:    22px; --title-large-line:    28px;   /* emphasized: вес 500 */
+    --title-medium-size:   16px; --title-medium-line:   24px;
+    --title-small-size:    14px; --title-small-line:    20px;
+    --body-large-size:     16px; --body-large-line:     24px;
+    --body-medium-size:    14px; --body-medium-line:    20px;
+    --body-small-size:     12px; --body-small-line:     16px;
+    --label-large-size:    14px; --label-large-line:    20px;
+    --label-medium-size:   12px; --label-medium-line:   16px;
+
+    /* ── Форма: шкала скруглений MD3 ── */
+    --shape-extra-small: 4px;
+    --shape-small:       8px;
+    --shape-medium:      12px;
+    --shape-large:       16px;
+    --shape-extra-large: 28px;
+    --shape-full:        9999px;
+
+    /* ── Движение: кривые и длительности MD3 ── */
+    --ease-standard:            cubic-bezier(.2, 0, 0, 1);
+    --ease-standard-decelerate: cubic-bezier(0, 0, 0, 1);
+    --ease-standard-accelerate: cubic-bezier(.3, 0, 1, 1);
+    --ease-emphasized-decelerate: cubic-bezier(.05, .7, .1, 1);
+    --ease-emphasized-accelerate: cubic-bezier(.3, 0, .8, .15);
+    --duration-short1:  50ms;
+    --duration-short2:  100ms;
+    --duration-short3:  150ms;
+    --duration-short4:  200ms;
+    --duration-medium1: 250ms;
+    --duration-medium2: 300ms;
+    --duration-medium3: 350ms;
+    --duration-medium4: 400ms;
+
+    /* ── Элевация MD3: уровни 1–3 (тени цвета --shadow) ── */
+    --elevation-1: 0 1px 2px var(--shadow), 0 1px 3px 1px var(--shadow);
+    --elevation-2: 0 1px 2px var(--shadow), 0 2px 6px 2px var(--shadow);
+    --elevation-3: 0 1px 3px var(--shadow), 0 4px 8px 3px var(--shadow);
+}
+
+:root[data-theme="dark"] {
+    --primary:                   #cbb3ff;
+    --on-primary:                #381b6c;
+    --primary-container:         #52389e;
+    --on-primary-container:      #ebddff;
+    --inverse-primary:           #6a45b8;
+
+    --secondary:                 #cec1de;
+    --on-secondary:              #352c43;
+    --secondary-container:       #483a55;
+    --on-secondary-container:    #ebddff;
+
+    --tertiary:                  #f2bd7c;
+    --on-tertiary:               #4a2800;
+    --tertiary-container:        #4a3218;
+    --on-tertiary-container:     #ffdcad;
+
+    --error:                     #ffb4ab;
+    --on-error:                  #690005;
+    --error-container:           #5c1414;
+    --on-error-container:        #ffb4ab;
+
+    /* surface-bright светлее канона MD3 (тон 15 вместо 24): рабочая зона в тёмной теме
+       чуть приподнята над фоном, а не выбелена */
+    --surface:                   #1a1611;
+    --surface-dim:               #1a1611;
+    --surface-bright:            #2b251d;
+    --surface-container-lowest:  #14100b;
+    --surface-container-low:     #201a14;
+    --surface-container:         #251f18;
+    --surface-container-high:    #302820;
+    --surface-container-highest: #3a332a;
+    --on-surface:                #ede2d4;
+    --on-surface-variant:        #b6a994;
+    --inverse-surface:           #ede2d4;
+    --inverse-on-surface:        #2b251d;
+
+    --outline:                   #4d4334;
+    --outline-variant:           #342c20;
+
+    --success-bg:   #2d4413; --success-text: #c8e3a0; --success-dot: #8fc24f;
+    --neutral-bg:   #34291c; --neutral-text: #d0c0a4; --neutral-dot:  #b0a085;
+    --error-dot:    #ff5449;
+    --warn-dot:     #ffb76b;
+
+    --state-row:     rgba(203, 179, 255, .05);
+
+    --scrim:  rgba(0, 0, 0, .55);
+    --shadow: rgba(0, 0, 0, .45);
+}

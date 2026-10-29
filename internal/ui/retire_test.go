@@ -61,7 +61,7 @@ func TestRetireReadiness(t *testing.T) {
 	write := func(o jsjson.Object) { ws.Write(ctx, websocket.MessageText, jsjson.MustMarshal(o)) }
 	nonce := read().Get2("nonce").(string)
 	write(jsjson.Object{{Key: "t", Val: "auth"}, {Key: "node_id", Val: 3},
-		{Key: "sig", Val: b64url.EncodeToString(ed25519.Sign(priv, authMsg(nonce, 3)))}})
+		{Key: "sig", Val: b64url.EncodeToString(ed25519.Sign(priv, authMsg(nonce, 3)))}, {Key: "version", Val: MinNodeVersion}})
 	if got := string(jsjson.MustMarshal(read())); got != `{"t":"ready","core":"198.51.100.20:40500"}` {
 		t.Fatalf("ready: %s", got)
 	}

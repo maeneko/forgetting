@@ -1,27 +1,31 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { type NodeInfo, genLabel, cmpVersion } from '../lib/shared';
+import { type NodeInfo, genLabel, cmpVersion, MIN_NODE_VERSION } from '../lib/shared';
 import { IcoRefresh, IcoPlus, IcoTrash, IcoCopy, IcoSettings } from './icons';
 
 // Сервер-бар: карточки серверов (core-локальный и ноды) + «Добавить сервер» и
 // (на мобильной) перезапуск AWG под ними. Общий для вкладок — показывает
 // серверы, между которыми переключается содержимое вкладки (пиры / абоненты).
-// Версия Forgetting на сервере. Нода, которая отстаёт от панели или не сообщает версию
-// (агент старше 0.3.4), подсвечена: её стоит обновить — install.sh, «Обновить».
+// Версия Forgetting на сервере, три состояния: совпадает с панелью — нейтральный чип; нода отстаёт
+// от панели (но не старше MIN_NODE_VERSION) или новее неё — жёлтый, стоит обновить; старше
+// MIN_NODE_VERSION или не сообщает версию (агент старше 0.3.4) — красный: хаб такую ноду не подключает.
 function versionChip(n: NodeInfo, panel: string | null) {
     if (n.pending) return null;
-    let tip = '', warn = false;
+    let tip = '', level: '' | 'warn' | 'bad' = '';
     if (!n.version) {
-        warn = true;
-        tip = 'Версия неизвестна: нода старше 0.3.4 — обнови её (install.sh → «Обновить»)';
+        level = 'bad';
+        tip = `Версия неизвестна: нода старше 0.3.4, панель с ней не работает — обнови её до ${MIN_NODE_VERSION} (install.sh → «Обновить»)`;
+    } else if (!n.local && cmpVersion(n.version, MIN_NODE_VERSION) < 0) {
+        level = 'bad';
+        tip = `Слишком старая версия: панель с ней не работает, нужна не ниже ${MIN_NODE_VERSION} — обнови ноду (install.sh → «Обновить»)`;
     } else if (panel && !n.local) {
         const d = cmpVersion(n.version, panel);
-        if (d < 0) { warn = true; tip = `Панель на ${panel} — обнови ноду (install.sh → «Обновить»)`; }
-        else if (d > 0) { warn = true; tip = `Нода новее панели (${panel}) — обнови панель`; }
+        if (d < 0) { level = 'warn'; tip = `Устарела: панель на ${panel} — обнови ноду (install.sh → «Обновить»)`; }
+        else if (d > 0) { level = 'warn'; tip = `Нода новее панели (${panel}) — обнови панель`; }
     }
     const chip = (
-        <span className={`chip server-ver-chip${warn ? ' server-ver-chip--warn' : ''}`}>
+        <span className={`chip server-ver-chip${level ? ` server-ver-chip--${level}` : ''}`}>
             {n.version ? `v${n.version}` : 'v?.?.?'}
         </span>
     );
@@ -60,18 +64,17 @@ export default function ServerBar({
                         onClick={() => onSelect(n.id)}
                         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(n.id); } }}
                     >
-                        {/* toggle — виден на мобильном вместо чипа */}
-                        <div className={`server-toggle${n.online ? ' server-toggle--on' : ''}`} aria-hidden="true">
-                            <div className="server-toggle-thumb" />
-                        </div>
-                        {/* чип онлайн/офлайн — виден на десктопе */}
-                        <span className={`chip chip--${n.online ? 'online' : 'offline'} server-online-chip`}>
-                            <span className="chip-dot" />
-                        </span>
+                        <span
+                            className={`status-dot${n.online ? ' status-dot--online' : ''}`}
+                            role="img"
+                            aria-label={n.online ? 'на связи' : 'нет связи'}
+                        />
                         <div className="server-card-info">
                             <span className="server-card-name">{h?.server || n.name}</span>
                             {n.pending ? (
                                 <span className="server-card-ip">ждёт подключения</span>
+                            ) : n.outdated ? (
+                                <span className="server-card-ip server-card-ip--bad">нужно обновить до {MIN_NODE_VERSION}</span>
                             ) : !n.online ? (
                                 <span className="server-card-ip">нет связи</span>
                             ) : h && (

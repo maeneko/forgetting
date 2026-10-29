@@ -8,9 +8,9 @@ LICENSE file in the root directory of this source tree.
 
 .user-cards-list { display: none; flex-direction: column; gap: 12px; }
 
-.users-count { font-size: 12px; color: var(--neutral-text); }
+.users-count { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .empty-cards {
-    font-size: 14px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
     color: var(--neutral-text);
     text-align: center;
     padding: 48px 0;
@@ -18,7 +18,7 @@ LICENSE file in the root directory of this source tree.
 .user-card {
     background: var(--surface-bright);
     border: 1px solid var(--outline-variant);
-    border-radius: var(--r-card);
+    border-radius: var(--shape-extra-large);
     padding: 16px;
     display: flex;
     flex-direction: column;
@@ -36,10 +36,10 @@ LICENSE file in the root directory of this source tree.
     gap: 8px;
     min-width: 0;
 }
-.user-card-num  { font-size: 12px; color: var(--neutral-dot); flex-shrink: 0; }
+.user-card-num  { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-dot); flex-shrink: 0; }
 .user-card-name {
-    font-size: 16px;
-    font-weight: 500;
+    font-size: var(--title-medium-size); line-height: var(--title-medium-line);
+    font-weight: var(--weight-medium);
     color: var(--on-surface);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -52,20 +52,23 @@ LICENSE file in the root directory of this source tree.
     gap: 8px;
     color: var(--neutral-text);
 }
-.user-card-ip-text { font-family: var(--mono); font-size: 13px; }
+.user-card-ip-text { font-family: var(--mono); font-size: var(--body-medium-size); line-height: var(--body-medium-line); }
+/* чипы приоритета и торрентов — рядом с IP, как в карточке устройства мастер-ключа (на телефоне
+   .tip-wrap по умолчанию во всю ширину и уводил чип на отдельную строку) */
+.user-card-ip .tip-wrap { width: auto; }
 
 .user-card-metrics { display: flex; gap: 8px; }
 .metric-block {
     flex: 1;
     background: var(--surface-container);
-    border-radius: var(--r-table);
+    border-radius: var(--shape-large);
     padding: 10px 14px;
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
-.metric-label { font-size: 12px; color: var(--neutral-text); }
-.metric-value  { font-family: var(--mono); font-size: 18px; font-weight: 500; color: var(--on-surface); }
+.metric-label { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.metric-value  { font-family: var(--mono); font-size: var(--title-medium-size); line-height: var(--title-medium-line); font-weight: var(--weight-medium); color: var(--on-surface); }
 
 .user-card-actions { display: flex; gap: 8px; }
 .user-card-actions .btn--outline { flex: 1; }
@@ -73,9 +76,14 @@ LICENSE file in the root directory of this source tree.
 /* Метка устаревшего ключа рядом с именем: ключ выдан на другом поколении AWG. */
 .user-gen { margin-left: 8px; vertical-align: middle; }
 
-/* На мобильной таблица скрывается (.table-card в App.css), карточки показываются. */
-@media (max-width: 640px) {
-    .user-cards-list { display: flex; }
+/* compact и medium (< 840px): таблица скрывается (.table-card в App.css), показываются карточки —
+   в одну колонку на телефоне, сеткой на планшете. */
+@media (max-width: 839px) {
+    .user-cards-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    /* счётчик и «пусто» — на всю строку сетки */
+    :is(.users-count, .empty-cards) { grid-column: 1 / -1; }
+}
+@media (max-width: 599px) {
     /* .tip-wrap на мобильной растягивается на всю ширину — метке это не нужно. */
     .user-gen { width: auto; }
 }

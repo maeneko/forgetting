@@ -85,6 +85,7 @@ export default function AddServerModal({ token, node, onClose, onChanged, showMs
                 {error && <p className="login-error">{error}</p>}
 
                 <div className="node-modal-actions">
+                    <button className="btn btn--text" onClick={onClose}>{result ? 'Готово' : 'Отмена'}</button>
                     {result ? (
                         <button className="btn btn--tonal" onClick={() => copyText(command).then(() => showMsg('Команда скопирована'))}>
                             <IcoCopy /> Скопировать
@@ -94,7 +95,6 @@ export default function AddServerModal({ token, node, onClose, onChanged, showMs
                             Создать
                         </button>
                     )}
-                    <button className="btn btn--outline" onClick={onClose}>{result ? 'Готово' : 'Отмена'}</button>
                 </div>
             </div>
         </div>

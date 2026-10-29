@@ -511,6 +511,9 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 			if code == closeAuthFailed {
 				a.c.Errorf("agent: core отклонил ноду (неверный ключ, просроченная или использованная ссылка)")
 			}
+			if code == 4026 {
+				a.c.Errorf("agent: панель требует обновить ноду (install.sh → «Обновить»): %v", err)
+			}
 			return code == closeAuthFailed
 		}
 		v, err := jsjson.Decode(raw)

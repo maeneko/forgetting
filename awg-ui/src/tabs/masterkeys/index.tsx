@@ -2,9 +2,9 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import QRCode from 'qrcode';
-import { apiFetch, copyText, bytes, timeAgo, getServerId, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
-import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings, IcoGlobe } from '../../components/icons';
+import { apiFetch, copyText, bytes, timeAgo, getServerId, cmpVersion, type NodeInfo, type PageProps, type Priority } from '../../lib/shared';
+import { qrDataUrl } from '../../lib/qr';
+import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings, IcoMore } from '../../components/icons';
 import ServerPicker, { serverName } from '../../components/ServerPicker';
 import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
@@ -23,18 +23,12 @@ interface Device {
     ips?: { server_id: number; ip: string }[];   // IP на каждом сервере ключа (старая панель не отдаёт)
 }
 
-// Устройство ещё не на всех серверах ключа (нода не в сети при регистрации или смене ключа) —
-// панель догонит, когда нода появится.
-const syncLabel = (d: Device): string =>
-    d.servers_ok < d.servers_total ? ` · на ${d.servers_ok} из ${d.servers_total} серверов` : '';
-
-// Платформа и версия клиента: «macOS-0.6.5»; без версии — просто платформа.
-const platformLabel = (d: Device): string =>
-    d.platform ? (d.version ? `${d.platform}-${d.version}` : d.platform) : '—';
-
 const errText = (e: any): string => e?.response?.data?.error ?? 'Ошибка запроса';
 
 // Статус — как у пользователей: «онлайн», иначе сколько прошло с последнего handshake.
+// Приоритет показываем, только когда он не обычный: «обычный» в каждой строке — шум
+const bgOnly = (p?: Priority) => p === 'background' ? p : undefined;
+
 const statusChip = (d: Device) => (
     <span className={`chip chip--${d.online ? 'online' : 'offline'}`}>
         <span className="chip-dot" />
@@ -55,11 +49,18 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const [enabled, setEnabled] = useState(true);
     const [tls, setTls]         = useState(false);
     const [nodes, setNodes]     = useState<NodeInfo[]>([]);   // серверы, которые можно включить в ключ
+    // Маскировка первого пакета (I1) сервера из шапки: false — сервер её не умеет (старый awg-ctrl) или недоступен
+    const [masking, setMasking] = useState<'ready' | 'busy' | false>(false);
     const [label, setLabel]     = useState('');
     const [limit, setLimit]     = useState('3');
     const [devs, setDevs]       = useState<Record<number, Device[]>>({});
     const [folded, setFolded]   = useState<Set<number>>(new Set());   // свёрнутые узлы
     const [tools, setTools]     = useState<number | null>(null);        // узел с открытыми настройками
+    // Меню «⋮» ключа или устройства. position: fixed по кнопке: .table-card прокручивается вбок
+    // и обрезал бы меню у нижних строк. full — в меню ключа и «Скопировать ссылку» (в таблице;
+    // в карточке на телефоне ссылка — отдельной кнопкой).
+    const [menu, setMenu]       = useState<{ kind: 'key' | 'device'; id: number; full: boolean; top: number; right: number; up: boolean } | null>(null);
+    const menuRef = useRef<HTMLDivElement>(null);
     const [limitEdit, setLimitEdit] = useState('');
     const [failed, setFailed] = useState<Set<number>>(new Set());   // ключи, чьи устройства не загрузились
     const [down, setDown]     = useState<Record<number, number[]>>({});   // серверы ключа, не ответившие на статистику
@@ -121,6 +122,21 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     }, [label, limit, nodes, defaults, token, act]);
     const live = useMemo(() => keys.filter(k => !k.deleting), [keys]);
 
+    useEffect(() => {
+        let alive = true;
+        apiFetch('GET', '/api/masking', token).then(() => { if (alive) setMasking('ready'); }).catch(() => {});
+        return () => { alive = false; };
+    }, [token]);
+
+    // Новый случайный I1 на сервере из шапки. Интерфейс не трогается: I1 нужен только клиентам,
+    // sen:// подхватят его со следующим обновлением профиля (≤ 60 с), выданные vpn:// остаются со старым.
+    const regenMasking = async () => {
+        setMasking('busy');
+        try { await apiFetch('POST', '/api/masking', token); showMsg('Маскировка сменена'); }
+        catch (e: any) { showMsg(e?.response?.data?.error ?? 'Не удалось сменить маскировку'); }
+        finally { setMasking('ready'); }
+    };
+
     const serverNames = useCallback((ids: number[]) => ids.map(id => serverName(nodes, id)).join(', '), [nodes]);
 
     const remove = useCallback(async (k: MasterKey) => {
@@ -141,8 +157,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const showQR = useCallback(async (k: MasterKey) => {
         try {
             const { link, tls: t } = await fetchLink(k);
-            const dataUrl = await QRCode.toDataURL(link, { width: 560, margin: 2, errorCorrectionLevel: 'H' });
-            setModal({ label: k.label, link, tls: t, dataUrl });
+            setModal({ label: k.label, link, tls: t, dataUrl: qrDataUrl(link, 'H') });
         } catch (e) { showMsg(errText(e)); }
     }, [fetchLink, showMsg]);
 
@@ -195,12 +210,48 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         </span>
     );
 
+    useEffect(() => {
+        if (!menu) return;
+        menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+        const close = () => setMenu(null);
+        const down = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node)) close(); };
+        const key = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') { close(); document.querySelector<HTMLButtonElement>(`[data-menu-for="${menu.kind}-${menu.id}"]`)?.focus(); return; }
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+            e.preventDefault();
+            const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+            const i = items.indexOf(document.activeElement as HTMLButtonElement);
+            items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus();
+        };
+        document.addEventListener('mousedown', down);
+        document.addEventListener('keydown', key);
+        window.addEventListener('scroll', close, true);
+        window.addEventListener('resize', close);
+        return () => {
+            document.removeEventListener('mousedown', down);
+            document.removeEventListener('keydown', key);
+            window.removeEventListener('scroll', close, true);
+            window.removeEventListener('resize', close);
+        };
+    }, [menu]);
+
+    const openMenu = (kind: 'key' | 'device', id: number, el: HTMLElement, full = false) => {
+        if (menu?.kind === kind && menu.id === id) return setMenu(null);
+        const r = el.getBoundingClientRect();
+        const up = r.bottom + 160 > window.innerHeight;   // у нижнего края — вверх от кнопки
+        setMenu({ kind, id, full, top: up ? r.top - 4 : r.bottom + 4, right: window.innerWidth - r.right, up });
+    };
+    const moreButton = (kind: 'key' | 'device', id: number, label: string, full = false) => (
+        <button className="btn-icon mk-more" aria-label={label} aria-haspopup="menu" aria-expanded={menu?.kind === kind && menu.id === id}
+            data-menu-for={`${kind}-${id}`} onClick={e => openMenu(kind, id, e.currentTarget, full)}><IcoMore /></button>
+    );
+
+    // В таблице — QR и «⋮» (остальное в меню), чтобы колонка действий всегда помещалась.
+    // Подсказки — .tip-wrap, не title: нативная появляется с задержкой и бесполезна на тач-экране.
     const actions = (k: MasterKey) => (
         <div className="actions">
-            <button className="btn-icon" title="QR-код" aria-label="QR-код" onClick={() => showQR(k)}><IcoQR /></button>
-            <button className="btn-icon" title="Скопировать ссылку" aria-label="Скопировать ссылку" onClick={() => copyLink(k)}><IcoCopy /></button>
-            <button className="btn-icon" title="Настройки мастер-ключа" aria-label="Настройки мастер-ключа" aria-expanded={tools === k.id} onClick={() => openTools(k)}><IcoSettings /></button>
-            <button className="btn-icon btn-icon--danger" title="Удалить мастер-ключ" aria-label="Удалить мастер-ключ" onClick={() => remove(k)}><IcoTrash /></button>
+            <span className="tip-wrap tip-wrap--end" data-tip="QR-код"><button className="btn-icon" aria-label="QR-код" onClick={() => showQR(k)}><IcoQR /></button></span>
+            {moreButton('key', k.id, `Ещё: ${k.label}`, true)}
         </div>
     );
 
@@ -275,7 +326,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
 
     // Полоска занятых слотов: числа по краям внутри; цвет по заполнению.
     const meter = (k: MasterKey, n: number) => (
-        <div className={`mk-meter${n >= k.device_limit ? ' mk-meter--full' : n * 3 >= k.device_limit * 2 ? ' mk-meter--warn' : ''}`}
+        <div className={`mk-meter${n >= k.device_limit ? ' mk-meter--full' : ''}`}
             role="progressbar" aria-label="Устройства" aria-valuemin={0}
             aria-valuemax={k.device_limit} aria-valuenow={n}
             title={`Устройств: ${n} из ${k.device_limit}`}>
@@ -288,20 +339,33 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         </div>
     );
 
+    const newPsk = async (d: Device) => {
+        try {
+            const r = await apiFetch('POST', `/ui/devices/${d.id}/psk`, token);
+            showMsg(r.pending ? `PSK обновлён; ещё на ${r.pending} — когда сервер будет на связи` : 'PSK обновлён');
+            await load();
+        } catch (e) { showMsg(errText(e)); }
+    };
+    const revoke = (d: Device) => {
+        if (confirm('Отозвать устройство «' + (d.device_name || d.id) + '»?'))
+            act(() => apiFetch('DELETE', `/ui/devices/${d.id}`, token), 'Устройство отозвано');
+    };
+
     const deviceActions = (d: Device) => (
         <div className="actions">
-            <button className="btn-icon" title="Новый PSK" aria-label="Новый PSK" onClick={async () => {
-                try {
-                    const r = await apiFetch('POST', `/ui/devices/${d.id}/psk`, token);
-                    showMsg(r.pending ? `PSK обновлён; ещё на ${r.pending} — когда сервер будет на связи` : 'PSK обновлён');
-                    await load();
-                } catch (e) { showMsg(errText(e)); }
-            }}><IcoRefresh /></button>
-            <button className="btn-icon btn-icon--danger" title="Отозвать устройство" aria-label="Отозвать устройство" onClick={() => {
-                if (confirm('Отозвать устройство «' + (d.device_name || d.id) + '»?'))
-                    act(() => apiFetch('DELETE', `/ui/devices/${d.id}`, token), 'Устройство отозвано');
-            }}><IcoTrash /></button>
+            <span className="tip-wrap tip-wrap--end" data-tip="Новый PSK"><button className="btn-icon" aria-label="Новый PSK" onClick={() => newPsk(d)}><IcoRefresh /></button></span>
+            <span className="tip-wrap tip-wrap--end" data-tip="Отозвать устройство"><button className="btn-icon btn-icon--danger" aria-label="Отозвать устройство" onClick={() => revoke(d)}><IcoTrash /></button></span>
         </div>
+    );
+
+    // Короткий ID устройства: полностью — в подсказке, по клику копируется
+    const deviceId = (d: Device) => (
+        <span className="tip-wrap tip-wrap--start" data-tip={`ID устройства ${d.device_id} · нажми, чтобы скопировать`}>
+            <button className="copy-id" aria-label={`Скопировать ID устройства ${d.device_id}`}
+                onClick={() => copyText(d.device_id).then(() => showMsg('ID устройства скопирован'), () => showMsg('Не удалось скопировать'))}>
+                {d.device_id.slice(0, 8)}…
+            </button>
+        </span>
     );
 
     // Метка ключа и под ней UUID — коротко, чтобы не раздувать колонку «Имя». Полностью — в подсказке,
@@ -325,72 +389,146 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         return d?.length ? <span className="mk-flag" title="Онлайн и трафик с этих серверов не получены"> · нет связи: {serverNames(d)}</span> : null;
     };
 
-    // Сводка по устройствам ключа в его строке — видна и у свёрнутого ключа.
-    const summary = (list: Device[]) => {
-        if (!list.length) return <><td></td><td></td><td colSpan={2}></td><td></td><td></td></>;
+    // Серверы ключа, куда ещё не добавлено устройство: был не в сети, когда оно подключалось или меняло
+    // ключ; панель добавит его сама, когда сервер появится (reconcile). Без ips (старая панель) — неизвестно.
+    const missingOn = (k: MasterKey, d: Device) => d.ips ? k.servers.filter(s => !d.ips!.some(x => x.server_id === s)) : [];
+    // «из 3 серверов», «из 21 сервера»
+    const ofServers = (n: number) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? 'сервера' : 'серверов'}`;
+    const syncFlag = (k: MasterKey, d: Device) => {
+        const miss = missingOn(k, d);
+        if (miss.length) return `${k.servers.length - miss.length} из ${ofServers(k.servers.length)}`;
+        return d.servers_ok < d.servers_total ? `${d.servers_ok} из ${ofServers(d.servers_total)}` : '';
+    };
+    const syncTip = (k: MasterKey, d: Device) => {
+        const miss = missingOn(k, d);
+        return miss.length ? `Нет на ${miss.map(s => serverName(nodes, s)).join(', ')} — добавится само, когда сервер будет на связи`
+            : 'Не на всех серверах ключа — добавится само, когда они будут на связи';
+    };
+
+    // Серверы ключа — в его строке под колонками IP и «Платформа»: «все серверы» (у ключа с одним
+    // сервером — его имя) светло-зелёным или «2 из 3 серверов» тёплым, если на каком-то ещё нет всех
+    // устройств ключа.
+    // Имена — в подсказке.
+    const keyServers = (k: MasterKey, list: Device[]) => {
+        const behind = (s: number) => list.some(d => missingOn(k, d).includes(s));
+        const late = k.servers.filter(behind);
+        const ready = k.servers.filter(s => !behind(s));
+        const names = (ids: number[]) => ids.map(s => serverName(nodes, s)).join(', ');
+        const text = late.length ? `${ready.length} из ${ofServers(k.servers.length)}`
+            : k.servers.length === 1 ? serverName(nodes, k.servers[0]) : 'все серверы';
+        const tip = late.length ? `Есть: ${names(ready) || 'нигде'}. Нет: ${names(late)} — добавятся сами, когда сервер будет на связи`
+            : k.servers.length > 1 ? names(k.servers) : null;
+        const chip = <span className={`chip ${late.length ? 'chip--warm' : 'chip--online'} mk-srv`}>{text}</span>;   // всё на месте — светло-зелёный
+        return tip ? <span className="tip-wrap tip-wrap--end" data-tip={tip}>{chip}</span> : chip;
+    };
+
+    // Статус ключа по его устройствам: онлайн / когда были / «нет устройств», плюс фоновый приоритет и торренты
+    const keyStatus = (list: Device[], empty: boolean) => {
+        if (!list.length) return empty ? <span className="mk-flag">нет устройств</span> : null;
         const on = list.filter(d => d.online).length;
         const last = Math.max(...list.map(d => d.lastHandshake || 0));
         const torrent = list.some(d => d.torrent);
-        const prio = list.some(d => d.priority === 'background') ? 'background' : list.find(d => d.priority)?.priority;
+        const prio = bgOnly(list.some(d => d.priority === 'background') ? 'background' : undefined);
         return (
             <>
-                <td>
-                    <span className={`chip chip--${on ? 'online' : 'offline'}`}>
-                        <span className="chip-dot" />
-                        {on ? `онлайн: ${on} из ${list.length}` : last ? timeAgo(last) + ' назад' : 'никогда'}
-                    </span>
-                </td>
-                <td><span className="user-chips"><PriorityChip priority={prio} torrent={torrent} /><TorrentChip torrent={torrent} /></span></td>
-                <td colSpan={2}></td>
+                <span className={`chip chip--${on ? 'online' : 'offline'}`}>
+                    <span className="chip-dot" />
+                    {on ? `онлайн: ${on} из ${list.length}` : last ? timeAgo(last) + ' назад' : 'никогда'}
+                </span>
+                <PriorityChip priority={prio} torrent={torrent} /><TorrentChip torrent={torrent} />
+            </>
+        );
+    };
+
+    // Сводка по устройствам ключа в его строке — видна и у свёрнутого ключа.
+    const summary = (k: MasterKey, list: Device[], empty: boolean) => {
+        if (!list.length) return <><td>{keyStatus(list, empty)}</td><td colSpan={2}>{keyServers(k, list)}</td><td></td><td></td></>;
+        return (
+            <>
+                <td><span className="user-chips">{keyStatus(list, empty)}</span></td>
+                <td colSpan={2}>{keyServers(k, list)}</td>
                 <td>{bytes(list.reduce((a, d) => a + d.rx, 0))}</td>
                 <td>{bytes(list.reduce((a, d) => a + d.tx, 0))}</td>
             </>
         );
     };
 
-    // Адрес с другого сервера подписан его именем; подсказка со всеми адресами — когда их больше одного.
+    // Один адрес — выбранного в шапке сервера, остальные — «+N» и подсказка со всеми. Адрес с другого
+    // сервера подписан его именем строкой ниже, иначе его примут за адрес выбранного.
     const ipCell = (d: Device) => {
         const all = d.ips ?? [];
         const { ip, serverId, other } = ipPick(d);
-        const text = <code className="mk-ip">{ip}{other && serverId !== undefined ? ` · ${serverName(nodes, serverId)}` : ''}</code>;
+        const body = (
+            <span className="name-stack">
+                <span className="mk-ip-line">
+                    <code className="mk-ip">{ip}</code>
+                    {all.length > 1 && <span className="mk-ip-more">+{all.length - 1}</span>}
+                </span>
+                {other && serverId !== undefined && <span className="mk-sub">{serverName(nodes, serverId)}</span>}
+            </span>
+        );
         return all.length > 1
-            ? <span className="tip-wrap" data-tip={all.map(x => `${serverName(nodes, x.server_id)}: ${x.ip}`).join(' · ')}>{text}</span>
-            : text;
+            ? <span className="tip-wrap" data-tip={all.map(x => `${serverName(nodes, x.server_id)}: ${x.ip}`).join(' · ')}>{body}</span>
+            : body;
     };
 
-    const caret = (k: MasterKey) => (
+    // Самая новая версия SenAWG среди устройств панели: кто отстал — тёплой плашкой, как ноды в меню серверов
+    const newest = useMemo(() => Object.values(devs).flat().map(d => d.version).filter(Boolean)
+        .reduce<string | null>((a, v) => !a || cmpVersion(v, a) > 0 ? v : a, null), [devs]);
+    const versionTag = (d: Device, tip: 'start' | 'end') => {
+        if (!d.version) return null;
+        const old = !!newest && cmpVersion(d.version, newest) < 0;
+        return old
+            ? <span className={`tip-wrap tip-wrap--${tip}`} data-tip={`Есть новее: ${newest} — обнови SenAWG на устройстве`}><span className="chip chip--warm mk-ver">{d.version}</span></span>
+            : <span className="mk-sub">{d.version}</span>;
+    };
+    const platformCell = (d: Device) => (
+        <span className="name-stack">
+            {d.platform || '—'}
+            {versionTag(d, 'end')}
+        </span>
+    );
+
+    // Раскрывать нечего — вместо стрелки пустое место той же ширины, имена остаются в одну линию
+    const caret = (k: MasterKey, n: number) => n === 0 ? <span className="mk-caret-gap" aria-hidden="true" /> : (
         <button className={`mk-caret${folded.has(k.id) ? ' mk-caret--folded' : ''}`}
             aria-label={folded.has(k.id) ? 'Развернуть' : 'Свернуть'} aria-expanded={!folded.has(k.id)}
             onClick={() => fold(k.id)}>▾</button>
     );
 
-    const deviceNode = (k: MasterKey, d: Device) => (
-        <li className="mk-node mk-node--device" key={d.id}>
-            <div className="mk-device">
-                <div className="mk-device-main">
-                    <span className="mk-device-title">
-                        <span className="mk-device-name">{d.device_name || 'Устройство'}</span>
-                        <code className="mk-device-id" title={`ID устройства: ${d.device_id}`}>{d.device_id}</code>
+    // Телефон: устройство — строка списка в карточке ключа, а не карточка в карточке. Имя, статус и «⋮»;
+    // ниже мелко — платформа, версия, IP; трафик, приоритет и то, на скольких серверах оно есть.
+    const deviceRow = (k: MasterKey, d: Device) => {
+        const all = d.ips ?? [];
+        const { ip, serverId, other } = ipPick(d);
+        return (
+            <li className="mk-dev" key={d.id}>
+                <div className="mk-dev-head">
+                    <span className="name-stack mk-dev-title">
+                        <span className="mk-dev-name">{d.device_name || 'Устройство'}</span>
+                        {deviceId(d)}
                     </span>
-                    <span className="mk-device-sub">{platformLabel(d)}
-                        {d.rekey_requested ? ' · ждёт смены ключа' : ''}{syncLabel(d)}</span>
+                    {statusChip(d)}
+                    {moreButton('device', d.id, `Ещё: ${d.device_name || 'устройство'}`)}
                 </div>
-                {statusChip(d)}
-                {/* как строка IP в карточке пользователя: адрес и чипы приоритета/торрентов */}
-                <div className="mk-device-ip">
-                    <IcoGlobe />
-                    {ipCell(d)}
-                    <PriorityChip priority={d.priority} torrent={d.torrent} />
+                <div className="mk-dev-meta">
+                    <span>{d.platform || '—'}</span>
+                    {versionTag(d, 'start')}
+                    <span aria-hidden="true">·</span>
+                    <code className="mk-ip">{ip}</code>
+                    {all.length > 1 && <span className="mk-ip-more" aria-label={all.map(x => `${serverName(nodes, x.server_id)}: ${x.ip}`).join(', ')}>+{all.length - 1}</span>}
+                    {other && serverId !== undefined && <span>{serverName(nodes, serverId)}</span>}
+                </div>
+                <div className="mk-dev-meta">
+                    <span className="mk-dev-traffic">↓ {bytes(d.rx)}  ↑ {bytes(d.tx)}</span>
+                    <PriorityChip priority={bgOnly(d.priority)} torrent={d.torrent} />
                     <TorrentChip torrent={d.torrent} />
+                    {syncFlag(k, d) && <span>{syncFlag(k, d)}</span>}
+                    {d.rekey_requested && <span>ждёт смены ключа</span>}
                 </div>
-                <div className="mk-device-traffic">
-                    <span className="mk-metric"><i className="mk-metric-name" data-sfx=" rx">↓</i><b>{bytes(d.rx)}</b></span>
-                    <span className="mk-metric"><i className="mk-metric-name" data-sfx=" tx">↑</i><b>{bytes(d.tx)}</b></span>
-                </div>
-                {deviceActions(d)}
-            </div>
-        </li>
-    );
+            </li>
+        );
+    };
 
     return (
         <>
@@ -401,6 +539,19 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <p className="mk-notice">Подписка работает без TLS: ответы подписаны, но secret ссылки и конфиг видны в сети.</p>
             )}
 
+            {masking && (
+                <div className="mk-warn" role="note">
+                    <span className="mk-warn-text">
+                        <b>Маскировка первого пакета · {serverName(nodes, getServerId() ?? 0)}</b>
+                        Перед подключением клиент шлёт пакет, похожий на обычный трафик. Новый шаблон устройства sen://
+                        получат в течение минуты.
+                    </span>
+                    <button className="btn btn--tonal" onClick={regenMasking} disabled={masking === 'busy'}>
+                        <IcoRefresh /> Сменить
+                    </button>
+                </div>
+            )}
+
             <div className="toolbar">
                 <input className="field" placeholder="Метка (напр. Семья)" value={label}
                     onChange={e => setLabel(e.target.value)} onKeyDown={e => e.key === 'Enter' && create()} />
@@ -408,6 +559,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                     aria-label="Лимит устройств" value={limit} onChange={e => setLimit(e.target.value)} />
                 <div className="toolbar-btns">
                     <button className="btn btn--primary" onClick={create} disabled={creating}><IcoPlus /> Создать ключ</button>
+                    <button className="btn btn--tonal" onClick={load}><IcoRefresh /> Обновить</button>
                     <button className="btn btn--tonal" onClick={() => setBulk(true)} disabled={!live.length || !nodes.length}
                         title="Добавить или убрать серверы у всех мастер-ключей сразу"><IcoSettings /> Серверы для всех</button>
                 </div>
@@ -418,65 +570,56 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 <table className="mk-table">
                     <thead>
                         <tr>
-                            <th>Имя</th><th>Статус</th><th>Приоритет</th><th>IP</th><th>Платформа</th>
+                            <th>Имя</th><th>Статус</th><th>IP</th><th>Платформа</th>
                             <th>↓ rx</th><th>↑ tx</th><th>Устройства</th><th></th>
                         </tr>
                     </thead>
                     <tbody>
                         {keys.length === 0 ? (
-                            <tr><td colSpan={9} className="empty">Нет мастер-ключей</td></tr>
+                            <tr><td colSpan={8} className="empty">Нет мастер-ключей</td></tr>
                         ) : keys.map(k => {
                             if (k.deleting) return (
                                 <tr key={k.id} className="mk-tr-master mk-last">
                                     <td><span className="mk-name"><IcoKey />{nameCell(k)}</span></td>
-                                    <td colSpan={8}>{deletingChip(k)}</td>
+                                    <td colSpan={7}>{deletingChip(k)}</td>
                                 </tr>
                             );
                             const list = devs[k.id] ?? [];
                             const count = devs[k.id]?.length ?? k.devices;
-                            const free = Math.max(0, k.device_limit - count);
                             const open = !folded.has(k.id);
                             return (
                                 <Fragment key={k.id}>
                                     <tr className="mk-tr-master">
-                                        <td><span className="mk-name">{caret(k)}<IcoKey />{nameCell(k)}{dataFlag(k)}</span></td>
-                                        {summary(list)}
+                                        <td><span className="mk-name">{caret(k, count)}<IcoKey />{nameCell(k)}{dataFlag(k)}</span></td>
+                                        {summary(k, list, count === 0)}
                                         <td>{meter(k, count)}</td>
                                         <td className="td-actions mk-td-actions">{actions(k)}</td>
                                     </tr>
-                                    {tools === k.id && <tr className="mk-tr-tools"><td colSpan={9}>{toolbox(k)}</td></tr>}
+                                    {tools === k.id && <tr className="mk-tr-tools"><td colSpan={8}>{toolbox(k)}</td></tr>}
                                     {open && list.map((d, i) => (
-                                        <tr key={d.id} className={`mk-tr-device${i === list.length - 1 && free === 0 ? ' mk-last' : ''}`}>
+                                        <tr key={d.id} className={`mk-tr-device${i === list.length - 1 ? ' mk-last' : ''}`}>
                                             <td>
                                                 <span className="mk-indent">
                                                     <span className="name-stack">
                                                         {d.device_name || 'Устройство'}
-                                                        <span className="tip-wrap" data-tip={`ID устройства ${d.device_id} · нажми, чтобы скопировать`}>
-                                                            <button className="copy-id" aria-label={`Скопировать ID устройства ${d.device_id}`}
-                                                                onClick={() => copyText(d.device_id).then(() => showMsg('ID устройства скопирован'), () => showMsg('Не удалось скопировать'))}>
-                                                                {d.device_id.slice(0, 8)}…
-                                                            </button>
+                                                        {/* пометки — в строке ID, не рядом с именем: так колонка «Имя» уже и таблица влезает */}
+                                                        <span className="mk-id-line">
+                                                            {deviceId(d)}
+                                                            {syncFlag(k, d) && <span className="tip-wrap tip-wrap--start mk-flag" data-tip={syncTip(k, d)}>· {syncFlag(k, d)}</span>}
+                                                            {d.rekey_requested && <span className="mk-flag">· ждёт смены ключа</span>}
                                                         </span>
                                                     </span>
                                                 </span>
-                                                {d.rekey_requested && <span className="mk-flag"> · ждёт смены ключа</span>}
-                                                {syncLabel(d) && <span className="mk-flag">{syncLabel(d)}</span>}
                                             </td>
-                                            <td>{statusChip(d)}</td>
-                                            <td><span className="user-chips"><PriorityChip priority={d.priority} torrent={d.torrent} /><TorrentChip torrent={d.torrent} /></span></td>
-                                            <td className="td-mono">{ipCell(d)}</td>
-                                            <td>{platformLabel(d)}</td>
+                                            <td><span className="user-chips">{statusChip(d)}<PriorityChip priority={bgOnly(d.priority)} torrent={d.torrent} /><TorrentChip torrent={d.torrent} /></span></td>
+                                            <td>{ipCell(d)}</td>
+                                            <td>{platformCell(d)}</td>
                                             <td>{bytes(d.rx)}</td>
                                             <td>{bytes(d.tx)}</td>
                                             <td></td>
                                             <td className="td-actions mk-td-actions">{deviceActions(d)}</td>
                                         </tr>
                                     ))}
-                                    {open && free > 0 && (
-                                        <tr className="mk-tr-free mk-last">
-                                            <td colSpan={9}><span className="mk-indent">Свободно: {free}</span></td>
-                                        </tr>
-                                    )}
                                 </Fragment>
                             );
                         })}
@@ -484,7 +627,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 </table>
             </div>
 
-            {/* Мобильный: таблица скрыта (.table-card), то же — деревом карточек */}
+            {/* Телефон и планшет: таблица скрыта (.table-card) — карточка на ключ: шапка, сводка, действия,
+                ниже списком его устройства */}
             {keys.length === 0 ? <p className="mk-empty mk-tree">Нет мастер-ключей</p> : (
                 <ul className="mk-tree">
                     {keys.map(k => {
@@ -492,38 +636,64 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                             <li className="mk-root" key={k.id}>
                                 <div className="mk-master">
                                     <IcoKey />
-                                    <span className="mk-master-label">{k.label}<code className="mk-master-uuid">{k.uuid}</code></span>
-                                    {deletingChip(k)}
+                                    <span className="mk-master-label">{nameCell(k)}</span>
                                 </div>
+                                <div className="mk-master-sum">{deletingChip(k)}</div>
                             </li>
                         );
                         const list = devs[k.id] ?? [];
                         const count = devs[k.id]?.length ?? k.devices;
-                        const free = Math.max(0, k.device_limit - count);
                         const isFolded = folded.has(k.id);
                         return (
                             <li className="mk-root" key={k.id}>
                                 <div className="mk-master">
-                                    {caret(k)}
+                                    {caret(k, count)}
                                     <IcoKey />
-                                    <span className="mk-master-label">{k.label}{dataFlag(k)}<code className="mk-master-uuid">{k.uuid}</code></span>
+                                    <span className="mk-master-label">{nameCell(k)}</span>
                                     {meter(k, count)}
-                                    {actions(k)}
+                                </div>
+                                <div className="mk-master-sum">
+                                    {keyStatus(list, count === 0)}
+                                    {keyServers(k, list)}
+                                    {dataFlag(k)}
+                                </div>
+                                <div className="mk-master-actions">
+                                    <button className="btn btn--tonal" onClick={() => showQR(k)}><IcoQR /> QR</button>
+                                    <button className="btn btn--outline" onClick={() => copyLink(k)}><IcoCopy /> Ссылка</button>
+                                    {moreButton('key', k.id, `Ещё: ${k.label}`)}
                                 </div>
                                 {tools === k.id && toolbox(k)}
-                                {!isFolded && (
-                                    <ul className="mk-children">
-                                        {list.map(d => deviceNode(k, d))}
-                                        {free > 0 && (
-                                            <li className="mk-node mk-node--free"><div className="mk-free">Свободно: {free}</div></li>
-                                        )}
-                                    </ul>
-                                )}
+                                {!isFolded && list.length > 0 && <ul className="mk-devs">{list.map(d => deviceRow(k, d))}</ul>}
                             </li>
                         );
                     })}
                 </ul>
             )}
+
+            {menu && (() => {
+                const run = (f: () => void) => () => { setMenu(null); f(); };
+                const at = { top: menu.top, right: menu.right };
+                const cls = `mk-menu${menu.up ? ' mk-menu--up' : ''}`;
+                if (menu.kind === 'device') {
+                    const d = Object.values(devs).flat().find(x => x.id === menu.id);
+                    if (!d) return null;
+                    return (
+                        <div className={cls} role="menu" aria-label={`Устройство ${d.device_name}`} ref={menuRef} style={at}>
+                            <button role="menuitem" className="mk-menu-item" onClick={run(() => newPsk(d))}><IcoRefresh /> Новый PSK</button>
+                            <button role="menuitem" className="mk-menu-item mk-menu-item--danger" onClick={run(() => revoke(d))}><IcoTrash /> Отозвать</button>
+                        </div>
+                    );
+                }
+                const k = keys.find(x => x.id === menu.id);
+                if (!k) return null;
+                return (
+                    <div className={cls} role="menu" aria-label={`Мастер-ключ ${k.label}`} ref={menuRef} style={at}>
+                        {menu.full && <button role="menuitem" className="mk-menu-item" onClick={run(() => copyLink(k))}><IcoCopy /> Скопировать ссылку</button>}
+                        <button role="menuitem" className="mk-menu-item" onClick={run(() => openTools(k))}><IcoSettings /> Настройки ключа</button>
+                        <button role="menuitem" className="mk-menu-item mk-menu-item--danger" onClick={run(() => remove(k))}><IcoTrash /> Удалить</button>
+                    </div>
+                );
+            })()}
 
             {bulk && (
                 <BulkServersModal token={token} nodes={nodes} keys={live} defaults={defaults} onClose={() => setBulk(false)}
@@ -538,8 +708,8 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                             onClick={async () => { await copyText(modal.link); showMsg('Ссылка скопирована'); }} />
                         <p className="qr-hint">Отсканируй в SenAWG · нажми на QR чтобы скопировать{modal.tls ? '' : ' · без TLS'}</p>
                         <div className="qr-actions">
+                            <button className="btn btn--text" onClick={() => setModal(null)}>Закрыть</button>
                             <button className="btn btn--primary" onClick={async () => { await copyText(modal.link); showMsg('Ссылка скопирована'); }}><IcoCopy /> Скопировать</button>
-                            <button className="btn btn--tonal" onClick={() => setModal(null)}>Закрыть</button>
                         </div>
                     </div>
                 </div>

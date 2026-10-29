@@ -8,25 +8,20 @@ LICENSE file in the root directory of this source tree.
     display: flex; flex-direction: column; gap: 12px;
     background: var(--surface-bright);
     border: 1px solid var(--outline-variant);
-    border-radius: var(--r-card);
+    border-radius: var(--shape-extra-large);
     padding: 20px;
     margin-bottom: 16px;
 }
 .mon-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.mon-title { margin: 0; font-size: 16px; font-weight: 500; color: var(--on-surface); }
-.mon-hint { margin: 0; font-size: 12px; color: var(--neutral-text); }
+.mon-title { margin: 0; font-size: var(--title-medium-size); line-height: var(--title-medium-line); font-weight: var(--weight-medium); color: var(--on-surface); }
+.mon-hint { margin: 0; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .mon-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.mon-code {
-    display: block; word-break: break-all; user-select: all;
-    font-family: var(--mono); font-size: 12px; color: var(--on-surface);
-    background: var(--surface-container);
-    border-radius: var(--r-table);
-    padding: 12px;
-}
-
-@media (max-width: 640px) {
+@media (max-width: 599px) {
     .mon-actions .btn { flex: 1; }
+    .mon-toolbar .server-select { flex: 1 1 100%; }   /* своя строка под периодом */
+    .mon-toolbar .server-current { width: 100%; }
+    .mon-toolbar .server-menu { width: 100%; }
 }
 
 /* ───── Графики ─────
@@ -35,30 +30,31 @@ LICENSE file in the root directory of this source tree.
 :root { --series-1: #6a45b8; --series-2: #c4620a; }
 :root[data-theme="dark"] { --series-1: #8f6be0; --series-2: #d9772a; }
 
-.mon-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+/* Строка над плитками: период слева, выбор сервера (components/ServerSelect) справа; на узком — друг под другом */
+.mon-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; margin-bottom: 16px; }
+.mon-filters { display: flex; flex-wrap: wrap; gap: 8px; }
 .mon-range {
     min-height: 44px; padding: 0 18px;
-    font: inherit; font-size: 14px; color: var(--on-surface);
+    font: inherit; font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface);
     background: var(--surface-bright);
-    border: 1px solid var(--outline); border-radius: var(--r-pill);
+    border: 1px solid var(--outline); border-radius: var(--shape-full);
     cursor: pointer;
 }
-.mon-range:hover { background: var(--state-primary); }
-.mon-range--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: 500; }
+.mon-range--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: var(--weight-medium); }
 
 .mon-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .mon-tile {
     display: flex; flex-direction: column; gap: 4px;
     background: var(--surface-bright);
-    border: 1px solid var(--outline-variant); border-radius: var(--r-table);
+    border: 1px solid var(--outline-variant); border-radius: var(--shape-large);
     padding: 14px 16px;
 }
-.mon-tile-label { font-size: 12px; color: var(--neutral-text); }
-.mon-tile-value { font-size: 20px; font-weight: 500; color: var(--on-surface); }
-.mon-tile-sub   { font-size: 12px; color: var(--neutral-text); }
+.mon-tile-label { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.mon-tile-value { font-size: var(--title-large-size); line-height: var(--title-large-line); font-weight: var(--weight-medium); color: var(--on-surface); }
+.mon-tile-sub   { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .mon-tile-rates { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .mon-tile-rate  { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; white-space: nowrap; }
-.mon-tile-dir   { font-size: 16px; }
+.mon-tile-dir   { font-size: var(--body-large-size); line-height: var(--body-large-line); }
 .mon-tile-total { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--outline-variant); }
 .mon-tile-meter { display: flex; flex-direction: column; gap: 4px; }
 .mon-tile-dot   { width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center; }
@@ -71,78 +67,60 @@ LICENSE file in the root directory of this source tree.
 .mon-chart {
     margin: 0; min-width: 0;
     background: var(--surface-bright);
-    border: 1px solid var(--outline-variant); border-radius: var(--r-card);
+    border: 1px solid var(--outline-variant); border-radius: var(--shape-extra-large);
     padding: 16px;
-    transition: opacity .15s;
+    transition: opacity var(--duration-short3) var(--ease-standard);
 }
 .mon-chart--dim { opacity: .6; }
 .mon-chart-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 4px; }
-.mon-chart-title { font-size: 15px; font-weight: 500; color: var(--on-surface); }
-.mon-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--neutral-text); }
+.mon-chart-title { font-size: var(--title-medium-size); line-height: var(--title-medium-line); font-weight: var(--weight-medium); color: var(--on-surface); }
+.mon-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .mon-legend-item { display: inline-flex; align-items: center; gap: 6px; }
-.mon-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; flex: none; }
+.mon-key { display: inline-block; width: 14px; height: 3px; border-radius: var(--shape-extra-small); flex: none; }
 .mon-chart-toggle {
     margin-left: auto; min-height: 44px; padding: 0 12px;
-    font: inherit; font-size: 13px; color: var(--on-primary-container);
-    background: none; border: 0; border-radius: var(--r-pill); cursor: pointer;
+    font: inherit; font-size: var(--label-large-size); line-height: var(--label-large-line); color: var(--on-primary-container);
+    background: none; border: 0; border-radius: var(--shape-full); cursor: pointer;
 }
-.mon-chart-toggle:hover { background: var(--state-primary); }
 
 .mon-plot { position: relative; }
 .mon-plot svg { display: block; max-width: 100%; }
-.mon-plot svg:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 8px; }
+.mon-plot svg:focus-visible { border-radius: var(--shape-small); }
 .mon-grid  { stroke: var(--outline-variant); stroke-width: 1; }
-.mon-tick  { fill: var(--neutral-text); font-size: 12px; font-family: var(--font); }
+.mon-tick  { fill: var(--neutral-text); font-size: var(--body-small-size); font-family: var(--font); }
 .mon-cross { stroke: var(--outline); stroke-width: 1; }
 .mon-end   { stroke: var(--surface-bright); stroke-width: 2px; }
-.mon-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 0 24px; text-align: center; font-size: 13px; color: var(--neutral-text); }
+.mon-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 0 24px; text-align: center; font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--neutral-text); }
 .mon-tip {
     position: absolute; pointer-events: none; z-index: 2;
     display: flex; flex-direction: column; gap: 4px;
     background: var(--surface-container);
-    border: 1px solid var(--outline-variant); border-radius: 12px;
-    padding: 8px 10px; font-size: 12px; color: var(--neutral-text);
+    border: 1px solid var(--outline-variant); border-radius: var(--shape-medium);
+    padding: 8px 10px; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text);
 }
 .mon-tip-time { color: var(--neutral-text); }
 .mon-tip-row { display: flex; align-items: center; gap: 8px; }
-.mon-tip-row b { font-weight: 500; font-size: 13px; color: var(--on-surface); }
+.mon-tip-row b { font-weight: var(--weight-medium); font-size: var(--label-large-size); line-height: var(--label-large-line); color: var(--on-surface); }
 
 .mon-table-wrap { overflow-x: auto; }
-.mon-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.mon-table th { text-align: left; font-weight: 500; color: var(--label); padding: 8px 10px; white-space: nowrap; }
+.mon-table { width: 100%; border-collapse: collapse; font-size: var(--body-medium-size); line-height: var(--body-medium-line); }
+.mon-table th { text-align: left; font-weight: var(--weight-medium); color: var(--on-surface-variant); padding: 8px 10px; white-space: nowrap; }
 .mon-table td { padding: 8px 10px; color: var(--on-surface); border-top: .5px solid var(--outline-variant); font-variant-numeric: tabular-nums; white-space: nowrap; }
-
-.mon-log {
-    margin: 0; max-height: 240px; overflow: auto;
-    font-family: var(--mono); font-size: 12px; color: var(--on-surface);
-    background: var(--surface-container); border-radius: var(--r-table);
-    padding: 12px; white-space: pre-wrap; word-break: break-word;
-}
 
 .mon-notice { margin-bottom: 12px; }
 
 /* Полоски процессора и памяти в плитках */
-.mon-bar { display: block; width: 100%; height: 8px; border-radius: 4px; overflow: hidden; background: var(--primary-container); margin: 2px 0; }
-.mon-bar i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); transition: width .3s; }
+.mon-bar { display: block; width: 100%; height: 8px; border-radius: var(--shape-extra-small); overflow: hidden; background: var(--primary-container); margin: 2px 0; }
+.mon-bar i { display: block; height: 100%; border-radius: var(--shape-extra-small); background: var(--series-1); transition: width var(--duration-medium2) var(--ease-standard); }
 .mon-bar i.mon-bar--warn { background: var(--warn-dot); }
 .mon-bar i.mon-bar--bad  { background: var(--error-dot); }
 
-/* Какой сервер показан (выбирается в других вкладках) */
-.mon-server { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; font-size: 16px; color: var(--on-surface); }
-.mon-server b { font-weight: 500; }
-.mon-server-label { font-size: 12px; color: var(--neutral-text); }
 
 
-/* Прогресс операции рядом с кнопкой */
+
+/* Разбивка «По серверам» в режиме «Все серверы» */
+.mon-per-server { margin-bottom: 16px; }
+
+/* Кнопка рядом с подписью — по центру строки */
 .mon-actions { align-items: center; }
-.mon-progress { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 6px; }
-.mon-progress-label { font-size: 12px; color: var(--neutral-text); }
-.mon-pbar { display: block; width: 100%; height: 8px; border-radius: 4px; overflow: hidden; background: var(--primary-container); }
-.mon-pbar i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); transition: width .4s ease; }
-.mon-pbar--ok i  { background: var(--success-dot); }
-.mon-pbar--bad i { background: var(--error-dot); }
-/* Шага ещё нет — ход неизвестен: бегущий отрезок вместо ложных процентов */
-.mon-pbar--wait i { width: 35% !important; animation: mon-wait 1.2s ease-in-out infinite; }
-@keyframes mon-wait { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
-@media (prefers-reduced-motion: reduce) { .mon-pbar--wait i { animation: none; } .mon-pbar i { transition: none; } }
 

@@ -7,70 +7,84 @@ LICENSE file in the root directory of this source tree.
    Общая дизайн-система — в App.css. */
 
 .mk-notice {
-    font-size: 13px;
-    color: var(--error-text);
-    background: var(--error-bg);
-    border-radius: 16px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-error-container);
+    background: var(--error-container);
+    border-radius: var(--shape-large);
     padding: 10px 16px;
 }
-.mk-empty { font-size: 14px; color: var(--neutral-text); text-align: center; padding: 48px 0; }
+/* Предупреждение о маскировке: тёплый tertiary, как чип «устарела» у версии сервера */
+.mk-warn {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--tertiary-container); color: var(--on-tertiary-container);
+    border-radius: var(--shape-large);
+    padding: 10px 12px 10px 16px;
+}
+.mk-warn-text {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+}
+.mk-warn-text b { font-weight: var(--weight-medium); }
+.mk-warn .btn { flex-shrink: 0; }
+.mk-empty { font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--neutral-text); text-align: center; padding: 48px 0; }
 .mk-limit-input { width: 88px !important; }
 
 /* ── таблица (десктоп) ── */
 .mk-table td, .mk-table th { white-space: nowrap; }
-.mk-table .td-actions { width: 150px; }
-.mk-table .mk-device-id { display: inline-block; max-width: 170px; vertical-align: middle; }
+.mk-table .td-actions { width: 80px; }   /* QR и «⋮» */
 .mk-table th, .mk-table td { padding-left: 10px; padding-right: 10px; }
 .mk-table th:first-child, .mk-table td:first-child { padding-left: 20px; }
 .mk-table th:last-child, .mk-table td:last-child { padding-right: 16px; }
-.mk-tr-master td { background: var(--surface-container); font-weight: 500; padding-top: 6px; padding-bottom: 6px; }
+.mk-tr-master td { background: var(--surface-container); font-weight: var(--weight-medium); padding-top: 6px; padding-bottom: 6px; }
 .mk-tr-master:hover td { background: var(--surface-container); }
 .mk-name { display: inline-flex; align-items: center; gap: 8px; color: var(--primary); }
-.mk-master-uuid {
-    display: block;
-    font-family: var(--mono); font-size: 12px; font-weight: 400;
-    color: var(--neutral-text);
-    overflow: hidden; text-overflow: ellipsis;
-}
 .mk-name .mk-caret { margin-left: -8px; }
 .mk-tr-master .mk-name { color: var(--on-surface); }
 .mk-tr-master .mk-name svg { color: var(--primary); }
 .mk-tr-tools td { background: var(--surface-container); padding-top: 4px; padding-bottom: 12px; }  /* слева/справа — общие отступы колонок таблицы: блок стоит под заголовком «Имя» */
 .mk-tr-tools:hover { background: transparent; }
-.mk-tr-device td, .mk-tr-free td { padding-top: 10px; padding-bottom: 10px; }
-.mk-flag { color: var(--neutral-text); font-size: 12px; }
+.mk-tr-device td { padding-top: 10px; padding-bottom: 10px; }
+.mk-flag { color: var(--neutral-text); font-size: var(--body-small-size); line-height: var(--body-small-line); }
+.mk-id-line { display: inline-flex; align-items: baseline; gap: 6px; }
 /* чипы приоритета и торрентов в одной ячейке — как во вкладке «Пользователи» */
 .mk-table .user-chips { display: inline-flex; flex-wrap: nowrap; gap: 6px; }
-.mk-ip { font-family: var(--mono); }
+.mk-ip { font-family: var(--mono); font-size: var(--body-small-size); line-height: var(--body-small-line); }
+/* вторая строка ячейки: сервер чужого адреса, версия клиента */
+.mk-sub { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.mk-ip-line { display: inline-flex; align-items: center; gap: 6px; }
+.mk-ip-more {
+    font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--on-surface-variant);
+    background: var(--surface-container-high); border-radius: var(--shape-full); padding: 0 6px;
+}
+.mk-srv, .mk-ver { font-weight: var(--weight-regular); }
+.mk-ver { align-self: flex-start; padding-top: 0; padding-bottom: 0; font-family: var(--mono); }
 /* иерархия: линия слева от имени и «ножка» к каждой строке; у последней линия обрывается */
-.mk-tr-device td:first-child, .mk-tr-free td:first-child {
+.mk-tr-device td:first-child {
     background: linear-gradient(var(--outline), var(--outline)) 30px 0 / 2px 100% no-repeat;
 }
-.mk-tr-device.mk-last td:first-child, .mk-tr-free.mk-last td:first-child { background-size: 2px 50%; }
+.mk-tr-device.mk-last td:first-child { background-size: 2px 50%; }
 .mk-indent { position: relative; display: inline-block; padding-left: 36px; }
 .mk-indent::before {
     content: ''; position: absolute; left: 10px; top: 50%; width: 16px;
     border-top: 2px solid var(--outline);
 }
-.mk-tr-free td { color: var(--neutral-dot); font-size: 12px; }
-.mk-tr-free:hover { background: transparent; }
 
 /* ── дерево (мобильный) ── */
-.mk-tree, .mk-children { list-style: none; margin: 0; padding: 0; }
+.mk-tree, .mk-devs { list-style: none; margin: 0; padding: 0; }
 .mk-tree { display: none; flex-direction: column; gap: 12px; }  /* только мобильный */
 
 .mk-root {
     background: var(--surface-bright);
     border: 1px solid var(--outline-variant);
-    border-radius: var(--r-card);
-    padding: 12px 18px 14px;
+    border-radius: var(--shape-extra-large);
+    padding: 12px 16px;
 }
 
-/* родитель */
+/* шапка ключа: стрелка, ключ, метка с коротким UUID, полоска устройств */
 .mk-master { display: flex; align-items: center; gap: 10px; color: var(--primary); min-height: 42px; }
 .mk-master-label {
-    font-size: 16px;
-    font-weight: 500;
+    font-size: var(--title-medium-size); line-height: var(--title-medium-line);
+    font-weight: var(--weight-medium);
     color: var(--on-surface);
     flex: 1;
     min-width: 0;
@@ -83,13 +97,38 @@ LICENSE file in the root directory of this source tree.
     border: 0; border-radius: 50%;
     background: transparent;
     color: var(--neutral-text);
-    font-size: 16px;
+    font-size: var(--body-large-size); line-height: var(--body-large-line);
     cursor: pointer;
     flex-shrink: 0;
-    transition: transform 0.15s;
+    transition: transform var(--duration-short3) var(--ease-standard);
 }
-.mk-caret:hover { background: var(--state-neutral); }
 .mk-caret--folded { transform: rotate(-90deg); }
+.mk-caret-gap { width: 28px; flex-shrink: 0; }   /* ключ без устройств: место стрелки */
+.mk-name .mk-caret-gap { margin-left: -8px; }
+
+/* Меню «⋮» ключа (MD3 menu): плавает над таблицей, у кнопки справа */
+.mk-menu {
+    position: fixed; z-index: 30;
+    min-width: 200px; padding: 6px;
+    background: var(--surface-container);
+    border-radius: var(--shape-large);
+    box-shadow: var(--elevation-2);
+    animation: mk-menu-in var(--duration-short4) var(--ease-emphasized-decelerate);
+    transform-origin: top right;
+}
+.mk-menu--up { transform: translateY(-100%); transform-origin: bottom right; }
+@keyframes mk-menu-in { from { opacity: 0; scale: .92; } }
+.mk-menu-item {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    min-height: 40px; padding: 0 12px;
+    border: 0; border-radius: var(--shape-medium); background: transparent;
+    font-family: var(--font); font-size: var(--label-large-size); line-height: var(--label-large-line); font-weight: var(--weight-medium);
+    color: var(--on-surface); text-align: left; cursor: pointer;
+}
+.mk-menu-item svg { color: var(--on-surface-variant); flex-shrink: 0; }
+.mk-menu-item--danger, .mk-menu-item--danger svg { color: var(--error); }
+@media (pointer: coarse) { .mk-menu-item { min-height: 48px; } }
+@media (prefers-reduced-motion: reduce) { .mk-menu { animation: none; } }
 
 .mk-tools {
     display: grid;
@@ -103,10 +142,10 @@ LICENSE file in the root directory of this source tree.
     display: flex; flex-direction: column; gap: 10px;
     background: var(--surface-bright);
     border: 1px solid var(--outline-variant);
-    border-radius: 16px;
+    border-radius: var(--shape-large);
     padding: 12px 16px 14px;
 }
-.mk-box-title { margin: 0; font-size: 13px; font-weight: 500; color: var(--label); }
+.mk-box-title { margin: 0; font-size: var(--title-small-size); line-height: var(--title-small-line); font-weight: var(--weight-medium); color: var(--on-surface-variant); }
 .mk-box .mk-box-title { margin-bottom: 2px; }
 /* строка настройки: слева название и пояснение, справа контрол */
 .mk-setting {
@@ -117,25 +156,26 @@ LICENSE file in the root directory of this source tree.
 .mk-box-title + .mk-setting { border-top: 0; padding-top: 4px; }
 .mk-setting:last-child { padding-bottom: 0; }
 .mk-setting-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.mk-setting-name { font-size: 14px; font-weight: 500; color: var(--on-surface); }
-.mk-setting-hint { font-size: 12px; color: var(--neutral-text); }
+.mk-setting-name { font-size: var(--title-small-size); line-height: var(--title-small-line); font-weight: var(--weight-medium); color: var(--on-surface); }
+.mk-setting-hint { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .mk-setting-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .mk-uuid {
-    font-family: var(--mono); font-size: 12px; color: var(--on-surface);
+    font-family: var(--mono); font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--on-surface);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
-.mk-setting-ctl .btn { height: 36px; padding: 0 16px; font-size: 13px; }
+.mk-setting-ctl .btn { height: 36px; padding: 0 16px; font-size: var(--label-large-size); line-height: var(--label-large-line); }
 .mk-limit-input { height: 36px; width: 80px !important; text-align: center; }
 
-/* прогресс занятых слотов с числом внутри; полный — цветом «ошибка».
+/* прогресс занятых слотов с числом внутри: обычная заливка primary, цветом — только когда мест
+   не осталось (тёплый: это повод присмотреться, а не ошибка).
    Текст дублируется: тёмный на дорожке, светлый поверх заливки (обрезается ею). */
 .mk-meter {
     --mk-w: 136px;
-    --meter-fill: var(--success-dot);   /* < 2/3 — зелёный */
-    --meter-on: #2a2118;                /* цвет числа поверх заливки */
+    --meter-fill: var(--primary);
+    --meter-on: var(--on-primary);      /* цвет числа поверх заливки */
     position: relative;
     width: var(--mk-w); height: 20px;
-    border-radius: var(--r-pill);
+    border-radius: var(--shape-full);
     background: var(--outline-variant);
     overflow: hidden;
     flex-shrink: 0;
@@ -144,7 +184,7 @@ LICENSE file in the root directory of this source tree.
     position: absolute; left: 0; top: 0; bottom: 0;
     background: var(--meter-fill);
     overflow: hidden;
-    transition: width 0.25s, background 0.25s;
+    transition: width var(--duration-medium1) var(--ease-standard), background var(--duration-medium1) var(--ease-standard);
 }
 /* числа по краям внутри полоски: текущее слева, лимит справа */
 .mk-meter-text {
@@ -153,90 +193,62 @@ LICENSE file in the root directory of this source tree.
     box-sizing: border-box;
     padding: 0 11px;
     display: flex; align-items: center; justify-content: space-between;
-    font-size: 12px; font-weight: 500;
+    font-size: var(--label-medium-size); line-height: var(--label-medium-line); font-weight: var(--weight-medium);
     font-variant-numeric: tabular-nums;
     color: var(--on-surface);
 }
 .mk-meter-text--on { color: var(--meter-on); }
-.mk-meter--warn { --meter-fill: var(--warn-dot); }                 /* от 2/3 — оранжевый */
-.mk-meter--full { --meter-fill: var(--error-dot); --meter-on: #fff; } /* лимит — красный */
-:root[data-theme="dark"] .mk-meter--full { --meter-on: #2a2118; }
+.mk-meter--full { --meter-fill: var(--warn-dot); --meter-on: #2a2118; }   /* все места заняты */
 
 .mk-box .tip-wrap { width: 100%; }
 
-/* дети: вертикальная линия слева и «ножка» к каждому узлу */
-.mk-children { margin: 8px 0 0 18px; padding-left: 28px; border-left: 2px solid var(--outline); }
-.mk-node { position: relative; padding: 4px 0; }
-.mk-node::before {
-    content: '';
-    position: absolute;
-    left: -28px; top: 50%;
-    width: 28px;
-    border-top: 2px solid var(--outline);
-}
-/* последний узел: линия родителя обрывается на его «ножке» */
-.mk-node:last-child::after {
-    content: '';
-    position: absolute;
-    left: -30px; top: calc(50% + 1px); bottom: 0;
-    width: 2px;
-    background: var(--surface-bright);
-}
+/* сводка (статус, серверы) и действия ключа */
+.mk-master-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.mk-master-sum:empty { display: none; }
+.mk-master-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.mk-master-actions .btn { flex: 1; }
+.mk-tree .mk-more { width: 40px; height: 40px; }
+/* на телефоне .tip-wrap по умолчанию во всю ширину — здесь чипы и ID идут в строку */
+.mk-tree .tip-wrap { width: auto; }
 
-.mk-device {
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    background: var(--surface-container);
-    border-radius: 14px;
-    padding: 8px 14px;
+/* устройства ключа — строками списка под ним, разделены линией */
+.mk-devs { margin: 12px -16px -12px; border-top: 1px solid var(--outline-variant); }
+.mk-dev { padding: 10px 16px; }
+.mk-dev + .mk-dev { border-top: 1px solid var(--outline-variant); }
+.mk-dev-head { display: flex; align-items: center; gap: 8px; }
+.mk-dev-title { flex: 1; min-width: 0; }
+.mk-dev-name {
+    font-size: var(--title-small-size); line-height: var(--title-small-line); font-weight: var(--weight-medium); color: var(--on-surface);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.mk-device-main { display: flex; flex-direction: column; min-width: 0; flex: 1 1 160px; }
-.mk-device-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.mk-device-id {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--neutral-text);
-    background: var(--surface-bright);
-    border-radius: var(--r-pill);
-    padding: 1px 8px;
-    min-width: 0;
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.mk-dev-head .mk-more { margin: -4px -8px -4px 0; }
+.mk-dev-meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px;
+    font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text);
 }
-.mk-device-name { font-size: 14px; font-weight: 500; color: var(--on-surface); }
-.mk-device-sub  { font-size: 12px; color: var(--neutral-text); }
-.mk-device-ip {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-    width: 100%;
-    color: var(--neutral-text);
-}
-.mk-device-ip .mk-ip { font-size: 13px; }
-.mk-device-ip .tip-wrap { width: auto; }
-.mk-device-traffic { display: flex; gap: 12px; font-family: var(--mono); font-size: 12px; color: var(--neutral-text); }
-.mk-metric { display: inline-flex; gap: 4px; }
-.mk-metric i, .mk-metric b { font-style: normal; font-weight: 400; }
+.mk-dev-meta .chip { font-size: var(--body-small-size); }
+.mk-dev-traffic { font-family: var(--mono); white-space: pre; }
 
-.mk-free {
-    border: 1px dashed var(--outline);
-    border-radius: 14px;
-    padding: 10px 14px;
-    font-size: 13px;
-    color: var(--neutral-dot);
-}
-
-/* ── мобильный (design.md, часть IV): одна колонка, тач-цели ≥ 44px, rx/tx блоками
-      50/50, действия рядом с большим пальцем ── */
-@media (max-width: 640px) {
+/* ── телефон и планшет (design.md, часть IV): карточка на ключ, устройства строками, тач-цели ≥ 44px ── */
+/* compact и medium (< 840px): карточки вместо таблицы */
+@media (max-width: 839px) {
+    .mk-warn { flex-wrap: wrap; padding: 12px 12px 12px 16px; }
+    .mk-warn-text { flex-basis: 100%; }
+    .mk-warn .btn { margin-left: auto; }
     .mk-tree { display: flex; }
+}
+@media (pointer: coarse) {
+    .mk-tree .mk-more { width: 44px; height: 44px; }
+}
+@media (max-width: 599px) {
     .mk-limit-input { width: 100% !important; }
 
     .mk-root { padding: 12px; }
+    .mk-devs { margin: 12px -12px -12px; }
+    .mk-dev { padding: 10px 12px; }
 
-    /* родитель: шапка, затем ряд действий на всю ширину */
-    .mk-master { flex-wrap: wrap; row-gap: 10px; }
-    .mk-master .actions { width: 100%; gap: 8px; }
     .mk-caret { width: 44px; height: 44px; margin: -6px 0 -6px -8px; }
+    .mk-caret-gap { width: 44px; margin-left: -8px; }
     .mk-meter { --mk-w: 112px; height: 24px; }
 
     /* настройки узла: поля и кнопки на всю ширину */
@@ -246,38 +258,6 @@ LICENSE file in the root directory of this source tree.
     .mk-setting-ctl .btn { flex: 1; height: 44px; }
     .mk-setting-ctl .mk-limit-input { width: 100% !important; flex: 1; height: 44px; }
     .mk-tools .btn { width: 100%; height: 44px; justify-content: center; }
-
-    /* дерево уже: отступы поменьше, «ножки» короче */
-    .mk-children { margin-left: 8px; padding-left: 14px; }
-    .mk-node { padding: 4px 0; }
-    .mk-node::before { left: -14px; width: 14px; }
-    .mk-node:last-child::after { left: -16px; }
-
-    /* устройство — карточка: заголовок + чип, метрики 50/50, ряд действий */
-    .mk-device { border-radius: 16px; padding: 12px; gap: 10px; }
-    .mk-device-main { flex: 1 1 0; }
-    .mk-device-title { flex-wrap: wrap; row-gap: 2px; }
-    .mk-device-id { max-width: 100%; }
-    .mk-device-traffic { width: 100%; gap: 8px; }
-    .mk-metric {
-        flex: 1; flex-direction: column; gap: 2px;
-        background: var(--surface-bright);
-        border-radius: 16px; padding: 8px 12px;
-    }
-    .mk-metric i { font-family: var(--font, inherit); font-size: 12px; color: var(--neutral-text); }
-    .mk-metric-name::after { content: attr(data-sfx); }
-    .mk-metric b { font-size: 16px; font-weight: 500; color: var(--on-surface); }
-
-    /* кнопки действий: контурные, на всю ширину ряда, 44px */
-    .mk-device .actions { width: 100%; gap: 8px; }
-    .mk-master .btn-icon, .mk-device .btn-icon {
-        flex: 1; width: auto; height: 44px;
-        border: 1px solid var(--outline);
-        border-radius: var(--r-pill);
-    }
-    .mk-master .btn-icon--danger, .mk-device .btn-icon--danger { border-color: var(--error-dot); }
-
-    .mk-free { padding: 12px; font-size: 13px; }
 }
 
 /* «Серверы для всех» (BulkServersModal) */
@@ -285,27 +265,25 @@ LICENSE file in the root directory of this source tree.
 .bs-list { display: flex; flex-direction: column; gap: 8px; }
 .bs-row {
     display: flex; align-items: center; gap: 10px;
-    background: var(--surface-container); border-radius: 12px; padding: 8px 8px 8px 14px;
-    font-size: 13px; color: var(--on-surface);
+    background: var(--surface-container); border-radius: var(--shape-medium); padding: 8px 8px 8px 14px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface);
 }
 .bs-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.bs-sub { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--neutral-text); }
+.bs-sub { display: flex; flex-wrap: wrap; gap: 8px; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .bs-sub .server-pick-ip { margin-left: 0; }
 .bs-opts { display: flex; gap: 4px; flex-shrink: 0; }
 .bs-opt {
     min-height: 36px; padding: 0 12px;
-    font: inherit; font-size: 13px; color: var(--on-surface);
+    font: inherit; font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface);
     background: var(--surface-bright);
-    border: 1px solid var(--outline); border-radius: var(--r-pill);
+    border: 1px solid var(--outline); border-radius: var(--shape-full);
     cursor: pointer; white-space: nowrap;
 }
-.bs-opt:hover { background: var(--state-primary); }
-.bs-opt--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: 500; }
-.bs-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--on-surface); cursor: pointer; }
+.bs-opt--on { background: var(--primary-container); color: var(--on-primary-container); border-color: transparent; font-weight: var(--weight-medium); }
+.bs-check { display: flex; align-items: center; gap: 8px; font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface); cursor: pointer; }
 .bs-check input { accent-color: var(--primary); width: 18px; height: 18px; margin: 0; }
-@media (max-width: 640px) {
+@media (max-width: 599px) {
     .bs-row { flex-wrap: wrap; }
     .bs-opts { width: 100%; }
     .bs-opt { flex: 1; }
 }
-.bs-modal .btn:disabled { opacity: .5; cursor: default; }

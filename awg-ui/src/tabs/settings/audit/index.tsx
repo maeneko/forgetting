@@ -2,12 +2,12 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useCallback } from 'react';
-import { apiFetch, timeAgo, type NodeInfo, type PageProps } from '../../lib/shared';
-import { IcoRefresh, IcoTrash } from '../../components/icons';
-import { serverName } from '../../components/ServerPicker';
+import { apiFetch, timeAgo, type NodeInfo, type PageProps } from '../../../lib/shared';
+import { IcoRefresh, IcoTrash } from '../../../components/icons';
+import { serverName } from '../../../components/ServerPicker';
 import './audit.css';
 
-// Вкладка «Аудит»: core периодически обходит все серверы и ищет «мёртвых» пиров — живых на сервере,
+// Раздел «Аудит» вкладки «Настройки»: core периодически обходит все серверы и ищет «мёртвых» пиров — живых на сервере,
 // хотя панель про них не знает (мастер-ключ удалён, а пир остался). Снимает только подтверждённых
 // (мёртвых два прохода подряд): автоматически, если включено в настройках, или кнопкой.
 // Отчёт и очистку считает awg-ui/sub.ts (/ui/masterkeys/audit*).
@@ -96,7 +96,7 @@ export default function AuditPage({ token, showMsg }: PageProps) {
             </section>
 
             <section className="au-box">
-                <h4 className="au-box-title">Настройки</h4>
+                <h4 className="au-box-title">Параметры аудита</h4>
                 <label className="au-setting">
                     <span className="au-setting-text">
                         <span className="au-setting-name">Снимать мёртвых автоматически</span>

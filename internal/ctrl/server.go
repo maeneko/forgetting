@@ -146,6 +146,7 @@ func New() (*Server, error) {
 	sp, _ := strconv.Atoi(portStr)
 
 	params := ReadParams(s.confPath(), func(m string) { s.log.Warn(m) })
+	params.I1 = s.ensureI1() // I1 — из БД, не из conf (см. i1.go)
 	gen := params.Gen()
 	module, tools := readVersions()
 	s.c = Config{

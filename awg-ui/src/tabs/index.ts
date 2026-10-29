@@ -4,7 +4,7 @@
 // Автообнаружение вкладок. Каждая вкладка — самодостаточная папка tabs/<name>/:
 //   index.tsx      — компонент + логика
 //   <name>.css     — стили вкладки (импортит сам компонент)
-//   metadata.json  — { id, label, icon, group?, order?, chrome? } (манифест: описание, группа меню, порядок)
+//   metadata.json  — { id, label, icon, group?, order?, requires?, chrome? } (манифест: описание, группа меню, порядок)
 // Реестр сам находит все папки через import.meta.glob и собирает «живые» части
 // (Page-компонент, Icon по имени из ICONS) к метадате. Добавить вкладку = просто
 // создать папку с index.tsx и metadata.json — этот файл трогать НЕ нужно.
@@ -35,6 +35,7 @@ export interface TabMeta {
     icon:    string;     // имя иконки → ICONS
     group:   TabGroupId; // группа меню; без поля — 'main'
     order?:  number;     // порядок внутри группы (по возрастанию; без него — 0)
+    requires?: 'prometheus';   // вкладка в меню только при условии: 'prometheus' — встроенный Prometheus установлен
     chrome?: TabChrome;
 }
 
@@ -66,6 +67,9 @@ function toMeta(name: string, raw: unknown): TabMeta {
     if (m.chrome !== undefined && (typeof m.chrome !== 'object' || m.chrome === null)) {
         throw new Error(`tabs/${name}/metadata.json: "chrome" должно быть объектом`);
     }
+    if (m.requires !== undefined && m.requires !== 'prometheus') {
+        throw new Error(`tabs/${name}/metadata.json: "requires" может быть только "prometheus"`);
+    }
     const group = (m.group ?? 'main') as string;
     if (!TAB_GROUPS.some(g => g.id === group)) {
         throw new Error(`tabs/${name}/metadata.json: "group" должно быть одним из: ${TAB_GROUPS.map(g => g.id).join(', ')}`);
@@ -76,6 +80,7 @@ function toMeta(name: string, raw: unknown): TabMeta {
         icon:   str('icon'),
         group:  group as TabGroupId,
         order:  m.order as number | undefined,
+        requires: m.requires as 'prometheus' | undefined,
         chrome: m.chrome as TabChrome | undefined,
     };
 }

@@ -67,9 +67,10 @@ export function createNodes(deps: { uidb: Database.Database; ctrlLocal: Ctrl; ba
         const crtF = file(process.env.NODE_TLS_CERT_FILE, "node_tls.crt");
         try {
             if (!fs.existsSync(keyF) && !fs.existsSync(crtF)) {
+                // CN случайный (12 hex, как имя хоста контейнера): постоянный CN — готовый отпечаток для DPI.
                 const r = spawnSync("openssl", [
                     "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-                    "-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN=awg-node",
+                    "-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN=" + crypto.randomBytes(6).toString("hex"),
                 ], { stdio: "ignore" });
                 if (r.status !== 0) throw new Error("openssl");
                 fs.chmodSync(keyF, 0o600); fs.chmodSync(crtF, 0o600);

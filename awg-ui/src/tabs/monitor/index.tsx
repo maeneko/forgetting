@@ -2,20 +2,16 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { apiFetch, copyText, getServerId, type NodeInfo, type PageProps } from '../../lib/shared';
-import { IcoCopy, IcoTrash } from '../../components/icons';
+import { apiFetch, getServerId, openTab, announcePrometheus, type NodeInfo, type PageProps } from '../../lib/shared';
+import { IcoGear } from '../../components/icons';
+import type { MonitorStatus as Status } from '../settings/prometheus';
 import LineChart from '../../components/LineChart';
+import ServerSelect, { ALL_SERVERS } from '../../components/ServerSelect';
 import './monitor.css';
 
-// Вкладка «Монитор»: встроенный Prometheus и основные графики.
-// Кнопка «Подключить Prometheus» просит awg-ctrl сервера поставить его (`awg-ctrl monitor install`, root;
-// сама панель пакетов не ставит). У панели без VPN он ставится на ноду, и панель читает его через её агента.
+// Вкладка «Монитор»: основные графики со встроенного Prometheus. Ставится и удаляется он в «Настройках»,
+// раздел «Prometheus» (tabs/settings/prometheus); пока его нет, здесь — карточка со ссылкой туда.
 // Графики читают Prometheus через фиксированные запросы панели (internal/ui/monitor.go).
-interface Status {
-    ready: boolean; can_install: boolean; command: string;
-    host: { id: number; name: string } | null;   // Prometheus на ноде (или будет поставлен туда); null — на этом сервере
-    job: { action: 'install' | 'remove'; running: boolean; exit: number | null; log: string } | null;   // последняя операция
-}
 type Pts = [number, number][];
 interface Overview {
     range: string; step: number; from: number; to: number;
@@ -27,6 +23,24 @@ interface Overview {
     total: Series;
 }
 interface Series { down: Pts; up: Pts; online: Pts; heavy: Pts; drops: Pts; cpu: Pts; mem: Pts }
+type Row = Overview['servers'][number];
+type NumKey = 'down' | 'up' | 'online' | 'heavy' | 'cpu' | 'mem' | 'cores' | 'mem_total' | 'used_down' | 'used_up';
+
+// «Все серверы» — сводка «сейчас» для плиток: скорости, устройства, ядра, память и объём складываем,
+// загрузку процессора и памяти — среднее по серверам (как и ряды total в monitor.go).
+function sumUp(rows: Row[]): Row | undefined {
+    if (rows.length <= 1) return rows[0];
+    const sum = (k: NumKey) => rows.some(r => r[k] != null) ? rows.reduce((n, r) => n + (r[k] ?? 0), 0) : null;
+    const avg = (k: NumKey) => {
+        const v = rows.map(r => r[k]).filter((x): x is number => x != null);
+        return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+    };
+    return {
+        id: ALL_SERVERS, name: 'Все серверы', ok: rows.every(r => r.ok), congested: rows.some(r => r.congested),
+        down: sum('down'), up: sum('up'), online: sum('online'), heavy: sum('heavy'), cpu: avg('cpu'), mem: avg('mem'),
+        cores: sum('cores'), mem_total: sum('mem_total'), used_down: sum('used_down'), used_up: sum('used_up'),
+    };
+}
 
 const RANGES: [string, string][] = [['1h', '1 час'], ['6h', '6 часов'], ['24h', '24 часа'], ['7d', '7 дней'], ['30d', '30 дней']];
 
@@ -51,28 +65,6 @@ function Bar({ v, label }: { v: number | null | undefined; label: string }) {
         </span>
     );
 }
-// Прогресс операции из строк «N/M  шаг», которые печатает сам установщик (cli/src/monitor.ts). Шаг N считаем
-// выполненным наполовину: так полоска не стоит на нуле, пока идёт долгий apt, и не обещает больше, чем известно.
-const STEP = /^(\d+)\/(\d+)\s+(.+)$/;
-function JobProgress({ job, starting }: { job: Status['job']; starting: boolean }) {
-    let step: [number, number, string] | null = null;
-    for (const l of job?.log.split('\n') ?? []) { const m = STEP.exec(l.trim()); if (m) step = [Number(m[1]), Number(m[2]), m[3]]; }
-    const failed = !!job && job.exit !== null && job.exit !== 0;
-    const done   = !!job && job.exit === 0;
-    const pct    = done ? 100 : step ? ((step[0] - 0.5) / step[1]) * 100 : 0;
-    const label  = failed ? `Не удалось (код ${job!.exit})`
-        : done ? (job!.action === 'install' ? 'Готово' : 'Удалено')
-        : step ? `Шаг ${step[0]} из ${step[1]}: ${step[2]}` : 'Запуск…';
-    return (
-        <div className="mon-progress" aria-live="polite">
-            <span className={`mon-pbar${failed ? ' mon-pbar--bad' : done ? ' mon-pbar--ok' : !step && (starting || job?.running) ? ' mon-pbar--wait' : ''}`}
-                role="progressbar" aria-label="Ход операции" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
-                <i style={{ width: `${pct}%` }} />
-            </span>
-            <span className="mon-progress-label">{label}</span>
-        </div>
-    );
-}
 const gb = (b: number) => `${nf(b / 2 ** 30, 1)} ГБ`;
 // Объём трафика — десятичные единицы, как считают провайдеры: 1 ТБ = 10¹² байт
 function vol(b: number): string {
@@ -81,39 +73,42 @@ function vol(b: number): string {
     return `${nf(b / 1e6, 0)} МБ`;
 }
 
-export default function MonitorPage({ token, showMsg }: PageProps) {
+export default function MonitorPage({ token }: PageProps) {
     const [status, setStatus]   = useState<Status | null>(null);
     const [range, setRange]     = useState('1h');
     const [ov, setOv]           = useState<Overview | null>(null);
     const [ovErr, setOvErr]     = useState('');
     const [loading, setLoading] = useState(false);
-    const [pending, setPending] = useState<'install' | 'remove' | null>(null);     // операция запущена из этой вкладки
-    const [server, setServer] = useState<NodeInfo | null>(null);     // показанный сервер: выбран в другой вкладке, здесь не меняется
+    const [nodes, setNodes]     = useState<NodeInfo[]>([]);
+    // Чьи графики: сервер (по умолчанию — выбранный в шапке) или ALL_SERVERS. Выбор свой, шапку не меняет.
+    const [view, setView]       = useState(() => getServerId() ?? 0);
     const alive = useRef(true);
     // StrictMode монтирует эффект дважды: флаг надо вернуть в true, иначе все ответы отбрасываются
     useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
     const loadStatus = useCallback(async () => {
-        try { const s = await apiFetch('GET', `/ui/monitor?server=${getServerId() ?? 0}`, token) as Status; if (alive.current) setStatus(s); return s; }
+        try { const s = await apiFetch('GET', `/ui/monitor?server=${getServerId() ?? 0}`, token) as Status; announcePrometheus(s.ready); if (alive.current) setStatus(s); return s; }
         catch { return null; }
     }, [token]);
 
     const loadOverview = useCallback(async () => {
         setLoading(true);
         try {
-            const o = await apiFetch('GET', `/ui/monitor/overview?range=${range}&server=${getServerId() ?? 0}`, token) as Overview;
+            // Без ?server= monitor.go отдаёт все серверы: total — сумма (процессор и память — среднее), servers — каждый
+            const q = view === ALL_SERVERS ? '' : `&server=${view}`;
+            const o = await apiFetch('GET', `/ui/monitor/overview?range=${range}${q}`, token) as Overview;
             if (alive.current) { setOv(o); setOvErr(''); }
         } catch (e: any) { if (alive.current) setOvErr(e?.response?.data?.error ?? 'Не удалось получить данные'); }
         finally { if (alive.current) setLoading(false); }
-    }, [token, range]);
+    }, [token, range, view]);
 
     useEffect(() => { void loadStatus(); }, [loadStatus]);
 
-    // Название и состояние сервера для заголовка; список серверов на этой вкладке не показываем
+    // Серверы для выбора (и их связь — точки на плашках)
     useEffect(() => {
         const load = () => apiFetch('GET', '/ui/nodes', token)
-            .then(r => { if (alive.current) setServer((r.nodes as NodeInfo[]).find(n => n.id === (getServerId() ?? 0)) ?? null); })
-            .catch(() => { /* заголовок необязателен */ });
+            .then(r => { if (alive.current) setNodes(r.nodes ?? []); })
+            .catch(() => { /* выбор необязателен — останется текущий сервер */ });
         void load();
         const t = setInterval(load, 15000);
         return () => clearInterval(t);
@@ -127,116 +122,43 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
         return () => clearInterval(t);
     }, [status?.ready, loadOverview]);
 
-    // Пока идёт установка или удаление — следим за ходом: раз в 2 с читаем статус и лог
+    // Пока Prometheus нет — раз в 10 с проверяем: его могли поставить в «Настройках»
     useEffect(() => {
-        if (!pending && !status?.job?.running) return;
-        const t = setInterval(async () => {
-            const s = await loadStatus();
-            if (s && !s.job?.running) setPending(null);
-        }, 2000);
+        if (!status || status.ready) return;
+        const t = setInterval(() => { void loadStatus(); }, 10000);
         return () => clearInterval(t);
-    }, [pending, status?.job?.running, loadStatus]);
+    }, [status, loadStatus]);
 
-    const run = async (action: 'install' | 'remove') => {
-        if (action === 'remove' && !confirm('Удалить Prometheus? Он будет остановлен, а накопленные графики (до 31 дня) сотрутся. Панель продолжит отдавать /metrics.')) return;
-        setPending(action);
-        try { await apiFetch('POST', `/ui/monitor/${action}?server=${getServerId() ?? 0}`, token); await loadStatus(); }
-        catch (e: any) { setPending(null); showMsg(e?.response?.data?.error ?? (action === 'install' ? 'Не удалось запустить установку' : 'Не удалось запустить удаление')); }
-    };
-    const working = !!pending || !!status?.job?.running;
-
-    // Прогресс рядом с кнопкой: для установки — пока Prometheus нет (там же виден итог удаления), для удаления — только удаление
-    const progressFor = (action: 'install' | 'remove' | 'any') => {
-        const j = status?.job;
-        const mine = !!j && (action === 'any' || j.action === action) && (j.running || j.exit !== null);
-        const starting = !!pending && (action === 'any' || action === pending);
-        return mine || starting ? <JobProgress job={mine ? j! : null} starting={starting} /> : null;
-    };
-
-    // Полный лог — только при ошибке: оператору нужна причина, а не поток строк apt
-    const failureLog = () => {
-        const j = status?.job;
-        if (!j || j.exit === null || j.exit === 0) return null;
-        return (
-            <>
-                <pre className="mon-log">{j.log.trim()}</pre>
-                <p className="login-error">
-                    {j.action === 'install' ? 'Установка' : 'Удаление'} не удалась. Если дело в правах или пакетах, выполните вручную: <b>{`awg-ctrl monitor ${j.action}`}</b>
-                </p>
-            </>
-        );
-    };
-
-    // ───────── установка ─────────
+    // Prometheus нет — графиков не будет: ведём в «Настройки», где он ставится
     const setup = status && !status.ready && (
         <section className="mon-card" aria-labelledby="mon-setup">
             <div className="mon-head">
                 <h3 className="mon-title" id="mon-setup">Мониторинг</h3>
-                <span className="chip chip--offline"><span className="chip-dot" />не подключён</span>
+                <span className="chip chip--offline">
+                    <span className="chip-dot" />{status.job?.running && status.job.action === 'install' ? 'ставится' : 'не подключён'}
+                </span>
             </div>
             <p className="mon-hint">
-                Панель поставит Prometheus {status.host ? <>на сервер <b>{status.host.name}</b></> : 'на этот сервер'} и сама подключит его к своим метрикам: основные графики —
-                скорость, устройства онлайн, нагрузка на канал, — появятся здесь через минуту-две. Prometheus слушает
-                только 127.0.0.1, наружу он не открывается.
+                Графики — скорость, устройства онлайн, нагрузка на канал — строит встроенный Prometheus.
+                Он ставится в «Настройках», на вкладке «Prometheus»; графики появятся здесь через минуту-две после установки.
             </p>
-
-            {status.can_install ? (
-                <div className="mon-actions">
-                    <button className="btn btn--primary" onClick={() => run('install')} disabled={working}>
-                        {pending === 'install' || (status.job?.running && status.job.action === 'install') ? 'Устанавливаем…' : 'Подключить Prometheus'}
-                    </button>
-                    {progressFor('any')}
-                </div>
-            ) : (
-                <>
-                    <p className="mon-hint">
-                        У этой панели нет своего VPN-сервера: выберите ноду в сервер-баре, чтобы поставить Prometheus на неё
-                        кнопкой, или выполните на ней от root:
-                    </p>
-                    <code className="mon-code">{status.command}</code>
-                    <div className="mon-actions">
-                        <button className="btn btn--tonal" onClick={() => copyText(status.command).then(() => showMsg('Команда скопирована'))}>
-                            <IcoCopy /> Скопировать
-                        </button>
-                    </div>
-                </>
-            )}
-
-            {failureLog()}
-        </section>
-    );
-
-    // Удаление: только пока Prometheus есть
-    const manage = status?.ready && (
-        <section className="mon-card" aria-labelledby="mon-manage">
-            <div className="mon-head">
-                <h3 className="mon-title" id="mon-manage">Prometheus</h3>
-                <span className="chip chip--online"><span className="chip-dot" />работает</span>
+            <div className="mon-actions">
+                <button className="btn btn--primary" onClick={() => openTab('settings', 'prom')}>
+                    <IcoGear /> Открыть настройки
+                </button>
             </div>
-            <p className="mon-hint">
-                Стоит {status.host ? <>на сервере <b>{status.host.name}</b> (панель читает его через агента ноды)</> : 'на этом сервере'} и
-                слушает только 127.0.0.1:9090, графики хранит 31 день. Удаление остановит его, снимет пакет и сотрёт накопленные данные.
-            </p>
-            {status.can_install ? (
-                <div className="mon-actions">
-                    <button className="btn btn--danger" onClick={() => run('remove')} disabled={working}>
-                        <IcoTrash /> {pending === 'remove' || (status.job?.running && status.job.action === 'remove') ? 'Удаляем…' : 'Удалить Prometheus'}
-                    </button>
-                    {progressFor('remove')}
-                </div>
-            ) : (
-                <>
-                    <p className="mon-hint">Выполните на сервере с Prometheus от root:</p>
-                    <code className="mon-code">awg-ctrl monitor remove</code>
-                </>
-            )}
-            {status.job?.action === 'remove' && failureLog()}
         </section>
     );
 
     // ───────── дашборд ─────────
-    // Вкладка показывает один сервер — выбранный в сервер-баре; при смене сервера App монтирует её заново.
-    const one  = ov?.servers[0];
+    // Один сервер или сводка по всем (sumUp) — плитки читают одно и то же
+    const all  = view === ALL_SERVERS;
+    const one  = all ? sumUp(ov?.servers ?? []) : ov?.servers[0];
+    // Кого нет в сумме: сервер не отдал метрики (ok = false) или на связи, а рядов нет совсем (старый агент)
+    const silent = !all || !ov ? [] : [
+        ...ov.servers.filter(r => !r.ok).map(r => r.name),
+        ...nodes.filter(n => n.online && !ov.servers.some(r => r.id === n.id)).map(n => n.health?.server || n.name),
+    ];
     const data = ov?.total ?? null;
     const cur  = data && {
         // Скорость «сейчас» — от сервера: на неделе/месяце последняя точка ряда — среднее за шаг, а не текущее
@@ -249,17 +171,29 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
     const unit = peak >= 1e9 ? { name: 'Гбит/с', div: 1e9 } : peak >= 1e6 ? { name: 'Мбит/с', div: 1e6 } : peak >= 1e3 ? { name: 'Кбит/с', div: 1e3 } : { name: 'бит/с', div: 1 };
     const dashboard = status?.ready && (
         <>
-            {/* Период — единственный фильтр: он задаёт окно для всего ниже */}
-            <div className="mon-filters" role="group" aria-label="Период">
-                {RANGES.map(([id, label]) => (
-                    <button key={id} type="button" className={`mon-range${range === id ? ' mon-range--on' : ''}`}
-                        aria-pressed={range === id} onClick={() => setRange(id)}>{label}</button>
-                ))}
+            {/* Период слева задаёт окно для всего ниже; справа — чьи графики: кнопка и меню, как выбор
+                сервера в шапке, «Все серверы» — сводка по всем */}
+            <div className="mon-toolbar">
+                <div className="mon-filters" role="group" aria-label="Период">
+                    {RANGES.map(([id, label]) => (
+                        <button key={id} type="button" className={`mon-range${range === id ? ' mon-range--on' : ''}`}
+                            aria-pressed={range === id} onClick={() => setRange(id)}>{label}</button>
+                    ))}
+                </div>
+                {nodes.length > 0 && (
+                    <ServerSelect name="mon-server-menu" nodes={nodes} value={view} onChange={setView} all pickOffline />
+                )}
             </div>
 
             {ovErr && <p className="login-error">{ovErr}</p>}
-            {ov && !one?.ok && (
+            {ov && !all && !one?.ok && (
                 <p className="mon-hint mon-notice">Этот сервер сейчас не отдаёт метрики: графики могут быть неполными или пустыми.</p>
+            )}
+            {ov && all && (ov.servers.length === 0 || silent.length > 0) && (
+                <p className="mon-hint mon-notice">
+                    {ov.servers.length === 0 ? 'Метрики сейчас не отдаёт ни один сервер.'
+                        : `Не отдают метрики: ${silent.join(', ')} — в сумме их нет.`}
+                </p>
             )}
 
             <div className="mon-tiles">
@@ -303,20 +237,47 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
                         <div className="mon-tile-meter">
                             <span className="mon-tile-value mon-tile-rate">
                                 {one?.cpu != null ? `${nf(one.cpu, 0)} %` : '—'}
-                                <span className="mon-tile-sub">процессор{one?.cores ? ` · ${nf(one.cores, 0)} ядер` : ''}</span>
+                                <span className="mon-tile-sub">процессор{all ? ` · в среднем по ${ov?.servers.length ?? 0}` : one?.cores ? ` · ${nf(one.cores, 0)} ядер` : ''}</span>
                             </span>
                             <Bar v={one?.cpu} label="Загрузка процессора" />
                         </div>
                         <div className="mon-tile-meter">
                             <span className="mon-tile-value mon-tile-rate">
                                 {one?.mem != null ? `${nf(one.mem, 0)} %` : '—'}
-                                <span className="mon-tile-sub">память{one?.mem_total ? ` · из ${gb(one.mem_total)}` : ''}</span>
+                                <span className="mon-tile-sub">память{all ? ` · в среднем по ${ov?.servers.length ?? 0}` : one?.mem_total ? ` · из ${gb(one.mem_total)}` : ''}</span>
                             </span>
                             <Bar v={one?.mem} label="Занято оперативной памяти" />
                         </div>
                     </div>
                 </div>
             </div>
+
+            {/* Сводка по всем — и разбивка: кто сколько качает и насколько загружен */}
+            {all && ov && ov.servers.length > 1 && (
+                <section className="mon-chart mon-per-server" aria-labelledby="mon-per">
+                    <div className="mon-chart-head"><span className="mon-chart-title" id="mon-per">По серверам</span></div>
+                    <div className="mon-table-wrap">
+                        <table className="mon-table">
+                            <thead>
+                                <tr><th>Сервер</th><th>Загрузка</th><th>Отдача</th><th>Онлайн</th><th>Процессор</th><th>Память</th><th>Потрачено</th></tr>
+                            </thead>
+                            <tbody>
+                                {ov.servers.map(r => (
+                                    <tr key={r.id}>
+                                        <td>{r.name}{!r.ok && <span className="mon-tile-sub"> · нет метрик</span>}</td>
+                                        <td>{r.down != null ? rate(r.down) : '—'}</td>
+                                        <td>{r.up != null ? rate(r.up) : '—'}</td>
+                                        <td>{r.online != null ? nf(r.online, 0) : '—'}</td>
+                                        <td>{r.cpu != null ? `${nf(r.cpu, 0)} %` : '—'}</td>
+                                        <td>{r.mem != null ? `${nf(r.mem, 0)} %` : '—'}</td>
+                                        <td>{r.used_down != null && r.used_up != null ? vol(r.used_down + r.used_up) : '—'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            )}
 
             {ov && data && (
                 <div className="mon-charts">
@@ -348,18 +309,9 @@ export default function MonitorPage({ token, showMsg }: PageProps) {
 
     return (
         <>
-            {server && (
-                <p className="mon-server">
-                    <span className="mon-server-label">Сервер</span>
-                    <b>{server.health?.server || server.name}</b>
-                    <span className={`chip chip--${server.online ? 'online' : 'offline'}`}><span className="chip-dot" />{server.online ? 'на связи' : 'нет связи'}</span>
-                </p>
-            )}
-
             {!status && <p className="mon-hint">Загрузка…</p>}
             {setup}
             {dashboard}
-            {manage}
         </>
     );
 }

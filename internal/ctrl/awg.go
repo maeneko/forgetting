@@ -344,6 +344,7 @@ func (s *Server) syncPeers() error {
 // vpn:// собирались бы на старых параметрах — например, на 2.0 уже после перехода на 3.1.
 func (s *Server) reloadAwgParams() string {
 	p := ReadParams(s.confPath(), func(m string) { s.log.Warn(m) })
+	p.I1 = s.getCfg(cfgI1, p.I1)
 	s.cfgMu.Lock()
 	s.c.Params = p
 	s.c.Gen = p.Gen()
