@@ -174,13 +174,25 @@ export default function App() {
 
     // Восстановить сессию из сохранённого токена
     useEffect(() => {
+        // Сбрасываем сессию только на 401: сетевой сбой или 502, пока панель перезапускается,
+        // раньше тоже выкидывали на экран входа. В остальных случаях пробуем снова через 5 с.
         const saved = localStorage.getItem(TOKEN_KEY);
-        if (saved) {
-            startSession(saved).catch(() => {
-                localStorage.removeItem(TOKEN_KEY);
-                setToken('');
+        if (!saved) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let alive = true;
+        const attempt = () => {
+            startSession(saved).catch(e => {
+                if (!alive) return;
+                if (axios.isAxiosError(e) && e.response?.status === 401) {
+                    localStorage.removeItem(TOKEN_KEY);
+                    setToken('');
+                } else {
+                    timer = setTimeout(attempt, 5000);
+                }
             });
-        }
+        };
+        attempt();
+        return () => { alive = false; clearTimeout(timer); };
     }, [startSession]);
 
     // Состояние серверов (онлайн, пиры) обновляем раз в 15 с, пока открыта панель.
