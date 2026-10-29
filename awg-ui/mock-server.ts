@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.1";
+const MOCK_VERSION = "0.5.2";
 
 // ── пользователи (vpn://) ──
 interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
@@ -40,7 +40,7 @@ const mnodes: MNode[] = [
     { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
     { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
-    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.1" },   // новее панели — жёлтый чип
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.3" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
