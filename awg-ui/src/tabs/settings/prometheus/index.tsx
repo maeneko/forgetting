@@ -20,6 +20,7 @@ export interface MonitorStatus {
 // Прогресс операции из строк «N/M  шаг», которые печатает сам установщик (cli/src/monitor.ts). Шаг N считаем
 // выполненным наполовину: так полоска не стоит на нуле, пока идёт долгий apt, и не обещает больше, чем известно.
 const STEP = /^(\d+)\/(\d+)\s+(.+)$/;
+const SETTLE_MS = 90_000;
 function JobProgress({ job, starting }: { job: MonitorStatus['job']; starting: boolean }) {
     let step: [number, number, string] | null = null;
     for (const l of job?.log.split('\n') ?? []) { const m = STEP.exec(l.trim()); if (m) step = [Number(m[1]), Number(m[2]), m[3]]; }
@@ -55,15 +56,22 @@ export default function PrometheusInstall({ token, showMsg }: PageProps) {
 
     useEffect(() => { void loadStatus(); }, [loadStatus]);
 
-    // Пока идёт установка или удаление — следим за ходом: раз в 2 с читаем статус и лог
+    // Пока идёт установка или удаление — следим за ходом: раз в 2 с читаем статус и лог. Операция
+    // закончилась, а панель ещё не видит результата (на ноде агент перезапускается и переподключается) —
+    // следим дальше, пока ready не совпадёт с ней, но не дольше SETTLE_MS: иначе «Готово» висит рядом
+    // с «не подключён», а пункт «Монитор» ждёт минутного опроса App.
+    const [settle, setSettle] = useState<number | null>(null);   // до какого момента ждём ready
     useEffect(() => {
-        if (!pending && !status?.job?.running) return;
+        if (!pending && !status?.job?.running && settle === null) return;
         const t = setInterval(async () => {
             const s = await loadStatus();
-            if (s && !s.job?.running) setPending(null);
+            if (!s?.job || s.job.running) return;   // агент ноды переподключается — job пока не виден
+            setPending(null);
+            const waiting = s.job.exit === 0 && s.ready !== (s.job.action === 'install');
+            setSettle(d => waiting && (d === null || Date.now() < d) ? d ?? Date.now() + SETTLE_MS : null);
         }, 2000);
         return () => clearInterval(t);
-    }, [pending, status?.job?.running, loadStatus]);
+    }, [pending, status?.job?.running, settle, loadStatus]);
 
     const run = async (action: 'install' | 'remove') => {
         if (action === 'remove' && !confirm('Удалить Prometheus? Он будет остановлен, а накопленные графики (до 31 дня) сотрутся. Панель продолжит отдавать /metrics.')) return;
@@ -75,7 +83,7 @@ export default function PrometheusInstall({ token, showMsg }: PageProps) {
     if (!status) return <section className="st-section"><p className="st-hint">Загрузка…</p></section>;
 
     const job      = status.job;
-    const working  = !!pending || !!job?.running;
+    const working  = !!pending || !!job?.running || settle !== null;
     const doing    = pending ?? (job?.running ? job.action : null);
     const showJob  = !!pending || (!!job && (job.running || job.exit !== null));
     const failed   = !!job && job.exit !== null && job.exit !== 0;
@@ -96,7 +104,7 @@ export default function PrometheusInstall({ token, showMsg }: PageProps) {
                 </span>
                 <span className="st-row-ctl">
                     <span className={`chip chip--${status.ready ? 'online' : 'offline'}`}>
-                        <span className="chip-dot" />{doing === 'install' ? 'ставится' : doing === 'remove' ? 'удаляется' : status.ready ? 'работает' : 'не подключён'}
+                        <span className="chip-dot" />{doing === 'install' ? 'ставится' : doing === 'remove' ? 'удаляется' : settle !== null ? (status.ready ? 'отключается' : 'подключается') : status.ready ? 'работает' : 'не подключён'}
                     </span>
                     {status.can_install && (status.ready ? (
                         <button className="btn btn--danger" onClick={() => run('remove')} disabled={working}>

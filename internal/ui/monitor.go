@@ -364,9 +364,14 @@ func (m *Monitor) router() *Router {
 	rt := newRouter()
 	rt.Get("/", func(c *Ctx) bool {
 		src := m.source()
-		ready := src != nil
 		target := m.target(src, c.R.URL.Query())
 		job := m.jobState(target)
+		// Установщик выходит, только когда Prometheus ответил, но проверка выше могла пройти
+		// до этого: тогда страница получила бы «готово» вместе с ready=false и перестала следить.
+		if src == nil && !job.running && job.action == "install" && job.exit != nil && jsToNumberAny(job.exit) == 0 {
+			src = m.source()
+		}
+		ready := src != nil
 		var jobOut any
 		if job.can && truthy(job.action) {
 			jobOut = jsjson.Object{{Key: "action", Val: job.action}, {Key: "running", Val: job.running}, {Key: "exit", Val: job.exit}, {Key: "log", Val: job.log}}
