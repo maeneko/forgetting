@@ -67,7 +67,9 @@ const devOut = (m: MK, d: Dev) => ({ ...d,
     ips: m.servers.filter(s => s !== 2).map(s => ({ server_id: s, ip: `10.9.0.${50 + d.id + s * 10}` })) });
 const find = (id: string) => masters.find(m => m.id === Number(id) && !m.deleting);
 
-app.get("/ui/brand", (_q, r) => r.json({ brand: "Forgetting", channel: "Beta", version: MOCK_VERSION }));
+// Как на сервере: за авторизацией, без токена — 401 «Unauthorized» (на него панель выходит из сессии).
+app.get("/ui/brand", (q, r) => { if (!q.headers.authorization) { r.status(401).json({ error: "Unauthorized" }); return; }
+    r.json({ brand: "Forgetting", channel: "Beta", version: MOCK_VERSION }); });
 app.post("/login", (q, r) => q.body.user === "admin" && q.body.pass === "admin" ? r.json({ token: "mock." + crypto.randomBytes(8).toString("hex") + ".sig" }) : r.status(401).json({ error: "Неверный логин или пароль" }));
 app.post("/logout", (_q, r) => r.json({ ok: true }));
 app.get("/health", (q, r) => {

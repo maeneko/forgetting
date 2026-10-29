@@ -2,7 +2,6 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
-import axios from 'axios';
 import { apiFetch, copyText, timeAgo, BRAND_FALLBACK, SETTINGS_SECTION_KEY, type Brand, type NodeInfo, type PageProps } from '../../lib/shared';
 import { useTheme, setThemeMode, type ThemeMode } from '../../lib/theme';
 import { IcoCheck, IcoCopy, IcoRefresh, IcoTrash, IcoPlus } from '../../components/icons';
@@ -138,7 +137,8 @@ export default function SettingsPage({ token, showMsg }: PageProps) {
         } catch {
             showMsg('Ошибка загрузки настроек');
         }
-        axios.get('/ui/brand').then(({ data }) => setBrand({
+        // /ui/brand за авторизацией: без токена 401 «Unauthorized», и App считал сессию истёкшей.
+        apiFetch('GET', '/ui/brand', token).then(data => setBrand({
             brand: data.brand || BRAND_FALLBACK, channel: data.channel || '', version: data.version || '',
         })).catch(() => {});
         apiFetch('GET', '/ui/nodes', token).then(r => setNodes(r.nodes ?? [])).catch(() => {});
