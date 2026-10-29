@@ -53,6 +53,22 @@ function savedSection(): SectionId {
     return 'look';
 }
 
+// Фрагмент prometheus.yml для внешнего Prometheus. Адрес — от страницы: в нём уже секретный путь
+// панели (UI_PREFIX) или подпапка nginx, поэтому конфиг верен в обоих случаях.
+function scrapeConfig(tok: string): string {
+    const u = new URL('metrics', location.href.split(/[?#]/)[0]);
+    return [
+        'scrape_configs:',
+        '  - job_name: vpn-panel',
+        `    scheme: ${u.protocol.replace(':', '')}`,
+        `    metrics_path: ${u.pathname}`,
+        '    authorization:',
+        `      credentials: ${tok}`,
+        '    static_configs:',
+        `      - targets: ['${u.host}']`,
+    ].join('\n');
+}
+
 const THEMES: { id: ThemeMode; label: string }[] = [
     { id: 'light',  label: 'Светлая' },
     { id: 'dark',   label: 'Тёмная' },
@@ -266,16 +282,19 @@ export default function SettingsPage({ token, showMsg }: PageProps) {
                     <div className="qr-card" role="dialog" aria-modal="true" aria-labelledby="st-new-title" onClick={e => e.stopPropagation()}>
                         <p className="qr-name" id="st-new-title">Токен метрик выпущен</p>
                         <p className="qr-hint">
-                            Скопируй его сейчас — он показывается один раз. В prometheus.yml он идёт
-                            в <code className="st-code">authorization.credentials</code>.
+                            Скопируй его сейчас — он показывается один раз. Готовый фрагмент для prometheus.yml:
                         </p>
-                        <code className="st-secret">{created}</code>
+                        <pre className="st-secret st-yml">{scrapeConfig(created)}</pre>
                         <div className="qr-actions">
                             <button className="btn btn--text" onClick={() => setCreated(null)}>Закрыть</button>
-                            <button className="btn btn--primary" onClick={async () => {
+                            <button className="btn btn--tonal" onClick={async () => {
                                 await copyText(created);
                                 showMsg('Токен скопирован');
-                            }}><IcoCopy /> Скопировать</button>
+                            }}><IcoCopy /> Токен</button>
+                            <button className="btn btn--primary" onClick={async () => {
+                                await copyText(scrapeConfig(created));
+                                showMsg('Фрагмент prometheus.yml скопирован');
+                            }}><IcoCopy /> Фрагмент</button>
                         </div>
                     </div>
                 </div>

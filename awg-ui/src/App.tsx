@@ -190,17 +190,20 @@ export default function App() {
         return () => clearInterval(t);
     }, [token, loadNodes]);
 
-    // Имя продукта и версия — с сервера, до логина (роут без авторизации).
-    // Если не ответил, остаётся фолбэк из констант.
+    // Имя продукта и версия — с сервера, только после логина: роут за авторизацией, чтобы
+    // панель не опознавалась сканером. Если не ответил, остаётся фолбэк из констант.
     useEffect(() => {
-        axios.get('/ui/brand')
+        if (!token) return;
+        axios.get('/ui/brand', { headers: { Authorization: `Bearer ${token}` } })
             .then(({ data }) => setBrand({
                 brand:   data.brand || BRAND_FALLBACK,
                 channel: data.channel || '',
                 version: data.version || '',
             }))
             .catch(() => { /* остаётся фолбэк */ });
-    }, []);
+    }, [token]);
+
+    useEffect(() => { document.title = token ? brand.brand : 'Вход'; }, [token, brand.brand]);
 
     // Блокировать прокрутку фона когда drawer открыт
     useEffect(() => {
@@ -308,7 +311,7 @@ export default function App() {
                 <div className="login-screen">
                     <span className="theme-toggle--fixed">{themeToggle}</span>
                     <div className="login-card">
-                        <span className="logo-name">{brand.brand}</span>
+                        <span className="logo-name">Вход</span>
                         <p className="login-sub">Войдите, чтобы продолжить</p>
                         <input
                             className="field"

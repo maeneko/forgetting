@@ -37,6 +37,14 @@ func (s *Server) routes() []route {
 				{"awg", ob{{"status", awgSt}, {"peers", st.Peers}, {"module", cfg.AwgModule}, {"tools", cfg.AwgTools}}}}}, nil
 		}),
 
+		R("GET", "/api/connlog", false, a, func(c *rctx) (result, error) {
+			v, err := s.connlog.list(queryInt(c, "limit"), queryInt(c, "before"), c.r.URL.Query().Get("q"))
+			if err != nil {
+				return result{}, err
+			}
+			return ok(v)
+		}),
+
 		R("POST", "/api/users", true, an, func(c *rctx) (result, error) {
 			name, _ := c.obj().Get2("name").(string)
 			if u, err := s.userGet(name); err != nil {

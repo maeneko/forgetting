@@ -15,7 +15,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
 	"database/sql"
 	"fmt"
@@ -153,17 +152,15 @@ func newNodes(a *App) (*Nodes, error) {
 		}
 		return filepath.Join(a.baseDir, name)
 	}
-	// TLS: самоподписанный сертификат, pin которого зашит в join-строки. Живёт столько же,
+	// TLS: самоподписанный сертификат, pin которого зашит в join-строки. Имя в нём случайное:
+	// одинаковое у всех серверов было бы сигнатурой для сканера (pin — по ключу, не по имени). Живёт столько же,
 	// сколько core: пересоздать = переподключить все ноды.
 	if n.port != 0 {
 		keyF, crtF := file("NODE_TLS_KEY_FILE", "node_tls.key"), file("NODE_TLS_CERT_FILE", "node_tls.crt")
 		if err := func() error {
 			if !exists(keyF) && !exists(crtF) {
-				// CN случайный (12 hex, как имя хоста контейнера): постоянный CN — готовый отпечаток для DPI.
-				cn := make([]byte, 6)
-				rand.Read(cn)
 				cmd := exec.Command("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", fmt.Sprintf("/CN=%x", cn))
+					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN="+randomCN())
 				if err := cmd.Run(); err != nil {
 					return err
 				}
@@ -215,6 +212,13 @@ func newNodes(a *App) (*Nodes, error) {
 	// выключение сервера, через который подключена сейчас.
 	if !hasColumn(a.db, "nodes", "core_ack") {
 		if _, err := a.db.Exec("ALTER TABLE nodes ADD COLUMN core_ack TEXT"); err != nil {
+			return nil, err
+		}
+	}
+	// preauth — нода хоть раз подключилась с подписью в заголовках (hub_preauth.go): пока такие
+	// есть не все, хаб пускает и старых агентов без подписи.
+	if !hasColumn(a.db, "nodes", "preauth") {
+		if _, err := a.db.Exec("ALTER TABLE nodes ADD COLUMN preauth INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return nil, err
 		}
 	}
@@ -484,6 +488,13 @@ const closeOutdated = 4026
 
 // cmpVersion сравнивает версии вида 0.5.0 (хвост после «-» не учитывается): <0 — a старше b.
 func cmpVersion(a, b string) int {
+	// «Beta 0.5.0» → «0.5.0»: канал перед номером не сравниваем.
+	if f := strings.Fields(a); len(f) > 0 {
+		a = f[len(f)-1]
+	}
+	if f := strings.Fields(b); len(f) > 0 {
+		b = f[len(f)-1]
+	}
 	pa, pb := strings.Split(strings.SplitN(a, "-", 2)[0], "."), strings.Split(strings.SplitN(b, "-", 2)[0], ".")
 	for i := 0; i < max(len(pa), len(pb)); i++ {
 		var x, y int
@@ -506,15 +517,27 @@ func closeWS(ws *websocket.Conn, code int, reason string) {
 
 func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// До апгрейда: без верной подписи ноды (или старого агента в переходном режиме) — 404, как
+	// у пустого сервера; WebSocket и hello видит только своя нода (hub_preauth.go).
+	if n.blocked(ip) {
+		http.NotFound(w, r)
+		return
+	}
+	pre, present := n.preauth(r)
+	if present && pre == nil {
+		n.failed(ip)
+		http.NotFound(w, r)
+		return
+	}
+	if !present && !n.legacyOpen() {
+		http.NotFound(w, r)
+		return
+	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	ws.SetReadLimit(hubMaxFrame)
-	if n.blocked(ip) {
-		ws.Close(4029, "rate_limited")
-		return
-	}
 	nb := make([]byte, 16)
 	rand.Read(nb)
 	nonce := b64url.EncodeToString(nb)
@@ -532,21 +555,16 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row := n.row(int64(m.Get2("node_id").(float64)))
-		if row == nil {
+		if row == nil || pre != nil && pre.ID != row.ID {
 			deny()
 			return
 		}
 		pubB64 := row.Pub.String
 		joining := !row.Pub.Valid
 		if joining {
-			secret, sOK := field(m, "join", "secret").(string)
+			secret, _ := field(m, "join", "secret").(string)
 			pub, pOK := field(m, "join", "pub").(string)
-			if row.JoinHash == nil || !row.JoinExpires.Valid || row.JoinExpires.Int64 == 0 || row.JoinExpires.Int64 < now() || !sOK || !pOK {
-				deny()
-				return
-			}
-			h := sha256.Sum256(fromB64url(secret))
-			if len(row.JoinHash) != len(h) || subtle.ConstantTimeCompare(h[:], row.JoinHash) != 1 {
+			if !pOK || !joinOK(row, secret) {
 				deny()
 				return
 			}
@@ -574,6 +592,9 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			closeWS(ws, closeOutdated, "outdated "+MinNodeVersion)
 			return
 		}
+		if pre != nil {
+			n.a.db.Exec("UPDATE nodes SET preauth = 1 WHERE id = ?", row.ID)
+		}
 
 		conn = &nodeConn{ws: ws, alive: true, pending: map[int64]*pending{}}
 		nodeID = row.ID
@@ -593,6 +614,9 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		first := ""
 		if joining {
 			first = " (первое подключение)"
+		}
+		if pre == nil {
+			first += " — без подписи до апгрейда: старый агент, обновите ноду, чтобы хаб скрылся от сканеров"
 		}
 		logf("nodes: «%s» (#%d) подключена%s", row.Name, row.ID, first)
 		go n.refreshHealth(row.ID)
@@ -962,4 +986,16 @@ func (n *Nodes) router() *Router {
 		return c.JSON(200, jsjson.Object{{Key: "success", Val: true}, {Key: "id", Val: id}})
 	})
 	return rt
+}
+
+// randomCN — имя для самоподписанного сертификата: похожее на обычный хост и своё у каждого
+// сервера.
+func randomCN() string {
+	const abc = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 10)
+	rand.Read(b)
+	for i := range b {
+		b[i] = abc[int(b[i])%len(abc)]
+	}
+	return string(b) + ".net"
 }

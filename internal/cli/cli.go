@@ -165,6 +165,9 @@ func New() *CLI {
 			name: "ui", label: "awg-ui", cwd: filepath.Join(c.root, "awg-ui"), legacy: "server.ts",
 			env: [][2]string{
 				{"PORT", env("UI_PORT", "8080")},
+				// Секретный путь панели; _MOVED — путь панели, переехавшей сюда (принимаются оба).
+				{"UI_PREFIX", env("UI_PREFIX", "")},
+				{"UI_PREFIX_MOVED", env("UI_PREFIX_MOVED", "")},
 				{"AWGCTRL_PORT", env("AWGCTRL_PORT", "3005")},
 				{"INTERNAL_AUTH_KEY_FILE", env("INTERNAL_AUTH_KEY_FILE", "/etc/amnezia/amneziawg/internal_auth_private.key")},
 				{"BRAND", c.brand}, {"CHANNEL", c.channel}, {"VERSION", c.version},
@@ -182,6 +185,8 @@ func New() *CLI {
 				{"SUB_HOST", env("SUB_HOST", "")},
 				// Приём нод (core): без NODE_PORT хаб выключен. LOCAL_NODE=off — core без своего VPN.
 				{"NODE_PORT", env("NODE_PORT", "")},
+				// Хаб: пускать ли агентов без подписи до апгрейда (on/off; пусто — пока не обновлены все).
+				{"HUB_LEGACY", env("HUB_LEGACY", "")},
 				// IP ретрансляторов (старый сервер после переноса): им — доверие к заголовку PROXY.
 				{"RELAY_FROM", env("RELAY_FROM", "")},
 				// Reverse-proxy перед панелью (кроме loopback): от них — X-Forwarded-For / X-Real-IP.
@@ -477,10 +482,32 @@ func (c *CLI) serviceLine(name string, menu bool) string {
 	return fmt.Sprintf("  %s %-12s %s", dot, c.svc[name].label, info)
 }
 
+// panelURL — адрес панели с секретным путём; без UI_PORT (нода) — пусто.
+func panelURL() string {
+	port := env("UI_PORT", "")
+	if port == "" {
+		return ""
+	}
+	host := env("SUB_HOST", env("SERVER_IP", "IP"))
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	u := "http://" + host + ":" + port + "/"
+	if p := env("UI_PREFIX", ""); p != "" {
+		u += p + "/"
+	}
+	return u
+}
+
 func (c *CLI) status() {
 	fmt.Println()
 	for _, n := range c.all {
 		fmt.Println(c.serviceLine(n, false))
+	}
+	if contains(c.all, "ui") {
+		if u := panelURL(); u != "" {
+			fmt.Println("  " + dim("Панель "+u))
+		}
 	}
 	if c.isRunning("awgctrl") {
 		h := fetchHealth("http://127.0.0.1:" + c.envOf("awgctrl") + "/health")
@@ -611,10 +638,10 @@ func (c *CLI) confirmYes(q string) bool {
 
 // ── Точка входа ─────────────────────────────────────────────────────────────
 
-const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>>"
+const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>|update|reinstall|uninstall|panel [path new|off|<путь>]|log [seen] [поиск] [-n N]|metrics [token|revoke]|hub [legacy on|off|auto]|check>"
 
 // Commands — команды оператора; main передаёт сюда всё, что не роль сервиса.
-var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate"}
+var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate", "update", "reinstall", "uninstall", "panel", "log", "metrics", "hub", "check"}
 
 // Main выполняет команду CLI (args — без имени бинарника). Пусто — интерактивное меню.
 func Main(args []string) {
@@ -659,6 +686,19 @@ func Main(args []string) {
 		c.peersCmd(sub, hasSub, a2, hasA2)
 	case "monitor":
 		c.monitorCmd(sub)
+	case "panel":
+		c.panelCmd(args[1:])
+	case "log":
+		c.logCmd(args[1:])
+	case "metrics":
+		c.metricsCmd(args[1:])
+	case "hub":
+		c.hubCmd(args[1:])
+	case "check":
+		c.checkCmd()
+	case "update", "reinstall", "uninstall":
+		// Из командной строки — без своего вопроса: установщик сам спросит, что нужно.
+		c.runInstaller(args[0], false)
 	default:
 		fmt.Println(usage)
 		os.Exit(1)

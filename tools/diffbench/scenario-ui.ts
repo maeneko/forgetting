@@ -62,6 +62,7 @@ try {
     await call("login broken json", "POST", "/login", undefined, { raw: "{" });
     const { token } = await call("login", "POST", "/login", { user: "admin", pass: "benchpass" });
     const T = { token };
+    await call("brand auth", "GET", "/ui/brand", undefined, T);
 
     await call("apikeys no auth", "GET", "/ui/apikeys");
     await call("apikeys bad token", "GET", "/ui/apikeys", undefined, { token: "a.b.c" });

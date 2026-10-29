@@ -326,6 +326,30 @@ app.post("/api/masking", (q, r) => {
     r.json(I1_SAMPLES[maskingOf[id]]);
 });
 
+// Журнал подключений (вкладка «Подключения»): несколько событий за двое суток.
+app.get("/ui/connlog", (q, r) => {
+  if (q.query.before) return r.json({ events: [], peers: [], since: null, keep_days: 30 });
+  const now = Math.floor(Date.now() / 1000);
+  const who = [
+    { pub_key: "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5zA7bC9d=", name: "alice", owner: "", ip: "10.9.0.2" },
+    { pub_key: "Zx8Cv6Bn4Mq2We0Rt8Yu6Io4Pa2Sd0Fg8Hj6Kl4Zx2C=", name: "", owner: "mk1", ip: "10.9.0.7", key: "Семья", device: "Pixel 7 Pro" },
+    { pub_key: "Qw1Er3Ty5Ui7Op9As1Df3Gh5Jk7Lz9Xc1Vb3Nm5Qw7E=", name: "bob", owner: "", ip: "10.9.0.3" },
+  ];
+  const events = [
+    { ...who[0], id: 6, at: now - 300, event: "connect" },
+    { ...who[1], id: 5, at: now - 3900, event: "disconnect", duration: 5400, rx: 812e6, tx: 64e6 },
+    { ...who[2], id: 4, at: now - 9000, event: "disconnect", duration: 640, rx: 12e6, tx: 2e6 },
+    { ...who[2], id: 3, at: now - 9640, event: "connect" },
+    { ...who[1], id: 2, at: now - 9300, event: "connect" },
+    { ...who[0], id: 1, at: now - 90000, event: "disconnect", duration: 7200, rx: 2.1e9, tx: 190e6 },
+  ];
+  const peers = [
+    { ...who[0], online: true, last_seen: now - 20 },
+    { ...who[1], online: false, last_seen: now - 3900 },
+    { ...who[2], online: false, last_seen: now - 9000 },
+  ];
+  r.json({ events, peers, since: now - 3 * 86400, keep_days: 30 });
+});
 app.get("/api/users", (q, r) => r.json({ users: U_(q) }));
 // Приоритет в моке: пока на сервере 0 включено деление канала, первый пользователь «фоновый».
 // С меткой «торренты» — тоже фоновый (пока включено деление канала).

@@ -345,8 +345,10 @@ func (s *Server) syncPeers() error {
 func (s *Server) reloadAwgParams() string {
 	p := ReadParams(s.confPath(), func(m string) { s.log.Warn(m) })
 	p.I1 = s.getCfg(cfgI1, p.I1)
+	mtu := ReadMTU(s.confPath())
 	s.cfgMu.Lock()
 	s.c.Params = p
+	s.c.MTU = mtu
 	s.c.Gen = p.Gen()
 	s.c.Keepalive = keepaliveByGen[s.c.Gen]
 	g := s.c.Gen

@@ -91,6 +91,7 @@ func decodeLikeAxios(raw []byte) any {
 
 type App struct {
 	port      int
+	prefixes  []string // UI_PREFIX, UI_PREFIX_MOVED: секретные пути панели (prefix.go)
 	uiUser    string
 	uiPass    string
 	jwtSecret []byte
@@ -131,14 +132,15 @@ func New() (*App, error) {
 		return def
 	}
 	a := &App{
-		port:    envNum("PORT"),
-		uiUser:  envOr("UI_USER", "admin"),
-		uiPass:  os.Getenv("UI_PASS"),
-		brand:   pick("BRAND", "Forgetting"),
-		channel: pick("CHANNEL", "Beta"),
-		version: pick("VERSION", ""),
-		ctrlURL: "http://127.0.0.1:" + envOr("AWGCTRL_PORT", "3005"),
-		baseDir: cwd,
+		port:     envNum("PORT"),
+		prefixes: uiPrefixes(),
+		uiUser:   envOr("UI_USER", "admin"),
+		uiPass:   os.Getenv("UI_PASS"),
+		brand:    pick("BRAND", "Forgetting"),
+		channel:  pick("CHANNEL", "Beta"),
+		version:  pick("VERSION", ""),
+		ctrlURL:  "http://127.0.0.1:" + envOr("AWGCTRL_PORT", "3005"),
+		baseDir:  cwd,
 		// awg-ctrl на loopback: системный прокси сюда не нужен.
 		httpLocal:     &http.Client{Transport: &http.Transport{Proxy: nil}},
 		revoked:       map[string]bool{},
@@ -847,8 +849,9 @@ func (a *App) routes() *Router {
 
 	app.Post("/login", a.login)
 	app.Post("/logout", auth, a.logout)
-	// Единственный роут без авторизации: вордмарк нужен уже на экране логина.
-	app.Get("/ui/brand", func(c *Ctx) bool {
+	// За авторизацией: без неё сканер одним GET узнавал бы, что на порту панель Forgetting.
+	// Экран логина обходится без вордмарка.
+	app.Get("/ui/brand", auth, func(c *Ctx) bool {
 		return c.JSON(200, jsjson.Object{{Key: "brand", Val: a.brand}, {Key: "channel", Val: a.channel}, {Key: "version", Val: a.version}})
 	})
 	app.Get("/ui/apikeys", auth, a.apiKeysList)
@@ -876,6 +879,7 @@ func (a *App) routes() *Router {
 	app.Use("/ui/metrics-token", auth)
 	app.Mount("/ui/metrics-token", a.metrics.router())
 	app.Get("/metrics", a.metrics.requireToken, a.metrics.handler)
+	app.Get("/ui/connlog", auth, a.connlog)
 	app.Use("/ui/monitor", auth)
 	app.Mount("/ui/monitor", a.monitor.router())
 	// Перенос панели: приём архива — без JWT, его пускает только ключ из кода переноса.
@@ -949,7 +953,7 @@ func (a *App) Run() error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: a.routes(), ReadHeaderTimeout: 30 * time.Second}
+	srv := &http.Server{Handler: prefixGate(a.prefixes, a.routes(), a.migration.awaitsImport), ReadHeaderTimeout: 30 * time.Second}
 	logf("ui: listening on :%d", a.port)
 	a.nodes.Start()
 	a.sub.Start()

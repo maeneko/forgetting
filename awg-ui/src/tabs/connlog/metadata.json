@@ -1,0 +1,7 @@
+{
+  "id": "connlog",
+  "label": "Подключения",
+  "icon": "history",
+  "group": "main",
+  "order": 1.5
+}

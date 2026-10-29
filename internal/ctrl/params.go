@@ -70,6 +70,28 @@ var AWG31Defaults = [][2]string{
 	{"MaxHandshakeAttempts", "15-20"},
 }
 
+// DefaultMTU — MTU установок до рандомизации; запасное, если в awg1.conf его нет или оно странное.
+const DefaultMTU = 1376
+
+// ReadMTU читает MTU из [Interface] awg1.conf: install.sh выбирает его случайно, у каждого
+// сервера своё, и клиенты получают его в vpn:// ключе.
+func ReadMTU(confFile string) int {
+	raw, err := os.ReadFile(confFile)
+	if err != nil {
+		return DefaultMTU
+	}
+	iface := pPeerSplit.Split(string(raw), 2)[0]
+	m := regexp.MustCompile(`(?m)^\s*MTU\s*=\s*(\d+)`).FindStringSubmatch(iface)
+	if m == nil {
+		return DefaultMTU
+	}
+	n, _ := strconv.Atoi(m[1])
+	if n < 1280 || n > 1500 {
+		return DefaultMTU
+	}
+	return n
+}
+
 // При заданном HeaderProtectionKey ни один из S1–S4 не может быть меньше 12.
 const minSForHeaderProtection = 12
 

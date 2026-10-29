@@ -117,3 +117,6 @@ LICENSE file in the root directory of this source tree.
     .st-row-ctl { width: 100%; }
     .st-row-ctl .btn { flex: 1; }
 }
+
+/* Фрагмент prometheus.yml в диалоге токена: переносы строк сохраняются */
+.st-yml { white-space: pre-wrap; margin: 0; text-align: left; }
