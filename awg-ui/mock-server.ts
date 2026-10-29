@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.0";
+const MOCK_VERSION = "0.5.1";
 
 // ── пользователи (vpn://) ──
 interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
