@@ -15,6 +15,7 @@ export interface MonitorStatus {
     ready: boolean; can_install: boolean; command: string;
     host: { id: number; name: string } | null;   // Prometheus на ноде (или будет поставлен туда); null — на этом сервере
     job: { action: 'install' | 'remove'; running: boolean; exit: number | null; log: string } | null;   // последняя операция
+    on_node?: boolean;   // панель на ноде другой панели: Prometheus этой машины ставит и читает та
 }
 
 // Прогресс операции из строк «N/M  шаг», которые печатает сам установщик (cli/src/monitor.ts). Шаг N считаем
@@ -81,6 +82,16 @@ export default function PrometheusInstall({ token, showMsg }: PageProps) {
     };
 
     if (!status) return <section className="st-section"><p className="st-hint">Загрузка…</p></section>;
+    if (status.on_node) return (
+        <section className="st-section">
+            <div className="st-row">
+                <span className="st-row-text">
+                    <span className="st-row-name">Встроенный Prometheus</span>
+                    <span className="st-hint">Этот сервер подключён нодой к другой панели. Prometheus на нём собирает её метрики, поэтому ставится, удаляется и смотрится («Монитор») из неё, а не отсюда.</span>
+                </span>
+            </div>
+        </section>
+    );
 
     const job      = status.job;
     const working  = !!pending || !!job?.running || settle !== null;

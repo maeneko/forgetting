@@ -177,9 +177,10 @@ func (c *CLI) monitorInstall() {
 	if !reDebian.MatchString(osFamily()) {
 		mfail("Автоустановка поддерживает только Debian и Ubuntu. На другом дистрибутиве поставьте Prometheus сами и подключите его кнопкой в панели (токен метрик).")
 	}
-	// Нода без своей панели (в том числе сервер, с которого панель переехала): метрики панели
-	// Prometheus получает от агента, а тот — от core.
-	viaAgent := c.isNode && !contains(c.all, "ui")
+	// Нода: метрики панели Prometheus получает от агента, а тот — от core. Так и у ноды со своей
+	// панелью: Prometheus на машине один, и нужен он core — иначе core его не видит (агент
+	// отдаёт /prom/… только при AGENT_METRICS_PORT), а панель ноды обходится без «Монитора».
+	viaAgent := c.isNode
 	target, newPort := os.Getenv("UI_PORT"), false
 	if viaAgent {
 		if target = os.Getenv("AGENT_METRICS_PORT"); target == "" {

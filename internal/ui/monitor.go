@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,6 +82,7 @@ type Monitor struct {
 	a            *App
 	promURL      string
 	localEnabled bool
+	onNode       bool // панель на ноде другой панели: Prometheus этой машины собирает метрики core, не наши
 	http         *http.Client
 
 	srcMu sync.Mutex
@@ -102,6 +104,7 @@ func newMonitor(a *App) *Monitor {
 	return &Monitor{
 		a: a, promURL: envOr("PROM_URL", "http://127.0.0.1:9090"),
 		localEnabled: strings.ToLower(envOr("LOCAL_NODE", "on")) != "off",
+		onNode:       os.Getenv("CORE_HOST") != "",
 		http:         &http.Client{Transport: &http.Transport{Proxy: nil}},
 	}
 }
@@ -132,7 +135,7 @@ func (m *Monitor) forgetSource() {
 }
 
 func (m *Monitor) findSource() *promSource {
-	if m.promReady() {
+	if !m.onNode && m.promReady() {
 		return &promSource{local: true}
 	}
 	ids := m.a.nodes.IDs()
@@ -316,6 +319,8 @@ func (m *Monitor) target(src *promSource, qs url.Values) int {
 	switch {
 	case src != nil && !src.local:
 		return src.node
+	case m.onNode:
+		return -1 // ставит его core: кнопка здесь поставила бы Prometheus для core
 	case m.localEnabled:
 		return 0
 	case src != nil:
@@ -377,7 +382,7 @@ func (m *Monitor) router() *Router {
 			jobOut = jsjson.Object{{Key: "action", Val: job.action}, {Key: "running", Val: job.running}, {Key: "exit", Val: job.exit}, {Key: "log", Val: job.log}}
 		}
 		return c.JSON(200, jsjson.Object{{Key: "ready", Val: ready}, {Key: "can_install", Val: job.can}, {Key: "job", Val: jobOut},
-			{Key: "command", Val: "awg-ctrl monitor install"}, {Key: "host", Val: m.host(target)}})
+			{Key: "command", Val: "awg-ctrl monitor install"}, {Key: "host", Val: m.host(target)}, {Key: "on_node", Val: m.onNode}})
 	})
 	// Установка и удаление — одно и то же: просим awg-ctrl сервера, он запускает CLI от root.
 	ask := func(action string) handler {
