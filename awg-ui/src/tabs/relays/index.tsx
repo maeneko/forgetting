@@ -310,6 +310,11 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
         }
         return `${kindLabel(b.kind)}${b.listen ? ` · :${b.listen}` : ''}`;
     });
+    // В капсуле — только последний привязанный, остальные — «+N»; полный список — в настройках.
+    const lastTarget = targets[targets.length - 1];
+    const restCount = targets.length - 1;
+    const plural = (n: number) =>
+        n % 10 === 1 && n % 100 !== 11 ? 'сервер' : [2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100) ? 'сервера' : 'серверов';
     return (
         <div className={`relay-flow${mode === 'card' ? ' relay-flow--card' : ''}`}>
             <div className="flow-step">
@@ -336,8 +341,11 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
                 <span className="chip chip--online flow-chip">
                     <span className="chip-name"><span className="chip-dot" />Серверы</span>
                     <span className="chip-info">
-                        {targets.length ? (
-                            <span className="flow-targets">{targets.map((t, i) => <span key={i}>{t}</span>)}</span>
+                        {lastTarget ? (
+                            <>
+                                <span>{lastTarget}</span>
+                                {restCount > 0 && <span className="flow-more">+{restCount} {plural(restCount)}</span>}
+                            </>
                         ) : 'привяжите в настройках'}
                     </span>
                 </span>
