@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -264,6 +265,9 @@ func (c *CLI) relayApply(payload string, hasPayload bool) {
 	c.writeEnvFile(content)
 	c.setSvcEnv("relay", "RELAY_UDP", udp)
 	c.setSvcEnv("relay", "RELAY_TCP", tcp)
+	if udp != "" || tcp != "" {
+		c.relayUFW(udp, tcp)
+	}
 	c.stop("relay")
 	if udp != "" || tcp != "" {
 		c.start("relay")
@@ -271,6 +275,34 @@ func (c *CLI) relayApply(payload string, hasPayload bool) {
 	} else {
 		fmt.Printf("  %s Привязок нет: awg-relay остановлен\n", green("✓"))
 	}
+}
+
+// relayUFW — открыть в UFW порты привязок: install.sh о них заранее не знает (привязки
+// пушит панель уже после установки), поэтому фаерволом занимается только что применённый
+// пуш. UFW не установлен или не активен — пропускаем молча: у хозяина фаервол хостера и
+// без UFW он закрывает входящие сам.
+func (c *CLI) relayUFW(udp, tcp string) {
+	if _, err := exec.LookPath("ufw"); err != nil {
+		return
+	}
+	if out, err := exec.Command("ufw", "status").CombinedOutput(); err != nil ||
+		!strings.Contains(strings.ToLower(string(out)), "active") {
+		return
+	}
+	open := func(list, proto string) {
+		for _, part := range strings.Split(list, ",") {
+			port, _, ok := strings.Cut(part, "=")
+			if !ok || !posPort(port) {
+				continue
+			}
+			if err := exec.Command("ufw", "allow", port+"/"+proto).Run(); err == nil {
+				fmt.Printf("  · UFW open %s/%s\n", port, proto)
+			}
+		}
+	}
+	open(udp, "udp")
+	open(tcp, "tcp")
+	exec.Command("ufw", "reload").Run() //nolint:errcheck
 }
 
 // parseRoutes — строка маршрутов «порт=target,порт=target»: у частей валидный порт и адрес.

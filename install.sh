@@ -188,7 +188,7 @@ trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true; exec 3>&-
 # ⚠️ Дублирует .env из репозитория: установщик собирает URL релиза и печатает
 # баннер ДО того, как архив с .env скачан, поэтому взять их оттуда не может.
 # При бампе версии правь оба места.
-VERSION="0.5.3"
+VERSION="0.5.4"
 CHANNEL="${CHANNEL:-Beta}"
 
 # Откуда брать архив и как называется продукт. По умолчанию — релизы на GitHub; источник
@@ -352,8 +352,9 @@ uninstall_all() {
     echo -e "    ${DIM}Будут удалены сервисы, $PROJECT, $AMNEZIA_DIR (пользователи, ключи, базы),${NC}"
     echo -e "    ${DIM}юнит systemd, правила фаервола и логи установки. Выданные ключи перестанут работать.${NC}"
     case "$role" in
-        node) echo -e "    ${DIM}Это нода: после удаления убери сервер и в списке серверов панели.${NC}" ;;
-        *)    [[ -n "$(prev_val NODE_PORT)" ]] && \
+        node)  echo -e "    ${DIM}Это нода: после удаления убери сервер и в списке серверов панели.${NC}" ;;
+        relay) echo -e "    ${DIM}Это релей: после удаления убери его во вкладке «Релеи» панели.${NC}" ;;
+        *)     [[ -n "$(prev_val NODE_PORT)" ]] && \
                   echo -e "    ${DIM}Подключённые к этой панели ноды останутся без панели — их VPN продолжит работать.${NC}" ;;
     esac
     echo
@@ -383,6 +384,19 @@ uninstall_all() {
     for p in UI_PORT SUB_PORT NODE_PORT; do
         [[ -n "$(prev_val "$p")" ]] && ports+=("$(prev_val "$p")/tcp")
     done
+    # Релей: своих портов при установке не было, привязки пушит панель — их порты
+    # лежат в cli.env (RELAY_UDP/RELAY_TCP «порт=цель,…»). Повторное удаление того же
+    # порта в UFW безвредно: ошибка уйдёт в `|| true`.
+    if [[ "$role" == "relay" ]]; then
+        local pv proto pp
+        for pv in "$(prev_val RELAY_UDP)|udp" "$(prev_val RELAY_TCP)|tcp"; do
+            proto="${pv##*|}"; pv="${pv%|*}"
+            [[ -z "$pv" ]] && continue
+            for pp in $(tr ',' '\n' <<< "$pv" | sed -nE 's/^([0-9]+)=.*/\1/p'); do
+                ports+=("${pp}/${proto}")
+            done
+        done
+    fi
     net_iface=$(grep -oE 'POSTROUTING -o [^ ]+' "$conf" 2>/dev/null | head -1 | awk '{print $3}' || true)
 
     info "остановка сервисов"
@@ -670,11 +684,12 @@ setup_service() {
     # sbin в PATH юнита: awg-quick зовёт iptables/ip/sysctl.
     local pre="" what
     # Панели без VPN (core) интерфейс не нужен — ExecStartPre только там, где есть awg-ctrl.
-    [[ "$ROLE" != "core" ]] && pre="ExecStartPre=/bin/sh -c 'awg show ${IFACE} >/dev/null 2>&1 || awg-quick up ${IFACE}'"
+    [[ "$HAS_VPN" == 1 ]] && pre="ExecStartPre=/bin/sh -c 'awg show ${IFACE} >/dev/null 2>&1 || awg-quick up ${IFACE}'"
     case "$ROLE" in
-        core) what="awg-ui" ;;
-        node) what="awg-ctrl + awg-agent" ;;
-        *)    what="awg-ctrl + awg-ui" ;;
+        core)  what="awg-ui" ;;
+        node)  what="awg-ctrl + awg-agent" ;;
+        relay) what="awg-relay + awg-agent" ;;
+        *)     what="awg-ctrl + awg-ui" ;;
     esac
     cat > "$SERVICE_UNIT" <<UNIT
 [Unit]
@@ -714,13 +729,16 @@ start_and_status() {
     "$BIN" status
 }
 
-# Нода: к какой панели подключаться. Строку awgjoin://… даёт панель («Добавить сервер»):
-# base64url от JSON {v, h, p, pin, n, s}. Разбираем здесь, до установки, чтобы опечатка не
-# обнаружилась через десять минут сборки модуля. Значения в строке ограничены
-# [A-Za-z0-9.:_-], поэтому JSON без экранирования и sed его разбирает надёжно.
+# Нода и релей: к какой панели подключаться. Строку даёт панель: awgjoin://… («Добавить
+# сервер») у ноды, awgrelay://… («Добавить релей») у релея — в обеих base64url от JSON
+# {v, h, p, pin, n, s} (у релея без маршрутов: привязки пушит панель уже после установки).
+# Разбираем здесь, до установки, чтобы опечатка не обнаружилась через десять минут сборки
+# модуля. Значения в строке ограничены [A-Za-z0-9.:_-], поэтому JSON без экранирования и
+# sed его разбирает надёжно.
 parse_join() {
-    local b64="${1#awgjoin://}" json
-    [[ "$1" == awgjoin://* && "$b64" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
+    [[ "$1" == awgjoin://* || "$1" == awgrelay://* ]] || return 1
+    local b64="${1#*://}" json
+    [[ "$b64" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
     b64=$(tr '_-' '/+' <<< "$b64")
     while (( ${#b64} % 4 )); do b64+="="; done
     json=$(base64 -d <<< "$b64" 2>/dev/null) || return 1
@@ -832,14 +850,24 @@ iptables_input_closed() {
 # Фаервол хостера (панель провайдера, security group) отсюда не виден — о нём напоминаем в итоге.
 open_firewall() {
     local P
+    # У релея своих входящих портов нет: порты привязок панель открывает сама при пуше
+    # (см. Го-сторону `relay-apply`). Пустой список — значит, и открывать нечего.
+    if (( ${#OPEN_PORTS[@]} == 0 )); then
+        if [[ "$ROLE" == "relay" ]]; then
+            info "Входящих портов не требуется — порты привязок откроет панель при пуше"
+        else
+            info "Входящих портов не требуется"
+        fi
+        return
+    fi
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi '^Status: active'; then
         # UFW. PostUp делает `iptables -A FORWARD` — правило ДОПИСЫВАЕТСЯ в конец
         # цепочки, а UFW вставляет свои переходы в начало, поэтому до нашего ACCEPT
         # дело не доходит и трафик клиентов наружу режется: в dmesg сыплется
         # «[UFW BLOCK] IN=awg1 OUT=eth0». Симптом — «VPN подключается, интернета нет».
         # Лечится штатным `ufw route allow`, менять DEFAULT_FORWARD_POLICY не нужно.
-        info "UFW активен, открываем $([[ "$ROLE" != "core" ]] && echo "маршрут и ")порты"
-        if [[ "$ROLE" != "core" ]]; then
+        info "UFW активен, открываем $([[ "$HAS_VPN" == 1 ]] && echo "маршрут и ")порты"
+        if [[ "$HAS_VPN" == 1 ]]; then
             run ufw route allow in on "$IFACE" out on "$NET_IFACE" \
                 || warn "ufw route allow не сработал — трафик клиентов может резаться"
         fi
@@ -847,7 +875,7 @@ open_firewall() {
             run ufw allow "$P" || warn "не удалось открыть $P"
         done
         run ufw reload || true
-        ok "UFW:$([[ "$ROLE" != "core" ]] && echo " форвардинг $IFACE → $NET_IFACE,") порты ${OPEN_PORTS[*]}"
+        ok "UFW:$([[ "$HAS_VPN" == 1 ]] && echo " форвардинг $IFACE → $NET_IFACE,") порты ${OPEN_PORTS[*]}"
     elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
         info "firewalld активен, открываем порты"
         for P in "${OPEN_PORTS[@]}"; do
@@ -855,7 +883,7 @@ open_firewall() {
         done
         run firewall-cmd --reload || true
         ok "firewalld: порты ${OPEN_PORTS[*]}"
-        if [[ "$ROLE" != "core" ]]; then
+        if [[ "$HAS_VPN" == 1 ]]; then
             warn "Если VPN подключается, а интернета нет — firewalld режет форвардинг:"
             warn "  firewall-cmd --permanent --zone=trusted --add-interface=${IFACE} && firewall-cmd --reload"
         fi
@@ -993,9 +1021,11 @@ PREV_CLI_ENV=""
 [[ -f "$PROJECT/cli/cli.env" ]] && PREV_CLI_ENV=$(cat "$PROJECT/cli/cli.env")
 PREV_ROLE=""
 if [[ -n "$PREV_CLI_ENV" ]]; then
-    if   [[ -n "$(prev_val CORE_HOST)" ]];        then PREV_ROLE="node"
-    elif [[ "$(prev_val LOCAL_NODE)" == "off" ]]; then PREV_ROLE="core"
-    else                                               PREV_ROLE="standalone"
+    # Релей тоже знает CORE_HOST — NODE_ROLE (его пишет CLI по awgrelay://) различает раньше.
+    if   [[ "$(prev_val NODE_ROLE)" == "relay" ]];  then PREV_ROLE="relay"
+    elif [[ -n "$(prev_val CORE_HOST)" ]];          then PREV_ROLE="node"
+    elif [[ "$(prev_val LOCAL_NODE)" == "off" ]];   then PREV_ROLE="core"
+    else                                                 PREV_ROLE="standalone"
     fi
 fi
 
@@ -1010,6 +1040,10 @@ fi
 #   node       — VPN без панели: awg-ctrl + awg-agent, который сам подключается к панели
 #                по строке awgjoin://… («Добавить сервер» в панели). Входящих портов,
 #                кроме UDP для клиентов, нода не открывает.
+#   relay      — только пересылка: ни VPN, ни панели. Ставятся awg-relay и агент,
+#                который подключается к панели по строке awgrelay://… («Добавить релей»).
+#                Привязки серверов панель пушит агенту уже после установки: своих
+#                входящих портов у релея при установке нет.
 # Можно задать окружением: ROLE=node JOIN='awgjoin://…' bash install.sh
 # При обновлении роль берётся из прежней установки: смена роли — только переустановкой.
 ROLE="${ROLE:-}"
@@ -1019,26 +1053,33 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     fi
     ROLE="${PREV_ROLE:-standalone}"
 elif [[ -z "$ROLE" ]]; then
-    case "$PREV_ROLE" in node) ROLE_DEF=3 ;; core) ROLE_DEF=2 ;; *) ROLE_DEF=1 ;; esac
+    case "$PREV_ROLE" in node) ROLE_DEF=3 ;; core) ROLE_DEF=2 ;; relay) ROLE_DEF=4 ;; *) ROLE_DEF=1 ;; esac
     echo
     echo -e "  ${BLD}Роль сервера${NC}"
     echo -e "    ${ACC}${BLD}1${NC}  Панель + VPN    ${DIM}самостоятельный сервер; к нему можно подключать ноды${NC}"
     echo -e "    ${ACC}${BLD}2${NC}  Только панель   ${DIM}без VPN на этой машине; серверы подключаются нодами${NC}"
     echo -e "    ${ACC}${BLD}3${NC}  Нода            ${DIM}VPN без панели; подключается к уже установленной${NC}"
-    ask ROLE_CHOICE "Выбери [1–3, Enter — ${ROLE_DEF}]: "
+    echo -e "    ${ACC}${BLD}4${NC}  Релей           ${DIM}только пересылка: без VPN и панели (экспериментальная)${NC}"
+    ask ROLE_CHOICE "Выбери [1–4, Enter — ${ROLE_DEF}]: "
     case "${ROLE_CHOICE:-$ROLE_DEF}" in
         1) ROLE="standalone" ;;
         2) ROLE="core" ;;
         3) ROLE="node" ;;
-        *) fail "Неверный выбор: введи 1, 2 или 3" ;;
+        4) ROLE="relay" ;;
+        *) fail "Неверный выбор: введи 1, 2, 3 или 4" ;;
     esac
 fi
-[[ "$ROLE" =~ ^(standalone|core|node)$ ]] || fail "ROLE должен быть standalone, core или node (задано: $ROLE)"
+[[ "$ROLE" =~ ^(standalone|core|node|relay)$ ]] || fail "ROLE должен быть standalone, core, node или relay (задано: $ROLE)"
 case "$ROLE" in
     standalone) ROLE_LABEL="панель + VPN" ;;
     core)       ROLE_LABEL="только панель" ;;
     node)       ROLE_LABEL="нода" ;;
+    relay)      ROLE_LABEL="релей" ;;
 esac
+# Двойных ролевых условий дальше много: HAS_VPN — свой AmneziaWG (модуль, интерфейс,
+# ключи сервера, sysctl), HAS_PANEL — своя панель (awg-ui, подписка sen://, приём нод).
+HAS_VPN=$([[ "$ROLE" == "standalone" || "$ROLE" == "node" ]] && echo 1 || echo 0)
+HAS_PANEL=$([[ "$ROLE" == "standalone" || "$ROLE" == "core" ]] && echo 1 || echo 0)
 
 # Запускается ДО вопросов конфигурации и любого деструктива (rm -rf): на несовместимой
 # машине лучше упасть сразу, а не после ввода данных или удаления каталога.
@@ -1101,7 +1142,7 @@ fi
 
 # Виртуализация и заголовки нужны только для модуля ядра — панели без VPN (core) они не важны,
 # её можно ставить и в контейнер.
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     # 1) Виртуализация: kernel-модуль нельзя загрузить там, где ядро общее с хостом.
     case "$VIRT" in
         openvz|lxc|lxc-libvirt|docker|podman|wsl)
@@ -1140,7 +1181,7 @@ done
 
 mark "$OS_OK"   "Дистрибутив"
 mark "$ARCH_OK" "Архитектура"
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     mark "$VIRT_OK" "Виртуализация"
     mark "$HDR_OK"  "Заголовки ядра"
 fi
@@ -1177,7 +1218,7 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     # обновление не переписывает, поэтому дописываем одну строку.
     UI_PREFIX_NEW="n"
     UI_PREFIX="${UI_PREFIX:-}"
-    if [[ "$ROLE" != "node" ]]; then
+    if [[ "$HAS_PANEL" == 1 ]]; then
         CLI_ENV="$PROJECT/cli/cli.env"
         if ! grep -q '^UI_PREFIX=' "$CLI_ENV" 2>/dev/null && [[ "$UI_PREFIX" != "off" ]]; then
             UI_PREFIX="${UI_PREFIX:-$(rand_alnum 16)}"
@@ -1196,7 +1237,7 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     card_line "$GRN"
     card_line "$GRN" "${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}   ${DIM}${BRAND} · ${ROLE_LABEL}${NC}"
     card_line "$GRN"
-    if [[ "$ROLE" != "node" ]]; then
+    if [[ "$HAS_PANEL" == 1 ]]; then
         HOST="$(prev_val SUB_HOST)"; HOST="${HOST:-$(prev_val SERVER_IP)}"
         card_line "$GRN" "${DIM}Панель   ${NC} ${BLD}$(panel_url "${HOST:-IP}" "$(prev_val UI_PORT)" "$UI_PREFIX")${NC}"
         if [[ "$UI_PREFIX_NEW" == "y" ]]; then
@@ -1253,7 +1294,7 @@ fi
 UI_PORT="${UI_PORT:-}"; UI_USER="${UI_USER:-}"; UI_PASS="${UI_PASS:-}"
 SUB_PORT="${SUB_PORT:-}"; SUB_TLS="${SUB_TLS:-}"; NODE_PORT="${NODE_PORT:-}"
 JWT_SECRET=""
-if [[ "$ROLE" != "node" ]]; then
+if [[ "$HAS_PANEL" == 1 ]]; then
     DEF=$(keep UI_PORT); DEF="${DEF:-$(gen_tcp_port)}"
     ask_def UI_PORT "Порт панели [$DEF]: " "$DEF"
     valid_port "$UI_PORT" || fail "Порт панели «$UI_PORT» — не номер порта"
@@ -1309,9 +1350,9 @@ fi
 AWGCTRL_PORT=$(gen_tcp_port "${UI_PORT:-}" "${SUB_PORT:-}" "${NODE_PORT:-}")
 
 # Порт, MTU и параметры обфускации VPN (choose_awg_params).
-[[ "$ROLE" != "core" ]] && choose_awg_params
+[[ "$HAS_VPN" == 1 ]] && choose_awg_params
 
-if [[ "$ROLE" != "node" ]]; then
+if [[ "$HAS_PANEL" == 1 ]]; then
     # Секретный путь панели: снаружи она отвечает только на http://IP:PORT/<путь>/, на остальное —
     # 404, как пустой сервер. Без него сканер узнавал панель по странице логина одним GET.
     # При переустановке путь прежний; UI_PREFIX=off — без пути, UI_PREFIX=<свой> — свой
@@ -1333,26 +1374,33 @@ if [[ "$ROLE" != "node" ]]; then
     UI_PREFIX_MOVED=$(keep UI_PREFIX_MOVED)
 fi
 
-# Нода: к какой панели подключаться (строка awgjoin://… из «Добавить сервер» в панели).
+# Нода и релей: подключение к панели. Релей ставится на отдельную машину, которая только
+# пересылает пакеты, поэтому путь тот же, что у ноды, но со строкой awgrelay://.
 CORE_HOST=""; CORE_PORT=""; CORE_PIN=""; NODE_ID=""; JOIN_SECRET=""
-if [[ "$ROLE" == "node" ]]; then
+if [[ "$ROLE" == "node" || "$ROLE" == "relay" ]]; then
     JOIN="${JOIN:-}"
-    # Переустановка ноды: ключ ноды на месте, панель её уже знает — можно не выпускать
-    # новую строку, а оставить прежнее подключение.
-    if [[ -z "$JOIN" && "$WIPE" != "y" && "$PREV_ROLE" == "node" && -n "$(prev_val CORE_HOST)" && -f "$NODE_KEY_FILE" ]]; then
-        ask KJ "Оставить подключение к панели $(prev_val CORE_HOST):$(prev_val CORE_PORT) (нода #$(prev_val NODE_ID))? [Y/n]: "
+    # Переустановка: подключение уже настроено и ключ на месте — можно не перевыписывать
+    # строку, а оставить прежнюю привязку к панели.
+    if [[ -z "$JOIN" && "$WIPE" != "y" && ( "$PREV_ROLE" == "node" || "$PREV_ROLE" == "relay" ) && -n "$(prev_val CORE_HOST)" && -f "$NODE_KEY_FILE" ]]; then
+        ask KJ "Оставить подключение к панели $(prev_val CORE_HOST):$(prev_val CORE_PORT) ($ROLE_LABEL #$(prev_val NODE_ID))? [Y/n]: "
         if [[ "${KJ:-y}" =~ ^[Yy]$ ]]; then
             CORE_HOST="$(prev_val CORE_HOST)"; CORE_PORT="$(prev_val CORE_PORT)"
             CORE_PIN="$(prev_val CORE_PIN)";   NODE_ID="$(prev_val NODE_ID)"
-            JOIN_SECRET="$(prev_val JOIN_SECRET)"   # пусто, если нода уже подключалась
+            JOIN_SECRET="$(prev_val JOIN_SECRET)"   # пусто, если уже подключался
         fi
     fi
     if [[ -z "$CORE_HOST" ]]; then
-        [[ -z "$JOIN" ]] && ask JOIN "Строка подключения к панели (awgjoin://…): "
+        if [[ -z "$JOIN" ]]; then
+            if [[ "$ROLE" == "relay" ]]; then
+                ask JOIN "Строка подключения к панели (awgrelay://…): "
+            else
+                ask JOIN "Строка подключения к панели (awgjoin://…): "
+            fi
+        fi
         parse_join "$JOIN" \
-            || fail "Строка подключения повреждена — возьми новую в панели: «Добавить сервер»"
+            || fail "Строка подключения повреждена — возьми новую в панели: «$([[ "$ROLE" == "relay" ]] && echo "Добавить релей" || echo "Добавить сервер")»"
     fi
-    ok "Панель: $CORE_HOST:$CORE_PORT · нода #$NODE_ID"
+    ok "Панель: $CORE_HOST:$CORE_PORT · $ROLE_LABEL #$NODE_ID"
 
     # Проверяем сразу: отпечаток не совпал — это не та панель (или соединение перехвачено),
     # ставить дальше нет смысла. Не ответила — не страшно: агент подключится, когда будет связь.
@@ -1370,7 +1418,7 @@ fi
 # Имя сервера — только там, где есть VPN. При сохранённой базе имя хранится в ней (его меняют
 # в панели) — не спрашиваем; иначе спрашиваем, по умолчанию прежнее.
 SERVER_NAME="${SERVER_NAME:-}"
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     if [[ "$KEEP_DATA" == "y" ]]; then
         SERVER_NAME="${SERVER_NAME:-$(prev_val SERVER_NAME)}"
         info "Имя сервера — из сохранённой базы"
@@ -1388,11 +1436,11 @@ card_line "$ACC" "${BLD}Будет установлено${NC}"
 card_line "$ACC"
 card_line "$ACC" "${DIM}Роль           ${NC} ${BLD}$ROLE_LABEL${NC}"
 card_line "$ACC" "${DIM}Адрес          ${NC} $SERVER_IP  ${DIM}· интерфейс $NET_IFACE${NC}"
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     card_line "$ACC" "${DIM}Имя сервера    ${NC} $SERVER_NAME"
     card_line "$ACC" "${DIM}VPN            ${NC} ${AWG_PORT}/udp  ${DIM}· MTU ${MTU}${NC}"
 fi
-if [[ "$ROLE" != "node" ]]; then
+if [[ "$HAS_PANEL" == 1 ]]; then
     card_line "$ACC" "${DIM}Панель         ${NC} ${UI_PORT}/tcp  ${DIM}· логин $UI_USER · $([[ -n "$UI_PREFIX" ]] && echo "секретный путь" || echo "без секретного пути")${NC}"
     card_line "$ACC" "${DIM}Подписка sen://${NC} ${SUB_PORT}/tcp  ${DIM}· $([[ "$SUB_TLS" == "on" ]] && echo "HTTPS" || echo "HTTP, ответы подписаны")${NC}"
     if [[ -n "$NODE_PORT" ]]; then
@@ -1401,7 +1449,7 @@ if [[ "$ROLE" != "node" ]]; then
         card_line "$ACC" "${DIM}Приём нод      ${NC} ${DIM}выключен${NC}"
     fi
 else
-    card_line "$ACC" "${DIM}Панель         ${NC} $CORE_HOST:$CORE_PORT  ${DIM}· нода #$NODE_ID${NC}"
+    card_line "$ACC" "${DIM}Панель         ${NC} $CORE_HOST:$CORE_PORT  ${DIM}· $ROLE_LABEL #$NODE_ID${NC}"
 fi
 if [[ "$KEEP_DATA" == "y" ]]; then
     if [[ "$ROLE" == "core" ]]; then
@@ -1411,7 +1459,7 @@ if [[ "$KEEP_DATA" == "y" ]]; then
     fi
 elif [[ "$WIPE" == "y" ]]; then
     card_line "$ACC" "${DIM}Данные         ${NC} ${RED}все ключи и данные удаляются${NC} ${DIM}(устаревшая версия ${PREV_VERSION:-?}; базы — в бэкап)${NC}"
-elif [[ "$ROLE" != "core" && -f "$DB_FILE" ]] || [[ "$ROLE" == "core" && -f "$UI_DB_FILE" ]]; then
+elif [[ "$HAS_VPN" == 1 && -f "$DB_FILE" ]] || [[ "$ROLE" == "core" && -f "$UI_DB_FILE" ]]; then
     card_line "$ACC" "${DIM}Данные         ${NC} ${YLW}с нуля, старая база уйдёт в бэкап${NC}"
 fi
 card_line "$ACC" "${DIM}Каталог        ${NC} ${DIM}$PROJECT${NC}"
@@ -1433,8 +1481,8 @@ fi
 # секции «Проверка совместимости»; $KERNEL задан там же.
 step "1/6  AmneziaWG"
 
-if [[ "$ROLE" == "core" ]]; then
-    skip "пропущено — у панели без VPN AmneziaWG не нужен"
+if [[ "$HAS_VPN" != 1 ]]; then
+    skip "пропущено — $([[ "$ROLE" == "relay" ]] && echo "релей только пересылает пакеты, ему не нужен VPN" || echo "у панели без VPN AmneziaWG не нужен")"
 else
 
     if command -v awg &>/dev/null && command -v awg-quick &>/dev/null && modinfo amneziawg &>/dev/null; then
@@ -1615,7 +1663,7 @@ if [[ "$KEEP_DATA" != "y" && -f "$UI_DB_FILE" ]]; then
 fi
 
 # Ключ сервера и база пользователей — только там, где есть VPN.
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     AWG_BIN=$(which awg || echo /usr/bin/awg)
 
     if [[ "$KEEP_DATA" == "y" ]]; then
@@ -1655,7 +1703,7 @@ chmod 600 "$INTERNAL_AUTH_PRIV" "$INTERNAL_AUTH_PUB"
 ok "Ключи внутренней авторизации awg-ui ↔ awg-ctrl"
 
 # Подписка sen:// живёт в панели — у ноды её нет.
-if [[ "$ROLE" != "node" ]]; then
+if [[ "$HAS_PANEL" == 1 ]]; then
     # Подписка sen://. ⚠️ Существующие файлы при KEEP_DATA=y сохраняем: публичный ключ подписи и
     # отпечаток сертификата зашиты во все выданные ссылки, новый ключ сломал бы каждую. При чистой
     # установке ui.db уходит в бэкап (старые мастер-ключи всё равно недействительны) — ключи новые.
@@ -1682,7 +1730,7 @@ if [[ "$ROLE" != "node" ]]; then
     fi
 fi
 
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     # Свой файл в /etc/sysctl.d, а не /etc/sysctl.conf: в Debian 13 systemd-sysctl
     # /etc/sysctl.conf при загрузке больше не читает — forwarding включился бы
     # только до первой перезагрузки, и клиенты остались бы без интернета.
@@ -1764,10 +1812,10 @@ fi
 
 step "4/6  Запуск AWG"
 
-if [[ "$ROLE" == "core" ]]; then
-    skip "пропущено — у панели без VPN интерфейса нет"
+if [[ "$HAS_VPN" != 1 ]]; then
+    skip "пропущено — $([[ "$ROLE" == "relay" ]] && echo "у релея" || echo "у панели без VPN") интерфейса нет"
     if command -v awg &>/dev/null && awg show "$IFACE" &>/dev/null; then
-        warn "Интерфейс $IFACE от прошлой установки ещё поднят — панель его не использует."
+        warn "Интерфейс $IFACE от прошлой установки ещё поднят — он не используется."
         warn "Опустить: awg-quick down $IFACE"
     fi
 else
@@ -1851,24 +1899,26 @@ fi
 step "5/6  Фаервол"
 
 # Порты, которые должны быть доступны снаружи. Нода открывает только UDP для клиентов: к панели
-# она подключается сама.
+# она подключается сама. У релея входящих портов при установке нет — порты привязок панель
+# откроет сама при пуше.
 OPEN_PORTS=()
-[[ "$ROLE" != "core" ]] && OPEN_PORTS+=("${AWG_PORT}/udp")
-[[ "$ROLE" != "node" ]] && OPEN_PORTS+=("${UI_PORT}/tcp" "${SUB_PORT}/tcp")
-[[ "$ROLE" != "node" && -n "$NODE_PORT" ]] && OPEN_PORTS+=("${NODE_PORT}/tcp")
+[[ "$HAS_VPN" == 1 ]] && OPEN_PORTS+=("${AWG_PORT}/udp")
+[[ "$HAS_PANEL" == 1 ]] && OPEN_PORTS+=("${UI_PORT}/tcp" "${SUB_PORT}/tcp")
+[[ "$HAS_PANEL" == 1 && -n "$NODE_PORT" ]] && OPEN_PORTS+=("${NODE_PORT}/tcp")
 open_firewall
 
 step "6/6  Запуск сервисов"
 
 install_command
 # cli.env по роли. Роль CLI узнаёт отсюда же: CORE_HOST → нода (awg-ctrl + awg-agent),
-# LOCAL_NODE=off → панель без VPN (только awg-ui), иначе — awg-ctrl + awg-ui.
+# NODE_ROLE=relay → релей (awg-relay + агент), LOCAL_NODE=off → панель без VPN (awg-ui),
+# иначе — awg-ctrl + awg-ui.
 {
 cat <<ENV
 # Generated by install.sh — $(date -u '+%Y-%m-%d %H:%M UTC') · роль: ${ROLE}
 ENV
 
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
 cat <<ENV
 
 # ── awgctrl (Ring 0) ──────────────────────────────────────────────────────
@@ -1886,7 +1936,7 @@ INTERNAL_AUTH_KEY_FILE=${INTERNAL_AUTH_PRIV}
 INTERNAL_AUTH_PUB_FILE=${INTERNAL_AUTH_PUB}
 ENV
 
-if [[ "$ROLE" != "node" ]]; then
+if [[ "$HAS_PANEL" == 1 ]]; then
 cat <<ENV
 
 # ── ui (Ring 4) ───────────────────────────────────────────────────────────
@@ -1913,11 +1963,12 @@ LOCAL_NODE=$([[ "$ROLE" == "core" ]] && echo off || echo on)
 ENV
 fi
 
-# JOIN_SECRET одноразовый: агент сам сотрёт его отсюда после первого подключения.
-if [[ "$ROLE" == "node" ]]; then
+# Привязки не в строке: панель пушит их агенту (RELAY_UDP/RELAY_TCP) уже после установки,
+# а `awg-ctrl join awgrelay://…` пишет здесь ровно то же, плюс NODE_ROLE для CLI.
+if [[ "$ROLE" == "node" || "$ROLE" == "relay" ]]; then
 cat <<ENV
 
-# ── нода: подключение к панели (из строки awgjoin://…) ─────────────────────
+# ── нода: подключение к панели (из строки awgjoin://… / awgrelay://…) ──────
 CORE_HOST=${CORE_HOST}
 CORE_PORT=${CORE_PORT}
 CORE_PIN=${CORE_PIN}
@@ -1925,6 +1976,15 @@ NODE_ID=${NODE_ID}
 NODE_KEY_FILE=${NODE_KEY_FILE}
 JOIN_SECRET=${JOIN_SECRET}
 ENV
+if [[ "$ROLE" == "relay" ]]; then
+cat <<ENV
+# Роль «релей»: CLI запускает awg-relay (когда панель запушит привязки) и агента,
+# VPN и панели здесь нет.
+NODE_ROLE=relay
+NODE_PANEL=off
+LOCAL_NODE=off
+ENV
+fi
 fi
 } > "$PROJECT/cli/cli.env"
 
@@ -1941,18 +2001,18 @@ AGENT_LOG_FROM=$(( $(wc -l 2>/dev/null < "$AGENT_LOG" || echo 0) + 1 ))
 
 start_and_status
 
-# Нода: ждём, пока агент подключится к панели — иначе оператор узнает о проблеме,
-# только когда не увидит сервер в панели.
-if [[ "$ROLE" == "node" ]]; then
+# Нода и релей: ждём, пока агент подключится к панели — иначе оператор узнает о проблеме,
+# только когда не увидит её в панели.
+if [[ "$ROLE" == "node" || "$ROLE" == "relay" ]]; then
     NODE_UP="n"
     for _ in $(seq 1 15); do
         if tail -n "+$AGENT_LOG_FROM" "$AGENT_LOG" 2>/dev/null | grep -q "подключено к core"; then NODE_UP="y"; break; fi
         sleep 1
     done
     if [[ "$NODE_UP" == "y" ]]; then
-        ok "Нода подключилась к панели $CORE_HOST:$CORE_PORT"
+        ok "${ROLE_LABEL^} подключилась к панели $CORE_HOST:$CORE_PORT"
     else
-        warn "Нода пока не подключилась к панели."
+        warn "Агент пока не подключился к панели."
         if [[ -s "$AGENT_LOG" ]]; then
             info "$AGENT_LOG — последние строки"
             tail -n "+$AGENT_LOG_FROM" "$AGENT_LOG" 2>/dev/null | tail -n 5 | logblock || true
@@ -1966,7 +2026,7 @@ echo
 card_line "$GRN"
 card_line "$GRN" "${GRN}${BLD}✓ Готово${NC}   ${DIM}${BRAND} ${VERSION} · ${ROLE_LABEL}${NC}"
 card_line "$GRN"
-if [[ "$ROLE" != "node" ]]; then
+if [[ "$HAS_PANEL" == 1 ]]; then
     card_line "$GRN" "${DIM}Панель   ${NC} ${BLD}$(panel_url "$SERVER_IP" "$UI_PORT" "$UI_PREFIX")${NC}"
     if [[ -n "$UI_PREFIX" ]]; then
         card_line "$GRN" "         ${DIM}секретный путь: без него панель отвечает 404 — сохрани адрес целиком${NC}"
@@ -1979,19 +2039,27 @@ if [[ "$ROLE" != "node" ]]; then
     card_line "$GRN" "${DIM}sen://   ${NC} $([[ "$SUB_TLS" == "on" ]] && echo https || echo http)://${SERVER_IP}:${SUB_PORT}  ${DIM}подписка SenAWG${NC}"
     [[ -n "$NODE_PORT" ]] && card_line "$GRN" "${DIM}Ноды     ${NC} wss://${SERVER_IP}:${NODE_PORT}  ${DIM}«Добавить сервер» в панели${NC}"
 fi
-if [[ "$ROLE" != "core" ]]; then
+if [[ "$HAS_VPN" == 1 ]]; then
     card_line "$GRN" "${DIM}VPN      ${NC} ${SERVER_IP}:${AWG_PORT}/udp  ${DIM}· awg-ctrl на 127.0.0.1:${AWGCTRL_PORT}${NC}"
 fi
-if [[ "$ROLE" == "node" ]]; then
+if [[ "$ROLE" == "node" || "$ROLE" == "relay" ]]; then
     card_line "$GRN" "${DIM}Панель   ${NC} wss://${CORE_HOST}:${CORE_PORT}  ${DIM}исходящее подключение${NC}"
     card_line "$GRN"
-    card_line "$GRN" "Сервер «${SERVER_NAME}» появится в списке серверов панели — управляй им оттуда."
+    if [[ "$ROLE" == "relay" ]]; then
+        card_line "$GRN" "Релей появится во вкладке «Релеи» панели — привяжи к нему серверы в настройках."
+        card_line "$GRN" "Порты привязок панель откроет в UFW сама, когда запушит их агенту."
+    else
+        card_line "$GRN" "Сервер «${SERVER_NAME}» появится в списке серверов панели — управляй им оттуда."
+    fi
 fi
 card_line "$GRN"
 echo
 card_line "$YLW" "${YLW}⚠${NC}  Если у хостера свой фаервол (панель провайдера, security group) — открой там:"
 card_line "$YLW" "   ${BLD}${OPEN_PORTS[*]}${NC}"
 card_line "$YLW" "   ${DIM}иначе клиенты не подключатся, а на сервере всё будет выглядеть исправным${NC}"
+if [[ "$ROLE" == "relay" ]]; then
+    card_line "$YLW" "   ${DIM}у релея списка нет: порты привязок панель откроет сама при пуше (UFW)${NC}"
+fi
 echo
 echo -e "    ${DIM}awg-ctrl                     ${NC} меню: запуск, статус, логин и пароль, обновление и удаление"
 echo -e "    ${DIM}awg-ctrl status              ${NC} состояние сервисов и адрес панели"
