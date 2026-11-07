@@ -313,8 +313,10 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
     return (
         <div className={`relay-flow${mode === 'card' ? ' relay-flow--card' : ''}`}>
             <div className="flow-step">
-                <span className="chip chip--online flow-chip"><span className="chip-dot" />Панель</span>
-                <span className="flow-hint">привязки и пуш агенту</span>
+                <span className="chip chip--online flow-chip">
+                    <span className="chip-name"><span className="chip-dot" />Панель</span>
+                    <span className="chip-info">привязки и пуш агенту</span>
+                </span>
             </div>
             <div className="flow-link">
                 <span className="flow-arr">⟶</span>
@@ -322,20 +324,22 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
             </div>
             <div className="flow-step">
                 <span className={`chip chip--${relay.online ? 'online' : 'offline'} flow-chip`}>
-                    <span className="chip-dot" />{relay.name}
+                    <span className="chip-name"><span className="chip-dot" />{relay.name}</span>
+                    <span className="chip-info">{state}</span>
                 </span>
-                <span className="flow-hint">{state}</span>
             </div>
             <div className="flow-link">
                 <span className="flow-arr">⟶</span>
                 <span className="flow-what">пересылка udp/tcp</span>
             </div>
             <div className="flow-step">
-                <span className="chip chip--online flow-chip"><span className="chip-dot" />Серверы</span>
-                <span className="flow-hint">
-                    {targets.length ? (
-                        <span className="flow-targets">{targets.map((t, i) => <span key={i}>{t}</span>)}</span>
-                    ) : 'привяжите в настройках релея'}
+                <span className="chip chip--online flow-chip">
+                    <span className="chip-name"><span className="chip-dot" />Серверы</span>
+                    <span className="chip-info">
+                        {targets.length ? (
+                            <span className="flow-targets">{targets.map((t, i) => <span key={i}>{t}</span>)}</span>
+                        ) : 'привяжите в настройках'}
+                    </span>
                 </span>
             </div>
         </div>
