@@ -325,7 +325,6 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
             </div>
             <div className="flow-link">
                 <span className="flow-arr">⟶</span>
-                <span className="flow-what">строка + привязки</span>
             </div>
             <div className="flow-step">
                 <span className={`chip chip--${relay.online ? 'online' : 'offline'} flow-chip`}>
@@ -335,7 +334,6 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
             </div>
             <div className="flow-link">
                 <span className="flow-arr">⟶</span>
-                <span className="flow-what">пересылка udp/tcp</span>
             </div>
             <div className="flow-step">
                 <span className="chip chip--online flow-chip">
