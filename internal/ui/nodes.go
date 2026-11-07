@@ -68,17 +68,22 @@ type nodeRow struct {
 	CreatedAt   int64
 	LastSeen    sql.NullInt64
 	Version     sql.NullString
+	Role        sql.NullString
 }
 
-const nodeCols = "id, name, pub, join_hash, join_expires, created_at, last_seen, version"
+const nodeCols = "id, name, pub, join_hash, join_expires, created_at, last_seen, version, role"
 
 func scanNode(row interface{ Scan(...any) error }) (*nodeRow, error) {
 	n := &nodeRow{}
-	if err := row.Scan(&n.ID, &n.Name, &n.Pub, &n.JoinHash, &n.JoinExpires, &n.CreatedAt, &n.LastSeen, &n.Version); err != nil {
+	if err := row.Scan(&n.ID, &n.Name, &n.Pub, &n.JoinHash, &n.JoinExpires, &n.CreatedAt, &n.LastSeen, &n.Version, &n.Role); err != nil {
 		return nil, err
 	}
 	return n, nil
 }
+
+// isRelay — запись это релей (awgrelay://), а не VPN-сервер: его нет в списке серверов,
+// у него нет awg-ctrl, и запросы RPC к нему панель не отправляет.
+func (r *nodeRow) isRelay() bool { return r.Role.Valid && r.Role.String == "relay" }
 
 // health — сводка /health сервера; ip — как пришло (`d.ip ?? ""`).
 type health struct {
@@ -222,6 +227,12 @@ func newNodes(a *App) (*Nodes, error) {
 			return nil, err
 		}
 	}
+	// role — «vpn» (обычный сервер) или «relay» (релей awgrelay://, awg-ctrl у него отсутствует).
+	if !hasColumn(a.db, "nodes", "role") {
+		if _, err := a.db.Exec("ALTER TABLE nodes ADD COLUMN role TEXT NOT NULL DEFAULT 'vpn'"); err != nil {
+			return nil, err
+		}
+	}
 	// Нода №0 и локальный сервер — один и тот же id: вместе их не бывает.
 	if n.local && n.row(0) != nil {
 		return nil, fmt.Errorf("nodes: в ui.db есть нода #0 (сервер, с которого переехала панель), а LOCAL_NODE=on — " +
@@ -319,11 +330,12 @@ func (n *Nodes) rpc(id int64, method, path string, body any) *CtrlResp {
 }
 
 // CtrlFor — контроллер нужного сервера: 0 — локальный awg-ctrl, остальное — нода по WSS.
+// Релей — не сервер: awg-ctrl у него нет, «сервер» с таким id не существует.
 func (n *Nodes) CtrlFor(id int) Ctrl {
 	if id == 0 && n.local {
 		return n.a.ctrlLocal
 	}
-	if n.row(int64(id)) == nil {
+	if row := n.row(int64(id)); row == nil || row.isRelay() {
 		if id == 0 {
 			return func(string, string, any) (*CtrlResp, error) {
 				return &CtrlResp{404, errObj("Локальный сервер не настроен")}, nil
@@ -353,14 +365,17 @@ func (n *Nodes) IsOnline(id int) bool {
 	return n.conns[int64(id)] != nil
 }
 
-// IDs — все серверы реестра: локальный (если есть) и ноды.
+// IDs — все серверы реестра: локальный (если есть) и ноды. Релеи — не серверы: метрики и
+// «все серверы» к ним ходить не должны (awg-ctrl у релея нет, RPC вернул бы 502).
 func (n *Nodes) IDs() []int {
 	var ids []int
 	if n.local {
 		ids = append(ids, 0)
 	}
 	for _, r := range n.all() {
-		ids = append(ids, int(r.ID))
+		if !r.isRelay() {
+			ids = append(ids, int(r.ID))
+		}
 	}
 	return ids
 }
@@ -398,18 +413,25 @@ func (n *Nodes) fireOnline(id int) {
 	}
 }
 
-// DefaultID — сервер по умолчанию: локальный, а без него — первая нода.
+// DefaultID — сервер по умолчанию: локальный, а без него — первая нода-сервер (не релей).
 func (n *Nodes) DefaultID() int {
 	if n.local {
 		return 0
 	}
-	if all := n.all(); len(all) > 0 {
-		return int(all[0].ID)
+	for _, r := range n.all() { // порядок по id; первая запись-релей по умолчанию не берётся
+		if !r.isRelay() {
+			return int(r.ID)
+		}
 	}
 	return 0
 }
 
+// refreshHealth — сводка /health сервера в кэш. Релей — не сервер: у него нет awg-ctrl,
+// RPC к нему панель не шлёт (а пингование хабом отслеживает живость без него).
 func (n *Nodes) refreshHealth(id int64) {
+	if row := n.row(id); row.isRelay() {
+		return
+	}
 	var r *CtrlResp
 	if id == 0 && n.local {
 		r, _ = n.a.ctrlLocal("GET", "/health", nil)
@@ -832,9 +854,42 @@ func (n *Nodes) List() []serverInfo {
 		out = append(out, serverInfo{ID: 0, Name: name, Local: true, Online: h != nil, Version: orNil(n.a.version), Health: h})
 	}
 	for _, r := range n.all() {
+		if r.isRelay() {
+			continue // релеи идут списком /ui/relays, серверами они не являются
+		}
 		out = append(out, serverInfo{ID: int(r.ID), Name: r.Name, Online: online[r.ID], Pending: !r.Pub.Valid,
 			LastSeen: nullInt(r.LastSeen), Version: nullStr(r.Version), Health: hs[r.ID],
 			Outdated: r.Pub.Valid && (!r.Version.Valid || cmpVersion(r.Version.String, MinNodeVersion) < 0)})
+	}
+	return out
+}
+
+// relayRows — записи-релеи (они идут отдельным списком: в «серверах» их нет).
+func (n *Nodes) relayRows() []*nodeRow {
+	var out []*nodeRow
+	for _, r := range n.all() {
+		if r.isRelay() {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// RelayList — список релеев для GET /ui/relays (статус соединения агента — как у серверов).
+func (n *Nodes) RelayList() []jsjson.Object {
+	n.mu.Lock()
+	online := map[int64]bool{}
+	for id := range n.conns {
+		online[id] = true
+	}
+	n.mu.Unlock()
+	var out []jsjson.Object
+	for _, r := range n.relayRows() {
+		out = append(out, jsjson.Object{
+			{Key: "id", Val: r.ID}, {Key: "name", Val: r.Name}, {Key: "online", Val: online[r.ID]},
+			{Key: "pending", Val: !r.Pub.Valid}, {Key: "last_seen", Val: nullInt(r.LastSeen)},
+			{Key: "version", Val: nullStr(r.Version)},
+		})
 	}
 	return out
 }

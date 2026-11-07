@@ -18,7 +18,7 @@ type Keys struct{ Private, Public, PSK string }
 // Подмножество CONFIG, нужное для сборки ключа.
 type keyEnv struct {
 	P          Params
-	ServerIP   string
+	ServerIP   string // адрес, который видит VPN-клиент (при релее — адрес релея, см. Client)
 	ServerPort int
 	ServerName string
 	DNS1, DNS2 string

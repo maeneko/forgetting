@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,19 +44,69 @@ func isPosInt(v any, max float64) (int64, bool) {
 	return int64(f), ok && f == float64(int64(f)) && f > 0 && f < max
 }
 
-// joinCore — `join <awgjoin://…> [--no-panel]`: подключить эту установку к главной панели как
-// ноду. Рядом запускается агент; awg-ctrl и пользователи остаются как были. Своя панель
-// продолжает работать, если она здесь есть, — с --no-panel она останавливается.
-func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
-	if !hasLink || !strings.HasPrefix(link, "awgjoin://") || hasFlag && flag != "--no-panel" {
-		errorf("  Usage: awg-ctrl join <awgjoin://…> [--no-panel]   (ссылку даёт панель: «Добавить сервер»)")
+// ── endpoint ────────────────────────────────────────────────────────────────
+
+// endpointCmd — `endpoint <хост:порт>`: какой адрес получают VPN-клиенты в ключах vpn:// и в
+// /api/profile. По умолчанию — собственный адрес сервера; если подключение к серверу принимает
+// релей (роль «релей»), здесь задают его адрес — релей пересылает UDP VPN-порт нод. Значение
+// пишется в cli.env (CLIENT_ENDPOINT), awg-ctrl перечитывает его при перезапуске. `endpoint`
+// без аргументов — посмотреть, `endpoint off` — вернуть собственный адрес сервера.
+func (c *CLI) endpointCmd(addr string, hasAddr bool, args []string) {
+	if c.isRelay {
+		errorf("  Это релей — у него нет awg-ctrl и ключей; адрес задаётся на VPN-сервере, который релей принимает")
 		os.Exit(1)
 	}
-	v, err := jsjson.Decode(fromB64url(link[len("awgjoin://"):]))
+	if !hasAddr {
+		if cur := strings.TrimSpace(os.Getenv("CLIENT_ENDPOINT")); cur != "" {
+			fmt.Println("  Клиенты получают: " + cur)
+		} else {
+			fmt.Println("  CLIENT_ENDPOINT не задан — клиенты получают собственный адрес сервера")
+		}
+		return
+	}
+	if addr == "off" {
+		c.writeEnvFile(removeEnvVar(c.readEnvFile(), "CLIENT_ENDPOINT"))
+		fmt.Printf("  %s Клиентам снова отдаётся собственный адрес сервера\n", green("✓"))
+		c.restartFresh()
+		return
+	}
+	host, port, err := net.SplitHostPort(addr)
+	p, perr := strconv.Atoi(port)
+	if err != nil || host == "" || !reJoinHost.MatchString(host) || perr != nil || p <= 0 || p > 65535 {
+		errorf("  Usage: awg-ctrl endpoint <хост:порт> | off   (адрес для клиентов; IPv6 — [v6]:порт)")
+		os.Exit(1)
+	}
+	c.writeEnvFile(updateEnvVar(c.readEnvFile(), "CLIENT_ENDPOINT", host+":"+port))
+	fmt.Printf("  %s Клиенты будут получать endpoint %s:%d (awg-ctrl перезапущен)\n", green("✓"), host, p)
+	c.restartFresh()
+} // joinCore — `join <awgjoin://…> [--no-panel] | <awgrelay://…>`: подключить эту установку к
+// главной панели как ноду или (по строке awgrelay://) настроить её как релей — пересылки из
+// строки плюс агент для статуса в панели. awg-ctrl и пользователи остаются как были. Своя
+// панель продолжает работать, если она здесь есть, — с --no-panel она останавливается.
+func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
+	if !hasLink || hasFlag && flag != "--no-panel" {
+		errorf("  Usage: awg-ctrl join <awgjoin://… | awgrelay://…> [--no-panel]   (ссылки даёт панель: «Добавить сервер» / «Добавить релей»)")
+		os.Exit(1)
+	}
+	var scheme string
+	switch {
+	case strings.HasPrefix(link, "awgjoin://"):
+		scheme = "awgjoin"
+	case strings.HasPrefix(link, "awgrelay://"):
+		scheme = "awgrelay"
+	default:
+		errorf("  Usage: awg-ctrl join <awgjoin://… | awgrelay://…> [--no-panel]   (ссылки даёт панель: «Добавить сервер» / «Добавить релей»)")
+		os.Exit(1)
+	}
+	v, err := jsjson.Decode(fromB64url(link[len(scheme)+3:]))
 	j, isObj := v.(jsjson.Object)
 	if err != nil || !isObj {
 		errorf("  Ссылка повреждена")
 		os.Exit(1)
+	}
+	if scheme == "awgrelay" {
+		c.joinRelay(j)
+		return
 	}
 	h, hok := j.Get2("h").(string)
 	pin, pinok := j.Get2("pin").(string)
@@ -141,14 +192,104 @@ func relayRoutes(host string, hubPort int64, j jsjson.Object) string {
 	return strings.Join(routes, ",")
 }
 
+// joinRelay — хвост команды `join 'awgrelay://…'`: строки подключения релея. Маршруты уже
+// в строке (панель собрала их из привязок): пишем их в cli.env, роль — relay, агент даст
+// панели статус. VPN и панель на реле не ставятся — это отдельная роль установки.
+func (c *CLI) joinRelay(j jsjson.Object) {
+	h, hok := j.Get2("h").(string)
+	pin, pinok := j.Get2("pin").(string)
+	sec, sok := j.Get2("s").(string)
+	port, pok := isPosInt(j.Get2("p"), 65536)
+	id, iok := isPosInt(j.Get2("n"), 9007199254740992)
+	inv := func() {
+		errorf("  Ссылка неверного формата или от другой версии панели")
+		os.Exit(1)
+	}
+	if j.Get2("v") != 1.0 || !hok || !reJoinHost.MatchString(h) || !pok || !pinok || !reJoinPin.MatchString(pin) ||
+		!iok || !sok || !reJoinSec.MatchString(sec) {
+		inv()
+	}
+	udp, tcp, n := "", "", 0
+	for _, r := range arrOf(j.Get2("routes")) {
+		ro, ok := r.(jsjson.Object)
+		if !ok {
+			inv()
+		}
+		net, _ := ro.Get2("net").(string)
+		listen, lok := isPosInt(ro.Get2("listen"), 65536)
+		target, tok := ro.Get2("target").(string)
+		if !(net == "udp" || net == "tcp") || !lok || !tok || !reJoinHost.MatchString(target) ||
+			!strings.Contains(target, ":") {
+			inv()
+		}
+		n++
+		if net == "udp" {
+			udp = appendPart(udp, fmt.Sprintf("%d=%s", listen, target))
+		} else {
+			tcp = appendPart(tcp, fmt.Sprintf("%d=%s", listen, target))
+		}
+	}
+	if n == 0 {
+		errorf("  В строке нет ни одного маршрута — пересылать нечего")
+		os.Exit(1)
+	}
+	if c.isNode && !c.confirmYes(fmt.Sprintf("  Релей уже настроен (core %s). Перепривязать?", os.Getenv("CORE_HOST"))) {
+		return
+	}
+	if os.Getenv("UI_PASS") != "" {
+		errorf("  На этом сервере есть панель — роль «релей» ставится на отдельную машину (install.sh, роль «Релей»)")
+		os.Exit(1)
+	}
+	content := c.readEnvFile()
+	for _, kv := range [][2]string{
+		{"CORE_HOST", h}, {"CORE_PORT", fmt.Sprint(port)}, {"CORE_PIN", pin}, {"NODE_ID", fmt.Sprint(id)},
+		{"JOIN_SECRET", sec}, {"NODE_ROLE", "relay"}, {"NODE_PANEL", "off"}, {"LOCAL_NODE", "off"},
+		{"RELAY_UDP", udp}, {"RELAY_TCP", tcp},
+	} {
+		content = updateEnvVar(content, kv[0], kv[1])
+	}
+	content = removeEnvVar(content, "CORE_ENDPOINT") // адрес прежней панели к новой не относится
+	c.writeEnvFile(content)
+	fmt.Printf("\n  %s Релей настроен: core %s:%d, релей #%d\n", green("✓"), h, port, id)
+	if udp != "" {
+		fmt.Println("  " + dim("UDP (VPN-клиенты → ноды): "+udp))
+	}
+	if tcp != "" {
+		fmt.Println("  " + dim("TCP (панель/подписка/хаб нод): "+tcp))
+	}
+	c.restartFresh()
+}
+
+func appendPart(list, s string) string {
+	if list == "" {
+		return s
+	}
+	return list + "," + s
+}
+
+// arrOf — массив из JSON: не массив — пустой список (joinRelay сам ругнётся на пустые маршруты).
+func arrOf(v any) []any {
+	a, _ := v.([]any)
+	return a
+}
+
 func (c *CLI) unjoinCore() {
 	if !c.isNode {
 		fmt.Println("  Эта установка не подключена к core")
 		return
 	}
 	c.stop("agent")
+	if !c.isRelay {
+		c.stop("relay")
+	}
 	content := c.readEnvFile()
-	for _, k := range []string{"CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET", "NODE_PANEL", "CORE_ENDPOINT"} {
+	keys := []string{"CORE_HOST", "CORE_PORT", "CORE_PIN", "NODE_ID", "JOIN_SECRET", "NODE_PANEL", "CORE_ENDPOINT"}
+	if c.isRelay {
+		keys = append(keys, "NODE_ROLE", "RELAY_UDP", "RELAY_TCP")
+	} else {
+		// Роуты «релея» могли остаться от migrate — их ролью не трогаем.
+	}
+	for _, k := range keys {
 		content = removeEnvVar(content, k)
 	}
 	c.writeEnvFile(content)

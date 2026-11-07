@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -147,13 +146,5 @@ func Run(ctx context.Context, routes []Route, logf, errorf func(string, ...any))
 	return ctx.Err()
 }
 
-// Main — роль `awg-control relay`: пересылки из RELAY.
-func Main(ctx context.Context) error {
-	routes, err := ParseRoutes(os.Getenv("RELAY"))
-	if err != nil {
-		return err
-	}
-	logf := func(f string, a ...any) { fmt.Fprintf(os.Stdout, f+"\n", a...) }
-	errorf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
-	return Run(ctx, routes, logf, errorf)
-}
+// Main (роль `awg-control relay`) — в forward.go: она собирает маршруты и из RELAY, и из
+// RELAY_TCP/RELAY_UDP роли «релей».

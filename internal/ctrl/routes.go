@@ -303,7 +303,7 @@ func (s *Server) routes() []route {
 				return result{}, err
 			}
 			cfg := s.cfg()
-			return ok(ob{{"name", cfg.ServerName}, {"endpoint", cfg.ServerIP + ":" + strconv.Itoa(cfg.ServerPort)},
+			return ok(ob{{"name", cfg.ServerName}, {"endpoint", cfg.ClientIP + ":" + strconv.Itoa(cfg.ClientPort)},
 				{"server_pub", sp}, {"gen", cfg.Gen}, {"dns", []string{cfg.DNS1, cfg.DNS2}},
 				{"keepalive", cfg.Keepalive}, {"mtu", cfg.MTU}, {"awg", profileAwg(cfg.Params)}})
 		}),

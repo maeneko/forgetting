@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,12 @@ type Config struct {
 	ServerIP   string
 	ServerPort int
 	ServerName string
+	// ClientIP/ClientPort — адрес, который получают VPN-клиенты (vpn://-ключи и
+	// /api/profile, [Peer] Endpoint). По умолчанию — сам сервер; переменная
+	// окружения CLIENT_ENDPOINT («хост:порт») подменяет его адресом релея: релей-сервер
+	// слушает и UDP VPN-порт нод, и эти же TCP-поверхности (см. роль «релей»).
+	ClientIP   string
+	ClientPort int
 	DNS1, DNS2 string
 	MTU        int
 	Keepalive  string
@@ -71,7 +78,9 @@ func (s *Server) cfg() Config {
 
 func (s *Server) keyEnv() keyEnv {
 	c := s.cfg()
-	return keyEnv{P: c.Params, ServerIP: c.ServerIP, ServerPort: c.ServerPort, ServerName: c.ServerName,
+	// Клиенту всегда отдаём Client-адрес (CLIENT_ENDPOINT, если он задан): vpn://-ключи и
+	// [Peer] Endpoint в conf строятся из keyEnv.ServerIP/ServerPort.
+	return keyEnv{P: c.Params, ServerIP: c.ClientIP, ServerPort: c.ClientPort, ServerName: c.ServerName,
 		DNS1: c.DNS1, DNS2: c.DNS2, MTU: c.MTU, Keepalive: c.Keepalive, Gen: c.Gen, Subnet: c.Subnet}
 }
 
@@ -80,6 +89,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ClientEndpoint — разбор строки CLIENT_ENDPOINT («хост:порт», для IPv6 — [v6]:порт).
+// Экспортирована: CLI-команду `endpoint` валидирует той же функцией. Пустая строка — ошибка,
+// вызывающий (ctrl.New) и сам CLI пустоту обходят отдельно.
+func ClientEndpoint(v string) (string, int, error) {
+	host, portS, err := net.SplitHostPort(strings.TrimSpace(v))
+	if err != nil || host == "" {
+		return "", 0, fmt.Errorf("CLIENT_ENDPOINT задан неверно (%q): нужен формат «хост:порт», IPv6 — [v6]:порт", v)
+	}
+	port, err := strconv.Atoi(portS)
+	if err != nil || port <= 0 || port > 65535 {
+		return "", 0, fmt.Errorf("CLIENT_ENDPOINT задан неверно (%q): порт не в 1..65535", v)
+	}
+	return host, port, nil
 }
 
 func getLocalIP() string {
@@ -152,9 +176,21 @@ func New() (*Server, error) {
 	module, tools := readVersions()
 	s.c = Config{
 		ServerIP: ip, ServerPort: sp, ServerName: name,
+		ClientIP: ip, ClientPort: sp, // CLIENT_ENDPOINT ниже, если задан
 		DNS1: "1.1.1.1", DNS2: "1.0.0.1", MTU: ReadMTU(s.confPath()), Subnet: "10.9",
 		Keepalive: keepaliveByGen[gen], Params: params, Gen: gen,
 		AwgModule: module, AwgTools: tools,
+	}
+	// Роль «релей»: CLIENT_ENDPOINT («хост:порт») — адрес релея для клиентов вместо
+	// собственного адреса сервера. Его получают ключи vpn:// и /api/profile; сами к релею
+	// идёт только клиентский трафик. IPv6 с портами — [v6]:порт.
+	if ce := strings.TrimSpace(os.Getenv("CLIENT_ENDPOINT")); ce != "" {
+		ch, cport, err := ClientEndpoint(ce)
+		if err != nil {
+			return nil, err
+		}
+		s.c.ClientIP, s.c.ClientPort = ch, cport
+		s.log.Info("CLIENT_ENDPOINT", "host", ch, "port", cport)
 	}
 	s.log.Info("awg params loaded from conf", "Jc", params.Jc, "H1", params.H1, "gen", gen)
 	s.shaping = newShaping(s)

@@ -122,9 +122,10 @@ type CLI struct {
 
 	brand, channel, version string
 
-	svc    map[string]*service
-	all    []string
-	isNode bool
+	svc     map[string]*service
+	all     []string
+	isNode  bool
+	isRelay bool // NODE_ROLE=relay: сервер-релей, VPN и панели на нём нет
 
 	in *bufio.Reader
 }
@@ -223,10 +224,16 @@ func New() *CLI {
 			},
 			pidFile: "/tmp/awg-agent.pid", logFile: filepath.Join(c.logs, "awg-agent.log"),
 		},
-		// Ретранслятор на сервере, с которого переехала панель: прежние порты → новая панель.
+		// Ретранслятор: прежние порты → новая панель ( migrate) и роль «релей» (awgrelay://) —
+		// UDP-трафик VPN-клиентов к нодам и прозрачный TCP (панель/подписка/хаб нод там, где
+		// IPv4 панели заблокирован).
 		"relay": {
 			name: "relay", label: "awg-relay", cwd: c.root,
-			env:     [][2]string{{"RELAY", env("RELAY", "")}},
+			env: [][2]string{
+				{"RELAY", env("RELAY", "")},
+				{"RELAY_TCP", env("RELAY_TCP", "")},
+				{"RELAY_UDP", env("RELAY_UDP", "")},
+			},
 			pidFile: "/tmp/awg-relay.pid", logFile: filepath.Join(c.logs, "awg-relay.log"),
 		},
 	}
@@ -235,9 +242,19 @@ func New() *CLI {
 	// LOCAL_NODE=off — панель без своего VPN; иначе — обычная установка. Нода со своей панелью
 	// (join без --no-panel) держит и awg-ui: обе панели ходят в один awg-ctrl.
 	c.isNode = coreHost != ""
+	// NODE_ROLE=relay — роль «релей» (её пишет join по строке awgrelay://): без VPN и панели.
+	c.isRelay = strings.ToLower(env("NODE_ROLE", "")) == "relay"
 	noLocal := strings.ToLower(env("LOCAL_NODE", "on")) == "off"
 	nodePanel := c.isNode && os.Getenv("UI_PASS") != "" && strings.ToLower(env("NODE_PANEL", "on")) != "off"
 	switch {
+	case c.isRelay:
+		c.all = nil
+		if anyRelayEnv() { // маршруты есть — запускаем пересылку
+			c.all = append(c.all, "relay")
+		}
+		if c.isNode { // статус релея в панели: тот же агент, привязка по awgrelay://
+			c.all = append(c.all, "agent")
+		}
 	case c.isNode && nodePanel:
 		c.all = []string{"awgctrl", "ui", "agent"}
 	case c.isNode:
@@ -271,6 +288,12 @@ func (c *CLI) setSvcEnv(name, key, value string) {
 }
 
 func (c *CLI) panelMoved() bool { return strings.ToLower(os.Getenv("PANEL_MOVED")) == "on" }
+
+// anyRelayEnv — хоть что-то пересылать задано: иначе релей-сервис не стартует (агент для
+// статуса панели всё равно нужен).
+func anyRelayEnv() bool {
+	return os.Getenv("RELAY") != "" || os.Getenv("RELAY_TCP") != "" || os.Getenv("RELAY_UDP") != ""
+}
 
 func without(s []string, v string) []string {
 	var out []string
@@ -638,10 +661,10 @@ func (c *CLI) confirmYes(q string) bool {
 
 // ── Точка входа ─────────────────────────────────────────────────────────────
 
-const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…> [--no-panel]|unjoin|rehome <хост[:порт]>|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>|update|reinstall|uninstall|panel [path new|off|<путь>]|log [seen] [поиск] [-n N]|metrics [token|revoke]|hub [legacy on|off|auto]|check>"
+const usage = "Usage: cli <start|stop|restart|status|credentials [user|pass]|join <awgjoin://…|awgrelay://…> [--no-panel]|unjoin|rehome <хост[:порт]>|endpoint [<хост:порт>|off]|peers [drop <область>]|monitor <install|status|remove>|migrate <export [файл]|import <файл>|cancel>|update|reinstall|uninstall|panel [path new|off|<путь>]|log [seen] [поиск] [-n N]|metrics [token|revoke]|hub [legacy on|off|auto]|check>"
 
 // Commands — команды оператора; main передаёт сюда всё, что не роль сервиса.
-var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "peers", "monitor", "migrate", "update", "reinstall", "uninstall", "panel", "log", "metrics", "hub", "check"}
+var Commands = []string{"start", "stop", "restart", "status", "credentials", "join", "unjoin", "rehome", "endpoint", "peers", "monitor", "migrate", "update", "reinstall", "uninstall", "panel", "log", "metrics", "hub", "check"}
 
 // Main выполняет команду CLI (args — без имени бинарника). Пусто — интерактивное меню.
 func Main(args []string) {
@@ -680,6 +703,8 @@ func Main(args []string) {
 		c.unjoinCore()
 	case "rehome":
 		c.rehome(sub, hasSub)
+	case "endpoint":
+		c.endpointCmd(sub, hasSub, args[1:])
 	case "migrate":
 		c.migrateCmd(sub, a2, hasA2)
 	case "peers":
