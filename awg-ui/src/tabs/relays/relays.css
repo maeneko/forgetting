@@ -24,59 +24,50 @@ LICENSE file in the root directory of this source tree.
 .bind-row .field--listen { text-align: right; }
 
 /* Список релеев. */
-.relay-binds-line {
-    font-size: var(--body-small-size); line-height: var(--body-small-line);
-    color: var(--neutral-text);
-    font-family: var(--mono);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.relay-loss {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    font-size: var(--body-small-size); line-height: var(--body-small-line);
-    color: var(--neutral-text);
-}
 /* < 840px: таблица скрыта (.table-card в App.css), показываются карточки. */
 .relays-cards { display: none; flex-direction: column; gap: 12px; }
 .relays-count { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 
-/* Схема внизу вкладки: панель → релей → выбранные серверы. */
-.relays-flow {
+/* Схема под каждым релеем: панель → релей → выбранные серверы (с данными релея).
+   mode table — в подстроке таблицы (горизонтально), card — внутри карточки (вертикально). */
+.relays-flow-row > td { padding: 4px 12px 14px 20px; }
+.relay-flow {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
-    margin-top: 16px;
+    gap: 6px;
+    background: var(--surface-container);
+    border: 0.5px solid var(--outline-variant);
+    border-radius: var(--shape-medium, 12px);
+    padding: 12px 10px;
 }
+.relay-flow--card { grid-template-columns: 1fr; justify-items: center; }
 .flow-node {
-    background: var(--surface-bright);
-    border: 1px solid var(--outline-variant);
-    border-radius: var(--shape-extra-large);
-    padding: 14px 10px;
-    display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px;
+    display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px;
+    padding: 6px 10px;
+    min-width: 0;
 }
+.relay-flow--card .flow-node { width: 100%; }
 .flow-title {
     display: inline-flex; align-items: center; gap: 6px;
     color: var(--on-surface); font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
 .flow-hint {
     font-size: var(--body-small-size); line-height: var(--body-small-line);
     color: var(--neutral-text);
 }
+.flow-targets { display: flex; flex-direction: column; gap: 2px; }
 .flow-link {
     display: flex; flex-direction: column; align-items: center; gap: 2px;
-    padding: 0 6px; min-width: 86px;
+    padding: 0 4px; min-width: 84px;
 }
 .flow-arr { font-size: 20px; line-height: 1.2; color: var(--neutral-text); }
 .flow-what {
     font-size: var(--body-small-size); line-height: var(--body-small-line);
     color: var(--neutral-text); text-align: center;
 }
-
-@media (max-width: 720px) {
-    .relays-flow { grid-template-columns: 1fr; justify-items: center; }
-    .flow-node { width: 100%; }
-    .flow-arr { transform: rotate(90deg); margin-left: 24px; }
-    .flow-link { margin: 2px 0; }
-}
+.relay-flow--card .flow-arr { transform: rotate(90deg); }
 
 @media (max-width: 839px) {
     .relays-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ivan Vasilev
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import {
     apiFetch, timeAgo, copyText,
@@ -32,18 +32,6 @@ const formOf = (binds: RelayBindInput[] | undefined): BindForm[] =>
     binds?.length ? binds.map(b => ({
         kind: b.kind, serverId: b.server_id ?? null, listen: b.listen ? String(b.listen) : '',
     })) : [];
-
-const bindsLine = (r: RelayInfo, servers: NodeInfo[]): string => {
-    const list = r.binds ?? [];
-    if (!list.length) return 'пересылок нет';
-    return list.map(b => {
-        if (b.kind === 'vpn') {
-            const s = servers.find(x => x.id === b.server_id);
-            return `VPN → ${s ? s.name : `сервер #${b.server_id}`}`;
-        }
-        return kindLabel(b.kind);
-    }).join(' · ');
-};
 
 // Общий хвост модалок: строка для `awg-ctrl join` на машине релея.
 function JoinResult({ result, showMsg }: { result: RelayJoinResult; showMsg: (t: string) => void }) {
@@ -307,6 +295,50 @@ function RelaySettingsModal({ token, relay, serverList, onClose, showMsg }: {
     );
 }
 
+// Схема под релеем: панель → релей → выбранные серверы, с данными этого релея.
+// mode table — горизонтальная (строка таблицы), card — вертикальная (карточка на узком экране).
+function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeInfo[]; mode: 'table' | 'card' }) {
+    const state = relay.pending ? 'ждёт подключение'
+        : relay.online ? 'на связи' + (relay.version ? ` · v${relay.version}` : '')
+        : 'нет связи';
+    const targets = (relay.binds ?? []).map(b => {
+        if (b.kind === 'vpn') {
+            const s = servers.find(x => x.id === b.server_id);
+            const name = s ? (s.local ? `${s.name} (этот сервер)` : s.name) : `#id: ${b.server_id}`;
+            return `VPN-порт · ${name}${b.listen ? ` · :${b.listen}` : ''}`;
+        }
+        return `${kindLabel(b.kind)}${b.listen ? ` · :${b.listen}` : ''}`;
+    });
+    return (
+        <div className={`relay-flow${mode === 'card' ? ' relay-flow--card' : ''}`}>
+            <div className="flow-node">
+                <span className="flow-title"><IcoGear /> Панель</span>
+                <span className="flow-hint">привязки и пуш агенту</span>
+            </div>
+            <div className="flow-link">
+                <span className="flow-arr">⟶</span>
+                <span className="flow-what">строка + привязки</span>
+            </div>
+            <div className="flow-node">
+                <span className="flow-title"><IcoRelay /> {relay.name}</span>
+                <span className="flow-hint">{state}</span>
+            </div>
+            <div className="flow-link">
+                <span className="flow-arr">⟶</span>
+                <span className="flow-what">пересылка udp/tcp</span>
+            </div>
+            <div className="flow-node">
+                <span className="flow-title"><IcoGlobe /> Серверы</span>
+                <span className="flow-hint">
+                    {targets.length ? (
+                        <span className="flow-targets">{targets.map((t, i) => <span key={i}>{t}</span>)}</span>
+                    ) : 'привяжите в настройках релея'}
+                </span>
+            </div>
+        </div>
+    );
+}
+
 // Вкладка «Релеи»: двухэтапный флоу — подключить строкой, привязать серверы из панели.
 export default function RelaysPage({ token, showMsg }: PageProps) {
     const [relays, setRelays]         = useState<RelayInfo[]>([]);
@@ -387,42 +419,45 @@ export default function RelaysPage({ token, showMsg }: PageProps) {
                             <th>#</th>
                             <th>Релей</th>
                             <th>Статус</th>
-                            <th>Пересылки</th>
                             <th>Версия</th>
                             <th className="td-actions"></th>
                         </tr>
                     </thead>
                     <tbody>
                         {relays.map((r, i) => (
-                            <tr key={r.id}>
-                                <td>{i + 1}</td>
-                                <td>{r.name}</td>
-                                <td>
-                                    <span className={`chip chip--${r.online ? 'online' : 'offline'}`}>
-                                        <span className="chip-dot" />
-                                        {status(r)}
-                                    </span>
-                                </td>
-                                <td><span className="relay-binds-line" title={bindsLine(r, serverList)}>{bindsLine(r, serverList)}</span></td>
-                                <td>{r.version ? `v${r.version}` : r.pending ? '—' : 'v?.?.?'}</td>
-                                <td className="td-actions">
-                                    <div className="actions">
-                                        <button className="btn-icon" title="Настройки релея"
-                                            onClick={() => setSettings(r)}>
-                                            <IcoSettings />
-                                        </button>
-                                        {r.pending && (
-                                            <button className="btn-icon" title="Выдать строку подключения"
-                                                onClick={() => setJoining(r)}>
-                                                <IcoCopy />
+                            <Fragment key={r.id}>
+                                <tr>
+                                    <td>{i + 1}</td>
+                                    <td>{r.name}</td>
+                                    <td>
+                                        <span className={`chip chip--${r.online ? 'online' : 'offline'}`}>
+                                            <span className="chip-dot" />
+                                            {status(r)}
+                                        </span>
+                                    </td>
+                                    <td>{r.version ? `v${r.version}` : r.pending ? '—' : 'v?.?.?'}</td>
+                                    <td className="td-actions">
+                                        <div className="actions">
+                                            <button className="btn-icon" title="Настройки релея"
+                                                onClick={() => setSettings(r)}>
+                                                <IcoSettings />
                                             </button>
-                                        )}
-                                        <button className="btn-icon btn-icon--danger" title="Удалить" onClick={() => void removeRelay(r)}>
-                                            <IcoTrash />
-                                        </button>
-                                    </div>
-                                </td>
-                            </tr>
+                                            {r.pending && (
+                                                <button className="btn-icon" title="Выдать строку подключения"
+                                                    onClick={() => setJoining(r)}>
+                                                    <IcoCopy />
+                                                </button>
+                                            )}
+                                            <button className="btn-icon btn-icon--danger" title="Удалить" onClick={() => void removeRelay(r)}>
+                                                <IcoTrash />
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr className="relays-flow-row">
+                                    <td colSpan={5}><RelayFlow relay={r} servers={serverList} mode="table" /></td>
+                                </tr>
+                            </Fragment>
                         ))}
                     </tbody>
                 </table>
@@ -445,9 +480,7 @@ export default function RelaysPage({ token, showMsg }: PageProps) {
                                 {status(r)}
                             </span>
                         </div>
-                        <div className="relay-loss">
-                            <IcoGear /> <span>{bindsLine(r, serverList)}</span>
-                        </div>
+                        <RelayFlow relay={r} servers={serverList} mode="card" />
                         <div className="user-card-actions">
                             <button className="btn btn--outline" onClick={() => setSettings(r)}>
                                 <IcoSettings /> Настройки
@@ -468,30 +501,6 @@ export default function RelaysPage({ token, showMsg }: PageProps) {
             {creating && <RelayCreateModal token={token} onClose={closeAndReload} showMsg={showMsg} />}
             {settings && <RelaySettingsModal token={token} relay={settings} serverList={serverList} onClose={closeAndReload} showMsg={showMsg} />}
             {joining && <RelayJoinModal token={token} relay={joining} onClose={closeAndReload} showMsg={showMsg} />}
-
-            {/* Схема флоу: панель подключает строкой и пушит привязки, релей пересылает к серверам. */}
-            <div className="relays-flow">
-                <div className="flow-node">
-                    <span className="flow-title"><IcoGear /> Панель</span>
-                    <span className="flow-hint">хранит привязки · собирает строку awgrelay://</span>
-                </div>
-                <div className="flow-link">
-                    <span className="flow-arr">⟶</span>
-                    <span className="flow-what">строка + привязки пушем</span>
-                </div>
-                <div className="flow-node">
-                    <span className="flow-title"><IcoRelay /> Релей</span>
-                    <span className="flow-hint">awg-relay слушает · агент держит связь</span>
-                </div>
-                <div className="flow-link">
-                    <span className="flow-arr">⟶</span>
-                    <span className="flow-what">пересылка udp/tcp</span>
-                </div>
-                <div className="flow-node">
-                    <span className="flow-title"><IcoGlobe /> Серверы</span>
-                    <span className="flow-hint">все, что привязано в настройках релея</span>
-                </div>
-            </div>
         </>
     );
 }
