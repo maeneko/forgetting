@@ -11,6 +11,14 @@ LICENSE file in the root directory of this source tree.
     color: var(--neutral-text);
 }
 .relays-hint--warn { color: var(--error); }
+/* Экспериментальность релеев — тем же стилем, что «Подписка работает без TLS» в мастер-ключах. */
+.relays-notice {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-error-container);
+    background: var(--error-container);
+    border-radius: var(--shape-large);
+    padding: 10px 16px;
+}
 
 /* Редактор привязок в модалке: ряды «вид → сервер → порт → убрать». */
 .bind-row {

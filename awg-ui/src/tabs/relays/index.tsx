@@ -425,6 +425,11 @@ export default function RelaysPage({ token, showMsg }: PageProps) {
                 </p>
             )}
 
+            <p className="relays-notice">
+                Это экспериментальная функция: релеи появились недавно — поведение (ключи, привязки,
+                подписка через релей) может меняться; проверяйте связку до боевого запуска.
+            </p>
+
             <div className="table-card">
                 <table>
                     <thead>
