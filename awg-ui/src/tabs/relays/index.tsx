@@ -7,7 +7,7 @@ import {
     apiFetch, timeAgo, copyText,
     type RelayInfo, type RelayBindInput, type RelayJoinResult, type NodeInfo, type PageProps,
 } from '../../lib/shared';
-import { IcoPlus, IcoRefresh, IcoTrash, IcoCopy, IcoClose, IcoSettings, IcoGear } from '../../components/icons';
+import { IcoPlus, IcoRefresh, IcoTrash, IcoCopy, IcoClose, IcoSettings, IcoGear, IcoRelay, IcoGlobe } from '../../components/icons';
 import './relays.css';
 
 // Виды привязок — те же, что в бэке (internal/ui/relays.go): vpn идёт UDP к VPN-порту
@@ -468,6 +468,30 @@ export default function RelaysPage({ token, showMsg }: PageProps) {
             {creating && <RelayCreateModal token={token} onClose={closeAndReload} showMsg={showMsg} />}
             {settings && <RelaySettingsModal token={token} relay={settings} serverList={serverList} onClose={closeAndReload} showMsg={showMsg} />}
             {joining && <RelayJoinModal token={token} relay={joining} onClose={closeAndReload} showMsg={showMsg} />}
+
+            {/* Схема флоу: панель подключает строкой и пушит привязки, релей пересылает к серверам. */}
+            <div className="relays-flow">
+                <div className="flow-node">
+                    <span className="flow-title"><IcoGear /> Панель</span>
+                    <span className="flow-hint">хранит привязки · собирает строку awgrelay://</span>
+                </div>
+                <div className="flow-link">
+                    <span className="flow-arr">⟶</span>
+                    <span className="flow-what">строка + привязки пушем</span>
+                </div>
+                <div className="flow-node">
+                    <span className="flow-title"><IcoRelay /> Релей</span>
+                    <span className="flow-hint">awg-relay слушает · агент держит связь</span>
+                </div>
+                <div className="flow-link">
+                    <span className="flow-arr">⟶</span>
+                    <span className="flow-what">пересылка udp/tcp</span>
+                </div>
+                <div className="flow-node">
+                    <span className="flow-title"><IcoGlobe /> Серверы</span>
+                    <span className="flow-hint">все, что привязано в настройках релея</span>
+                </div>
+            </div>
         </>
     );
 }

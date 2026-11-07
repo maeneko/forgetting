@@ -39,6 +39,45 @@ LICENSE file in the root directory of this source tree.
 .relays-cards { display: none; flex-direction: column; gap: 12px; }
 .relays-count { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 
+/* Схема внизу вкладки: панель → релей → выбранные серверы. */
+.relays-flow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    margin-top: 16px;
+}
+.flow-node {
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--shape-extra-large);
+    padding: 14px 10px;
+    display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px;
+}
+.flow-title {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--on-surface); font-weight: 500;
+}
+.flow-hint {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+}
+.flow-link {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 0 6px; min-width: 86px;
+}
+.flow-arr { font-size: 20px; line-height: 1.2; color: var(--neutral-text); }
+.flow-what {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text); text-align: center;
+}
+
+@media (max-width: 720px) {
+    .relays-flow { grid-template-columns: 1fr; justify-items: center; }
+    .flow-node { width: 100%; }
+    .flow-arr { transform: rotate(90deg); margin-left: 24px; }
+    .flow-link { margin: 2px 0; }
+}
+
 @media (max-width: 839px) {
     .relays-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
     :is(.relays-count, .empty-cards) { grid-column: 1 / -1; }
