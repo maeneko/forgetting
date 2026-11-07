@@ -34,7 +34,12 @@ LICENSE file in the root directory of this source tree.
 .relays-flow-row > td { padding: 1px 12px 8px 20px; }
 .relay-flow {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+    /* Схема — по содержимому (fit-content): капсулы равные по ширине и размером с самый
+       широкий текст, а не растянутые на треть всей строки таблицы. */
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    width: fit-content;
+    max-width: 100%;
+    margin-inline: auto;
     align-items: stretch;
     gap: 4px;
     background: var(--surface-container);
@@ -42,7 +47,7 @@ LICENSE file in the root directory of this source tree.
     border-radius: var(--shape-medium, 12px);
     padding: 6px 4px;
 }
-.relay-flow--card { grid-template-columns: 1fr; justify-items: center; }
+.relay-flow--card { grid-template-columns: 1fr; justify-items: stretch; width: 100%; }
 .flow-step {
     display: flex;
     min-width: 0;
