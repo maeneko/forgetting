@@ -1,0 +1,375 @@
+/* ── Токены (роли MD3, палитра ma7amnesia site) ─────────────────────
+   Тёплая кремовая база + янтарный акцент. Только роли, никогда сырой HEX.
+   Светлая тема — по умолчанию, тёмная («тёплый уголь») — по системной. */
+:root {
+  color-scheme: light dark;
+
+  --surface:                #faf6f0;
+  --surface-container:      #f0e8dd;
+  --surface-container-high: #ece2d3;
+  --surface-bright:         #fdfaf6;
+  --on-surface:             #3a2e22;
+  --on-surface-muted:       #6c5c48;
+  --nav-text:               #5a4a3a;
+
+  --primary:                #8b5000;
+  --on-primary:             #ffffff;
+  --primary-container:      #ffdcbe;
+  --on-primary-container:   #6b3a00;
+  --secondary-container:    #f6e1c9;
+  --on-secondary-container: #5e3a10;
+  --tertiary-container:     #ffdcad;
+  --on-tertiary-container:  #7a4a14;
+  --accent-icon:            #d9822b;
+
+  --outline:         #d8cdbe;
+  --outline-variant: #ece2d3;
+
+  --error:           #ba1a1a;
+  --error-container: #ffdad6;
+  --danger-text:     #ab4535;
+  --ok-bg:           #c0dd97;
+  --ok-text:         #2c4d0a;
+  --ok-dot:          #639922;
+  --warn-dot:        #ffb76b;
+
+  @media (prefers-color-scheme: dark) {
+    --surface:                #1a1611;
+    --surface-container:      #251f18;
+    --surface-container-high: #302820;
+    --surface-bright:         #2b251d;
+    --on-surface:             #ede2d4;
+    --on-surface-muted:       #b6a994;
+    --nav-text:               #ede2d4;
+
+    --primary:                #f4a85c;
+    --on-primary:             #3a2410;
+    --primary-container:      #5e3a10;
+    --on-primary-container:   #ffd9b0;
+    --secondary-container:    #3f3324;
+    --on-secondary-container: #ffd9b0;
+    --tertiary-container:     #5a3d12;
+    --on-tertiary-container:  #ffdcad;
+    --accent-icon:            #ffb76b;
+
+    --outline:         #4d4334;
+    --outline-variant: #342c20;
+
+    --error:           #ffb4ab;
+    --error-container: #5c1414;
+    --danger-text:     #ffb4ab;
+    --ok-bg:           #2d4413;
+    --ok-text:         #c8e3a0;
+    --ok-dot:          #8fc24f;
+    --warn-dot:        #e8a45c;
+  }
+}
+
+:root {
+  --radius-card: 24px;
+  --radius-box: 16px;
+  --pill: 100px;
+  --touch: 44px;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--surface);
+  color: var(--on-surface);
+  font-family: system-ui, -apple-system, Inter, Roboto, sans-serif;
+  font-weight: 400;
+  margin: 0;
+  padding-top: 70px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Два веса — 400 и 500. Жирного нет нигде. */
+h1, h2, h3, b, strong { font-weight: 500; }
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ── State layer MD3 ─────────────────────────────────────────────── */
+.state-layer { position: relative; isolation: isolate; overflow: hidden; }
+.state-layer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease-standard);
+}
+@media (hover: hover) {
+  .state-layer:hover::after { opacity: 0.08; }
+}
+.state-layer:focus-visible::after,
+.state-layer:active::after { opacity: 0.12; }
+
+/* ── Хедер ───────────────────────────────────────────────────────── */
+.header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 70px;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  box-sizing: border-box;
+  z-index: 1000;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s var(--ease-standard);
+}
+.header.scrolled { border-bottom-color: var(--outline-variant); }
+
+.header .logo {
+  grid-column: 1;
+  justify-self: center;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--on-surface);
+  text-decoration: none;
+}
+.header .logo span { color: var(--primary); }
+
+.header .nav {
+  grid-column: 2;
+  display: flex;
+  gap: 4px;
+  justify-self: center;
+}
+.header .nav a {
+  transition: background 0.2s var(--ease-standard), color 0.2s var(--ease-standard);
+  text-decoration: none;
+  color: var(--nav-text);
+  font-size: 14px;
+  white-space: nowrap;
+  padding: 6px 16px;
+  border-radius: var(--pill);
+}
+@media (hover: hover) {
+  .header .nav a:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+}
+.header .nav a.active {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+  font-weight: 500;
+}
+
+.header .header-actions {
+  grid-column: 3;
+  justify-self: center;
+}
+
+/* ── Кнопки: pill 44px, 14px / 500 ───────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: fit-content;
+  min-height: var(--touch);
+  padding: 0 24px;
+  box-sizing: border-box;
+  border-radius: var(--pill);
+  border: none;
+  font-family: inherit;
+  font-weight: 500;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn.primary {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.btn.tonal {
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+}
+.btn.text { background: transparent; color: var(--primary); }
+
+/* ── Общая раскладка ─────────────────────────────────────────────── */
+.wrap {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
+}
+
+.hero { padding: 64px 0 40px; }
+.hero h1 {
+  font-size: 32px;
+  line-height: 40px;
+  margin: 0 0 12px;
+}
+.hero h1 span { color: var(--primary); }
+.hero p {
+  color: var(--on-surface-muted);
+  font-size: 16px;
+  line-height: 24px;
+  margin: 0 0 24px;
+}
+.hero .meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.dot-row { display: flex; gap: 8px; align-items: center; }
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn-dot);
+  flex-shrink: 0;
+}
+.dot.ok  { background: var(--ok-dot); }
+.dot.cur { background: var(--primary); }
+
+/* ── Карточки релизов и обзора: тональная элевация, без теней ────── */
+.card {
+  background: var(--surface-bright);
+  border-radius: var(--radius-card);
+  padding: 1.6rem 2rem 1.6rem;
+  border: 1px solid var(--outline-variant);
+  margin-bottom: 20px;
+}
+
+.rel-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: var(--pill);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.badge.tonal {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+.badge.hot {
+  background: var(--tertiary-container);
+  color: var(--on-tertiary-container);
+}
+.badge.latest {
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+.rel-date {
+  color: var(--on-surface-muted);
+  font-size: 14px;
+}
+.rel-hash {
+  margin-left: auto;
+  color: var(--on-surface-muted);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.rel-note {
+  color: var(--on-surface-muted);
+  font-size: 14px;
+  line-height: 20px;
+  margin: 0 0 14px;
+}
+
+.card ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--on-surface);
+}
+.card li .dot { align-self: center; }
+
+.card code, .tl-code {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--surface-container);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+/* Обзор линейки — строка-стрелка внутри hero-карточки */
+.line-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+/* Плашки «тема релиза» */
+.rel-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.chip {
+  font-size: 12px;
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: var(--pill);
+  background: var(--surface-container);
+  color: var(--on-surface-muted);
+}
+
+/* Соседние линейки внизу страницы версии */
+.neighbors {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 24px;
+}
+.neighbors .btn { min-height: 40px; padding: 0 20px; font-size: 13px; }
+
+.hidden { display: none !important; }
+
+/* ── Футер ───────────────────────────────────────────────────────── */
+footer {
+  padding: 32px 0 48px;
+  color: var(--on-surface-muted);
+  font-size: 13px;
+  border-top: 1px solid var(--outline-variant);
+  margin-top: 32px;
+  text-align: center;
+  line-height: 1.8;
+}
+
+@media (max-width: 720px) {
+  .header .nav { display: none; }
+  .header { grid-template-columns: 1fr 1fr; }
+  .header .header-actions { grid-column: 2; }
+  .hero h1 { font-size: 26px; line-height: 34px; }
+  .rel-hash { display: none; }
+}

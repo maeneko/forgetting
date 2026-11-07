@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Forgetting 0.4.x — история релизов</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="header" id="header">
+  <a class="logo" href="index.html">for<span>getting</span></a>
+  <nav class="nav">
+    <a href="index.html">Обзор</a>
+    <a href="0.1.html">0.1</a>
+    <a href="0.2.html">0.2</a>
+    <a href="0.3.html">0.3</a>
+    <a href="0.4.html" class="active">0.4</a>
+    <a href="0.5.html">0.5</a>
+  </nav>
+  <div class="header-actions">
+    <a class="btn tonal state-layer" href="https://github.com/maeneko/forgetting" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</header>
+
+<main class="wrap" id="top">
+
+  <section class="hero">
+    <h1>Линейка <span>0.4.x</span> — переезд на Go и стелс</h1>
+    <p>
+      октябрь 2026 · 10 релизов. Самая плотная линейка: переписывание агента, UI и CLI на Go
+      за один день, мониторинг и мастер-ключи в панели, а в конце — стелс-релиз 0.4.8.
+    </p>
+  </section>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge hot">v0.4.0</span>
+      <span class="rel-date">14 октября 2026</span>
+      <span class="rel-hash">e70c546</span>
+    </div>
+    <ul>
+      <li><span class="dot ok"></span><span>Полный переезд на Go: агент, UI и CLI — <code>awg-control</code> (10 коммитов за день)</span></li>
+      <li><span class="dot"></span><span>Дифференциальный бенч (diffbench) для сверки Go-версии с прежним поведением</span></li>
+      <li><span class="dot"></span><span>Доставка и запуск Go-бинарника вместо Node.js, установка с GitHub</span></li>
+      <li><span class="dot"></span><span>Шейпинг скорости, Prometheus, вкладка мониторинга, аудит пиров</span></li>
+      <li><span class="dot"></span><span>Release-воркфлоу умеет ручной запуск с созданием тега</span></li>
+    </ul>
+    <div class="rel-tags"><span class="chip">Go rewrite</span></div>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.1</span>
+      <span class="rel-date">17 октября 2026</span>
+      <span class="rel-hash">cf6af5c</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Монитор: графики за 7 и 30 дней, использованный трафик, объединённые плитки</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.2</span>
+      <span class="rel-date">17 октября 2026</span>
+      <span class="rel-hash">a84845c</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Блокировка BitTorrent на уровне сервера</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.2.1</span>
+      <span class="rel-date">18 октября 2026</span>
+      <span class="rel-hash">ea91265</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span><code>awg-ctrl</code> больше не зависает на битторрент-флаге</span></li>
+      <li><span class="dot"></span><span>Корректный выход из истёкшей сессии</span></li>
+    </ul>
+    <div class="rel-tags"><span class="chip">hotfix</span></div>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.3</span>
+      <span class="rel-date">19 октября 2026</span>
+      <span class="rel-hash">28ccc17</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Вкладка «Мастер-ключи»: колонки как у списка пользователей, IP устройств, сводка по каждому ключу</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.4</span>
+      <span class="rel-date">20 октября 2026</span>
+      <span class="rel-hash">0687650</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Недоступный сервер больше не ломает список устройств</span></li>
+      <li><span class="dot"></span><span>403 для ключей вне скоупа API-ключа</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.5</span>
+      <span class="rel-date">21 октября 2026</span>
+      <span class="rel-hash">45c96aa</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Панель можно вынести на сервер без VPN</span></li>
+      <li><span class="dot"></span><span>Включение/выключение серверов для всех мастер-ключей одним действием</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.6</span>
+      <span class="rel-date">21 октября 2026</span>
+      <span class="rel-hash">eb9fd70</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Prometheus на ноде</span></li>
+      <li><span class="dot"></span><span>Панель под URL-префиксом (reverse-proxy дружелюбность)</span></li>
+      <li><span class="dot"></span><span>Открытие портов при импорте миграции</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.4.7</span>
+      <span class="rel-date">27 октября 2026</span>
+      <span class="rel-hash">c7d1333</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Случайный AWG-порт и параметры обфускации при установке</span></li>
+      <li><span class="dot"></span><span>Открытие портов в firewalld и iptables</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge hot">v0.4.8</span>
+      <span class="rel-date">28 октября 2026</span>
+      <span class="rel-hash">f0949c9</span>
+    </div>
+    <ul>
+      <li><span class="dot ok"></span><span>Стелс-версия: случайные I1 и MTU, стелс-порт <code>sen://</code>, случайные имена сертификатов</span></li>
+      <li><span class="dot"></span><span>Секретный URL-путь панели, бренд скрыт от неаутентифицированных запросов</span></li>
+      <li><span class="dot"></span><span>Журнал VPN-подключений: кто и когда подключался</span></li>
+      <li><span class="dot"></span><span>Хаб: нода подписывается до WebSocket-апгрейда</span></li>
+      <li><span class="dot"></span><span>Полное удаление из установщика</span></li>
+      <li><span class="dot"></span><span><code>awg-ctrl</code>: обновление/переустановка/удаление из меню, команды секретного пути, лога, метрик, хаба и проверки</span></li>
+      <li><span class="dot"></span><span>Полностью новый README, порядок в установщике</span></li>
+    </ul>
+    <div class="rel-tags"><span class="chip">11 коммитов + PR #1</span><span class="chip">стелс</span></div>
+  </div>
+
+  <div class="neighbors">
+    <a class="btn text state-layer" href="0.3.html">← 0.3.x</a>
+    <a class="btn tonal state-layer" href="0.5.html">0.5.x: редизайн →</a>
+  </div>
+
+  <footer>
+    Собрано из истории git · 118 коммитов · 9 июля — 30 октября 2026 · 26 тегов
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

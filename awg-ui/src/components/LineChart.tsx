@@ -40,7 +40,6 @@ export default function LineChart({ title, series, from, to, step, format, forma
     const wrap = useRef<HTMLDivElement>(null);     // содержимое карточки без её padding: от него зависит ширина svg
     const [w, setW] = useState(640);
     const [hover, setHover] = useState<number | null>(null);     // индекс по оси времени
-    const [table, setTable] = useState(false);
     const H = 200;
 
     useEffect(() => {
@@ -98,13 +97,6 @@ export default function LineChart({ title, series, from, to, step, format, forma
     // Подсказка не вылезает за правый край: правее середины открывается влево от перекрестия
     const flip = ht !== null && x(ht) > w * 0.55;
 
-    // Табличный вид — те же числа без наведения: ~12 равномерно выбранных строк, последняя — самая свежая
-    const rows = useMemo(() => {
-        if (!times.length) return [] as number[];
-        const n = Math.min(12, times.length);
-        return Array.from({ length: n }, (_, i) => times[Math.round(((times.length - 1) * (i + 1)) / n)]).reverse();
-    }, [times]);
-
     return (
         <figure className={`mon-chart${dim ? ' mon-chart--dim' : ''}`}>
             <figcaption className="mon-chart-head">
@@ -118,27 +110,9 @@ export default function LineChart({ title, series, from, to, step, format, forma
                         ))}
                     </span>
                 )}
-                <button type="button" className="mon-chart-toggle" aria-pressed={table} onClick={() => setTable(t => !t)}>
-                    {table ? 'График' : 'Таблица'}
-                </button>
             </figcaption>
 
             <div ref={wrap}>
-            {table ? (
-                <div className="mon-table-wrap">
-                    <table className="mon-table">
-                        <thead><tr><th>Время</th>{series.map(s => <th key={s.id}>{s.name}</th>)}</tr></thead>
-                        <tbody>
-                            {rows.length === 0 ? <tr><td colSpan={series.length + 1}>Нет данных</td></tr> : rows.map(t => (
-                                <tr key={t}>
-                                    <td>{timeLabel(t, span)}</td>
-                                    {series.map((s, i) => <td key={s.id}>{byTime[i].has(t) ? format(byTime[i].get(t)!) : '—'}</td>)}
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            ) : (
                 <div className="mon-plot">
                     <svg width={w} height={H} role="img" tabIndex={0} aria-label={`${title}. Стрелки влево и вправо — значения по времени.`}
                         onKeyDown={onKey} onBlur={() => setHover(null)}>
@@ -187,7 +161,6 @@ export default function LineChart({ title, series, from, to, step, format, forma
                         </div>
                     )}
                 </div>
-            )}
             </div>
         </figure>
     );

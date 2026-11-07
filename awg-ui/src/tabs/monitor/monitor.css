@@ -77,11 +77,6 @@ LICENSE file in the root directory of this source tree.
 .mon-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .mon-legend-item { display: inline-flex; align-items: center; gap: 6px; }
 .mon-key { display: inline-block; width: 14px; height: 3px; border-radius: var(--shape-extra-small); flex: none; }
-.mon-chart-toggle {
-    margin-left: auto; min-height: 44px; padding: 0 12px;
-    font: inherit; font-size: var(--label-large-size); line-height: var(--label-large-line); color: var(--on-primary-container);
-    background: none; border: 0; border-radius: var(--shape-full); cursor: pointer;
-}
 
 .mon-plot { position: relative; }
 .mon-plot svg { display: block; max-width: 100%; }

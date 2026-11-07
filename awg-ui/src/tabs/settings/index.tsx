@@ -4,12 +4,13 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { apiFetch, copyText, timeAgo, BRAND_FALLBACK, SETTINGS_SECTION_KEY, type Brand, type NodeInfo, type PageProps } from '../../lib/shared';
 import { useTheme, setThemeMode, type ThemeMode } from '../../lib/theme';
-import { IcoCheck, IcoCopy, IcoRefresh, IcoTrash, IcoPlus } from '../../components/icons';
+import { IcoCheck, IcoCopy, IcoKey, IcoRefresh, IcoTrash, IcoPlus } from '../../components/icons';
 import ApiKeysPage from './apikeys';
 import AuditPage from './audit';
 import MigratePage from './migrate';
 import PrometheusInstall from './prometheus';
 import ServerSettings from './server';
+import SenSpec from './about/SenSpec';
 import './settings.css';
 
 // Вкладка «Настройки»: настройки самой панели, не конкретного сервера (те — в меню серверов).
@@ -174,6 +175,7 @@ export default function SettingsPage({ token, showMsg }: PageProps) {
     }, [token, showMsg]);
 
     const online = nodes.filter(n => n.online).length;
+    const [senSpec, setSenSpec] = useState(false);   // диалог «Спецификация sen://» из «О панели»
 
     return (
         <>
@@ -273,6 +275,15 @@ export default function SettingsPage({ token, showMsg }: PageProps) {
                     <div><dt>Версия</dt><dd>{[brand.channel, brand.version].filter(Boolean).join(' ') || '—'}</dd></div>
                     <div><dt>Серверы</dt><dd>{nodes.length ? `${nodes.length}, на связи ${online}` : '—'}</dd></div>
                 </dl>
+                <div className="st-row">
+                    <span className="st-row-text">
+                        <span className="st-row-name">Спецификация sen://</span>
+                        <span className="st-hint">Формат ссылки-подписки и разбор ключа по байтам</span>
+                    </span>
+                    <span className="st-row-ctl">
+                        <button className="btn btn--tonal" onClick={() => setSenSpec(true)}><IcoKey /> Открыть</button>
+                    </span>
+                </div>
             </section>
             )}
             </div>
@@ -299,6 +310,8 @@ export default function SettingsPage({ token, showMsg }: PageProps) {
                     </div>
                 </div>
             )}
+
+            {senSpec && <SenSpec onClose={() => setSenSpec(false)} />}
         </>
     );
 }

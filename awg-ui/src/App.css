@@ -168,11 +168,11 @@ body {
    hover 8%, focus 10%, pressed 10%. Hover — только там, где есть указатель; на тач-устройствах
    обратная связь — нажатие. Строки навигации инертны к нажатию (design.md, 5). */
 :is(.btn, .btn-icon, .theme-toggle, .awg-restart, .hamburger-btn, .rail-menu, .nav-item, .server-current,
-    .server-card--inactive, .server-pick, .mon-range, .mon-chart-toggle, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option) {
+    .server-card--inactive, .server-pick, .mon-range, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option) {
     position: relative;
 }
 :is(.btn, .btn-icon, .theme-toggle, .awg-restart, .hamburger-btn, .rail-menu, .nav-item, .server-current,
-    .server-card--inactive, .server-pick, .mon-range, .mon-chart-toggle, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option)::before {
+    .server-card--inactive, .server-pick, .mon-range, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option)::before {
     content: '';
     position: absolute;
     inset: 0;
@@ -184,16 +184,16 @@ body {
 }
 @media (hover: hover) {
     :is(.btn, .btn-icon, .theme-toggle, .awg-restart, .rail-menu, .nav-item, .server-current,
-        .server-card--inactive, .server-pick, .mon-range, .mon-chart-toggle, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option):hover:not(:disabled)::before {
+        .server-card--inactive, .server-pick, .mon-range, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option):hover:not(:disabled)::before {
         opacity: var(--state-hover);
     }
 }
 :is(.btn, .btn-icon, .theme-toggle, .awg-restart, .hamburger-btn, .rail-menu, .nav-item, .server-current,
-    .server-card--inactive, .server-pick, .mon-range, .mon-chart-toggle, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option):focus-visible::before {
+    .server-card--inactive, .server-pick, .mon-range, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option):focus-visible::before {
     opacity: var(--state-focus);
 }
 :is(.btn, .btn-icon, .theme-toggle, .awg-restart, .hamburger-btn, .rail-menu, .server-current,
-    .server-card--inactive, .server-pick, .mon-range, .mon-chart-toggle, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option):active:not(:disabled)::before {
+    .server-card--inactive, .server-pick, .mon-range, .mk-caret, .mk-menu-item, .bs-opt, .segmented-item, .st-tab, .server-option):active:not(:disabled)::before {
     opacity: var(--state-pressed);
 }
 /* Карточки и строки выбора подсвечиваются фирменным фиолетовым, а не цветом текста */

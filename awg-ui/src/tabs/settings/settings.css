@@ -96,6 +96,8 @@ LICENSE file in the root directory of this source tree.
 .st-facts > div:last-child  { padding-bottom: 4px; }
 .st-facts dt { font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--neutral-text); }
 .st-facts dd { margin: 0; font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface); text-align: right; }
+/* строка-действие сразу за фактами отделяется линией, как строки внутри фактов */
+.st-facts + .st-row { border-top: 1px solid var(--outline-variant); }
 
 /* Открытый токен (один раз после выпуска) — как ключ API */
 .st-secret {

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Forgetting 0.3.x — история релизов</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="header" id="header">
+  <a class="logo" href="index.html">for<span>getting</span></a>
+  <nav class="nav">
+    <a href="index.html">Обзор</a>
+    <a href="0.1.html">0.1</a>
+    <a href="0.2.html">0.2</a>
+    <a href="0.3.html" class="active">0.3</a>
+    <a href="0.4.html">0.4</a>
+    <a href="0.5.html">0.5</a>
+  </nav>
+  <div class="header-actions">
+    <a class="btn tonal state-layer" href="https://github.com/maeneko/forgetting" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</header>
+
+<main class="wrap" id="top">
+
+  <section class="hero">
+    <h1>Линейка <span>0.3.x</span> — подписки и мультисерверность</h1>
+    <p>
+      сентябрь 2026 · 5 релизов. Подписки <code class="tl-code">sen://</code> с мастер-ключами
+      и архитектура «ядро + ноды»: один ключ — устройства на многих серверах.
+    </p>
+  </section>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge hot">v0.3.0</span>
+      <span class="rel-date">25 сентября 2026</span>
+      <span class="rel-hash">6e010a0</span>
+    </div>
+    <ul>
+      <li><span class="dot ok"></span><span>Подписки <code>sen://</code> с мастер-ключами: один ключ — множество устройств</span></li>
+      <li><span class="dot"></span><span>Эндпоинты <code>/sub/v1/devices</code> и <code>/sub/v1/peek</code>, при регистрации устройства подсчитываются слоты</span></li>
+    </ul>
+    <div class="rel-tags"><span class="chip">подписки</span></div>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.3.1</span>
+      <span class="rel-date">26 сентября 2026</span>
+      <span class="rel-hash">2f2f0e2</span>
+    </div>
+    <ul>
+      <li><span class="dot ok"></span><span>Управление несколькими серверами из одной панели: архитектура «ядро + ноды»</span></li>
+      <li><span class="dot"></span><span>Установщик спрашивает роль сервера, полные логи</span></li>
+      <li><span class="dot"></span><span>Фикс сгенерированного пароля установщика; лог не убивает выполнение</span></li>
+    </ul>
+    <div class="rel-tags"><span class="chip">мультисерверность</span></div>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.3.2</span>
+      <span class="rel-date">26 сентября 2026</span>
+      <span class="rel-hash">3eede2f</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Нода сохраняет собственную панель при подключении к ядру</span></li>
+      <li><span class="dot"></span><span>Устройства одного мастер-ключа обслуживаются с нескольких серверов сразу</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.3.3</span>
+      <span class="rel-date">27 сентября 2026</span>
+      <span class="rel-hash">eb0ec28</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Пиры мастер-ключей больше не переживают свои устройства («зомби»-пиры удалены)</span></li>
+      <li><span class="dot"></span><span>Управление мастер-ключами через внешний API</span></li>
+      <li><span class="dot"></span><span>В панели видна версия Forgetting каждого сервера</span></li>
+      <li><span class="dot"></span><span>Мастер-ключи получают стабильный uuid</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge latest">v0.3.4 · последняя в линейке</span>
+      <span class="rel-date">28 сентября 2026</span>
+      <span class="rel-hash">7fbff82</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>При снижении лимита мастер-ключа новейшие устройства отвязываются автоматически</span></li>
+    </ul>
+  </div>
+
+  <div class="neighbors">
+    <a class="btn text state-layer" href="0.2.html">← 0.2.x</a>
+    <a class="btn tonal state-layer" href="0.4.html">0.4.x: переезд на Go →</a>
+  </div>
+
+  <footer>
+    Собрано из истории git · 118 коммитов · 9 июля — 30 октября 2026 · 26 тегов
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

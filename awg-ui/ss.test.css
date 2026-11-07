@@ -1,0 +1,115 @@
+/* src/tabs/settings/about/sen-spec.css */
+.ksp-card {
+  width: 100%;
+  max-width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  scroll-padding-bottom: 8px;
+}
+.ksp-sub {
+  margin: 8px 0 0;
+  font-size: var(--title-small-size);
+  line-height: var(--title-small-line);
+  font-weight: var(--weight-medium);
+  color: var(--on-surface);
+}
+.ksp-list {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ksp-list li {
+  font-size: var(--body-small-size);
+  line-height: var(--body-small-line);
+  color: var(--neutral-text);
+  overflow-wrap: anywhere;
+}
+.ksp-pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  text-align: left;
+  user-select: all;
+  background: var(--surface-container-lowest);
+}
+.ksp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--body-small-size);
+  line-height: var(--body-small-line);
+}
+.ksp-table th {
+  text-align: left;
+  padding: 8px 10px 4px;
+  font-weight: var(--weight-medium);
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+}
+.ksp-table td {
+  padding: 8px 10px 4px;
+  border-top: .5px solid var(--outline-variant);
+  color: var(--on-surface);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.ksp-table td:first-child,
+.ksp-table th:first-child {
+  padding-left: 0;
+  white-space: nowrap;
+}
+.ksp-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  font-family: var(--mono);
+  font-size: var(--body-small-size);
+  line-height: var(--body-small-line);
+  color: var(--on-surface);
+  background: var(--surface-container-lowest);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--shape-medium);
+  padding: 10px 12px;
+  word-break: break-all;
+}
+.ksp-input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+}
+.ksp-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.ksp-error {
+  margin: 0;
+  font-size: var(--body-small-size);
+  line-height: var(--body-small-line);
+  color: var(--on-error-container);
+}
+.ksp-total {
+  margin: 8px 0 0;
+  font-weight: var(--weight-medium);
+  color: var(--on-surface);
+}
+.ksp-anatomy {
+  margin-top: 4px;
+  background: var(--surface-container-lowest);
+  border-radius: var(--shape-medium);
+  padding: 4px 12px 8px;
+}
+.ksp-bytes {
+  font-family: var(--mono);
+  white-space: nowrap;
+  color: var(--neutral-text);
+}
+.ksp-hex {
+  font-family: var(--mono);
+  font-size: var(--body-small-size);
+  color: var(--neutral-text);
+}
+@media (max-width: 599px) {
+  .ksp-actions .btn {
+    flex: 1;
+  }
+}

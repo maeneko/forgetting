@@ -1,0 +1,157 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Диалог «Спецификация sen://» (settings/about/SenSpec.tsx). Каркас — общий диалог панели
+   (.node-scrim / .node-modal в App.css). Префикс ksp- — «key spec»; ss- занят настройками сервера. */
+
+/* Спецификация длинная: карточка шире обычной панельки и прокручивается целиком */
+.ksp-card {
+    width: 100%; max-width: min(1040px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    scroll-padding-bottom: 8px;
+}
+
+/* Кнопка закрытия — прямой ребёнок карточки (она же скролл-контейнер): sticky внутри узкой
+   строки заголовка не работает — элемент не выходит за пределы родителя. Отрицательные
+   поля убирают её из потока (заголовок остаётся на месте); при прокрутке кнопка прилипает
+   к верхней кромке диалога и остаётся плавающим кружком — фон card + тень закрывают контент */
+.ksp-close {
+    position: sticky; top: 8px;
+    align-self: flex-end;
+    margin: -16px 0 -40px auto;   /* по потоку: топ-край на 8px, следующий блок — на месте заголовка (24px) */
+    z-index: 1;
+    display: flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px;
+    padding: 0; border: none; border-radius: 50%;
+    background: var(--surface-container-high);
+    color: var(--on-surface-variant);
+    box-shadow: var(--elevation-1);
+    cursor: pointer;
+    transition: color var(--duration-short4) var(--ease-standard), box-shadow var(--duration-short4) var(--ease-standard);
+}
+.ksp-close:hover  { color: var(--on-surface); box-shadow: var(--elevation-2); }
+.ksp-close:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* Подводка под заголовком — во всю ширину карточки */
+.ksp-lead { margin-bottom: 4px; }
+
+/* Тело диалога: описание слева, интерактивная анатомия справа (на узком — столбцом) */
+.ksp-cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px 28px;
+    align-items: start;
+}
+.ksp-col { display: flex; flex-direction: column; gap: 16px; }
+
+/* Правая колонка — замкнутая карточка на самой светлой поверхности: поле ввода, кнопки и
+   таблица анатомии держатся вместе. Скрытой прокрутки внутри нет: таблица показывается
+   целиком, прокручивается сам диалог. */
+.ksp-col--anatomy {
+    gap: 10px;
+    background: var(--surface-container-lowest);
+    border-radius: var(--shape-large);
+    padding: 16px;
+}
+.ksp-col--anatomy .ksp-sub { margin-top: 0; }
+.ksp-sub {
+    margin: 8px 0 0;
+    font-size: var(--title-small-size); line-height: var(--title-small-line);
+    font-weight: var(--weight-medium); color: var(--on-surface);
+}
+.ksp-list { margin: 4px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.ksp-list li { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); overflow-wrap: anywhere; }
+.ksp-pre {
+    margin: 4px 0 0; white-space: pre-wrap; text-align: left; user-select: all;
+    background: var(--surface-container-lowest);
+    /* break-all у .node-modal-cmd рвёт значения посреди («10.9.0.5/32») — только по пробелам */
+    word-break: normal; overflow-wrap: break-word;
+}
+
+/* Таблицы раскладки: узкие колонки «Поле»/«Байт» и свободная «Значение»;
+   обёртка прокручивается вбок, если таблица шире карточки */
+.ksp-scroll { overflow-x: auto; }
+.ksp-table { width: 100%; border-collapse: collapse; font-size: var(--body-small-size); line-height: var(--body-small-line); }
+.ksp-table th { text-align: left; padding: 8px 10px 4px; font-weight: var(--weight-medium); color: var(--on-surface-variant); white-space: nowrap; }
+.ksp-table td { padding: 8px 10px 4px; border-top: .5px solid var(--outline-variant); color: var(--on-surface); vertical-align: top; overflow-wrap: anywhere; }
+.ksp-table td:first-child, .ksp-table th:first-child { padding-left: 0; white-space: nowrap; }
+
+/* Поле ввода и действия блока «Анатомия ключа» */
+.ksp-input {
+    width: 100%; resize: vertical; min-height: 72px;
+    font-family: var(--mono); font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface); background: var(--surface-container-lowest);
+    border: 1px solid var(--outline-variant); border-radius: var(--shape-medium);
+    padding: 10px 12px;
+    word-break: break-all;
+}
+.ksp-input:focus-visible { outline: 2px solid var(--primary); outline-offset: -1px; }
+.ksp-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.ksp-error  { margin: 0; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--on-error-container); }
+.ksp-total  { margin: 8px 0 0; font-weight: var(--weight-medium); color: var(--on-surface); }
+
+/* Таблица анатомии: байтовые колонки моноширинно; длинный HEX — перенос */
+.ksp-anatomy { margin-top: 4px; background: var(--surface-container-lowest); border-radius: var(--shape-medium); padding: 4px 12px 8px; }
+.ksp-bytes  { font-family: var(--mono); white-space: nowrap; color: var(--neutral-text); }
+.ksp-hex    { font-family: var(--mono); font-size: var(--body-small-size); color: var(--neutral-text); }
+
+/* ── Подсветка «мест» в самой ссылке ──
+   8 цветов (закольцованы по номеру поля): подписи — те же токены, что работают в высокой
+   и тёмной темах; для ещё 3 — смеси color-mix, чтобы соседние поля не путались. */
+.ksp-card {
+    --ksp-0: var(--primary);
+    --ksp-1: var(--tertiary);
+    --ksp-2: var(--warn-dot);
+    --ksp-3: var(--success-dot);
+    --ksp-4: var(--error-dot);
+    --ksp-5: color-mix(in srgb, var(--primary) 55%, var(--tertiary));
+    --ksp-6: color-mix(in srgb, var(--tertiary) 60%, var(--error-dot));
+    --ksp-7: color-mix(in srgb, var(--primary) 50%, var(--error-dot));
+    --ksp-8: color-mix(in srgb, var(--success-dot) 55%, var(--primary));
+    --ksp-9: color-mix(in srgb, var(--warn-dot) 55%, var(--primary));
+    --ksp-10: color-mix(in srgb, var(--success-dot) 55%, var(--tertiary));
+}
+/* сама ссылка: префикс нейтральный, сегменты тонируются по полю */
+.ksp-visual {
+    display: block; margin: 0;
+    font-family: var(--mono); font-size: var(--body-small-size); line-height: 1.9;
+    background: var(--surface-container); border-radius: var(--shape-medium);
+    padding: 10px 12px;
+    word-break: break-all;
+    user-select: all;
+}
+.ksp-visual-prefix { color: var(--neutral-text); }
+.ksp-c0 { --Vm: var(--ksp-0); }
+.ksp-c1 { --Vm: var(--ksp-1); }
+.ksp-c2 { --Vm: var(--ksp-2); }
+.ksp-c3 { --Vm: var(--ksp-3); }
+.ksp-c4 { --Vm: var(--ksp-4); }
+.ksp-c5 { --Vm: var(--ksp-5); }
+.ksp-c6 { --Vm: var(--ksp-6); }
+.ksp-c7 { --Vm: var(--ksp-7); }
+.ksp-c8 { --Vm: var(--ksp-8); }
+.ksp-c9 { --Vm: var(--ksp-9); }
+.ksp-c10 { --Vm: var(--ksp-10); }
+.ksp-seg {
+    color: var(--on-surface); border-radius: 4px; padding: 1px 0;
+    background: color-mix(in srgb, var(--Vm) 22%, transparent);
+    box-shadow: inset 0 -0.25em 0 color-mix(in srgb, var(--Vm) 55%, transparent);
+    cursor: default;
+}
+.ksp-seg--on { background: color-mix(in srgb, var(--Vm) 42%, transparent); font-weight: var(--weight-medium); }
+.ksp-off { opacity: .3; }
+
+/* строка таблицы подсвечивается вместе со своим сегментом */
+.ksp-row--on { background: color-mix(in srgb, var(--primary-container) 55%, transparent); }
+.ksp-row--on td:first-child { color: var(--on-surface); }
+/* цветной знак поля в таблице — образец того же цвета, что его сегмент в ссылке */
+.ksp-key { margin-right: 8px; }
+
+@media (max-width: 959px) {
+    .ksp-cols { grid-template-columns: 1fr; gap: 8px; }
+}
+@media (max-width: 599px) {
+    .ksp-actions .btn { flex: 1; }
+}

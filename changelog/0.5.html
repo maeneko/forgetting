@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Forgetting 0.5.x — история релизов</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="header" id="header">
+  <a class="logo" href="index.html">for<span>getting</span></a>
+  <nav class="nav">
+    <a href="index.html">Обзор</a>
+    <a href="0.1.html">0.1</a>
+    <a href="0.2.html">0.2</a>
+    <a href="0.3.html">0.3</a>
+    <a href="0.4.html">0.4</a>
+    <a href="0.5.html" class="active">0.5</a>
+  </nav>
+  <div class="header-actions">
+    <a class="btn tonal state-layer" href="https://github.com/maeneko/forgetting" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</header>
+
+<main class="wrap" id="top">
+
+  <section class="hero">
+    <h1>Линейка <span>0.5.x</span> — редизайн панели</h1>
+    <p>
+      29 — 30 октября 2026 · 4 релиза. Новый интерфейс панели, обновление без сноса
+      и доводка Prometheus до конца.
+    </p>
+  </section>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge hot">v0.5.0</span>
+      <span class="rel-date">29 октября 2026</span>
+      <span class="rel-hash">5b29993</span>
+    </div>
+    <ul>
+      <li><span class="dot ok"></span><span>Редизайн панели</span></li>
+      <li><span class="dot"></span><span>Маскирование I1 по каждому серверу отдельно</span></li>
+      <li><span class="dot"></span><span>Минимальная версия ноды — 0.5.0</span></li>
+      <li><span class="dot"></span><span>Новый вывод установщика</span></li>
+    </ul>
+    <div class="rel-tags"><span class="chip">редизайн</span></div>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.5.1</span>
+      <span class="rel-date">29 октября 2026</span>
+      <span class="rel-hash">33dd488</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Установщик: <code>ALLOW_048=y</code> обновляет установку 0.4.8 без полного сноса</span></li>
+      <li><span class="dot"></span><span>Сессия сохраняется при сетевых ошибках при восстановлении</span></li>
+      <li><span class="dot"></span><span>Токен отправляется с <code>/ui/brand</code> из вкладки настроек</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge tonal">v0.5.2</span>
+      <span class="rel-date">30 октября 2026</span>
+      <span class="rel-hash">86dabfe</span>
+    </div>
+    <ul>
+      <li><span class="dot"></span><span>Установка Prometheus: опрос не останавливается, пока панель его не увидит</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="rel-head">
+      <span class="badge latest">v0.5.3 · актуальная версия</span>
+      <span class="rel-date">30 октября 2026</span>
+      <span class="rel-hash">a2d1be2</span>
+    </div>
+    <ul>
+      <li><span class="dot cur"></span><span>Prometheus на ноде со своей панелью: скрейпит ядро через агента</span></li>
+    </ul>
+  </div>
+
+  <div class="neighbors">
+    <a class="btn text state-layer" href="0.4.html">← 0.4.x</a>
+    <a class="btn tonal state-layer" href="index.html">К обзору ↑</a>
+  </div>
+
+  <footer>
+    Собрано из истории git · 118 коммитов · 9 июля — 30 октября 2026 · 26 тегов
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Forgetting — история релизов</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="header" id="header">
+  <a class="logo" href="index.html">for<span>getting</span></a>
+  <nav class="nav">
+    <a href="index.html" class="active">Обзор</a>
+    <a href="0.1.html">0.1</a>
+    <a href="0.2.html">0.2</a>
+    <a href="0.3.html">0.3</a>
+    <a href="0.4.html">0.4</a>
+    <a href="0.5.html">0.5</a>
+  </nav>
+  <div class="header-actions">
+    <a class="btn tonal state-layer" href="https://github.com/maeneko/forgetting" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</header>
+
+<main class="wrap" id="top">
+
+  <section class="hero">
+    <h1>История релизов <span>Forgetting</span></h1>
+    <p>
+      VPN-панель на базе AmneziaWG: ядро и ноды, мастер-ключи,
+      подписки <code class="tl-code">sen://</code> и мониторинг на Prometheus.
+      Ниже — пять линеек версий; каждая раскрыта на своей странице. Всё собрано из истории git.
+    </p>
+    <div class="meta">
+      <div class="dot-row">
+        <span class="dot cur"></span>
+        <span style="font-size:13px;color:var(--on-surface-muted)">текущая: 0.5.3 · 30 октября 2026</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 0.1 ══ -->
+  <section id="line-01">
+    <div class="card">
+      <div class="rel-head">
+        <span class="badge hot">0.1.x — первые шаги</span>
+        <span class="rel-date">июль — август 2026 · 4 релиза</span>
+      </div>
+      <ul>
+        <li><span class="dot ok"></span><span>Поддержка AmneziaWG 3.1 с перевыпуском ключей и фиксом наката модуля</span></li>
+        <li><span class="dot"></span><span>Переключатели <code>AWG_GEN</code> / <code>AWG_PIN</code>, показ версии модуля ядра</span></li>
+        <li><span class="dot"></span><span>Первая публичная установка со скриптом с GitHub, релизы как prereleases</span></li>
+      </ul>
+      <div class="line-foot">
+        <a class="btn text state-layer" href="0.1.html">Читать полностью →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 0.2 ══ -->
+  <section id="line-02">
+    <div class="card">
+      <div class="rel-head">
+        <span class="badge hot">0.2.x — Beta и автоматизация</span>
+        <span class="rel-date">август — сентябрь 2026 · 3 релиза</span>
+      </div>
+      <ul>
+        <li><span class="dot ok"></span><span>Первая «Beta»: AWG 3.1 по умолчанию, white-label, CI на каждый пуш</span></li>
+        <li><span class="dot"></span><span>Внешние API-ключи, каркас админ-панели</span></li>
+        <li><span class="dot"></span><span>Установщик поддерживает Debian</span></li>
+      </ul>
+      <div class="line-foot">
+        <a class="btn text state-layer" href="0.2.html">Читать полностью →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 0.3 ══ -->
+  <section id="line-03">
+    <div class="card">
+      <div class="rel-head">
+        <span class="badge hot">0.3.x — подписки и мультисерверность</span>
+        <span class="rel-date">сентябрь 2026 · 5 релизов</span>
+      </div>
+      <ul>
+        <li><span class="dot ok"></span><span>Подписки <code>sen://</code> с мастер-ключами: один ключ — множество устройств</span></li>
+        <li><span class="dot"></span><span>Архитектура «ядро + ноды», устройства ключа на нескольких серверах</span></li>
+        <li><span class="dot"></span><span>Управление мастер-ключами через внешний API, автоотвязка при снижении лимита</span></li>
+      </ul>
+      <div class="line-foot">
+        <a class="btn text state-layer" href="0.3.html">Читать полностью →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 0.4 ══ -->
+  <section id="line-04">
+    <div class="card">
+      <div class="rel-head">
+        <span class="badge hot">0.4.x — переезд на Go и стелс</span>
+        <span class="rel-date">октябрь 2026 · 10 релизов</span>
+      </div>
+      <ul>
+        <li><span class="dot ok"></span><span>Полный переезд на Go: агент, UI и CLI, дифференциальный бенч для сверки</span></li>
+        <li><span class="dot"></span><span>Шейпинг, Prometheus, мониторинг 7/30 дней, блокировка BitTorrent</span></li>
+        <li><span class="dot"></span><span>Стелс-версия 0.4.8: случайные I1/MTU, секретный URL панели, журнал подключений</span></li>
+      </ul>
+      <div class="line-foot">
+        <a class="btn text state-layer" href="0.4.html">Читать полностью →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 0.5 ══ -->
+  <section id="line-05">
+    <div class="card">
+      <div class="rel-head">
+        <span class="badge latest">0.5.x — редизайн · актуальная</span>
+        <span class="rel-date">29 — 30 октября 2026 · 4 релиза</span>
+      </div>
+      <ul>
+        <li><span class="dot cur"></span><span>Редизайн панели, маскирование I1 по каждому серверу</span></li>
+        <li><span class="dot"></span><span><code>ALLOW_048=y</code>: обновление 0.4.8 без полного сноса, сессия переживает сетевые ошибки</span></li>
+        <li><span class="dot"></span><span>Установка Prometheus ждёт, пока панель его увидит; скрейп ядра нодой через агента</span></li>
+      </ul>
+      <div class="line-foot">
+        <a class="btn text state-layer" href="0.5.html">Читать полностью →</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Собрано из истории git · 118 коммитов · 9 июля — 30 октября 2026 · 26 тегов
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
