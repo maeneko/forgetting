@@ -30,7 +30,7 @@ LICENSE file in the root directory of this source tree.
 
 /* Схема под каждым релеем: панель → релей → выбранные серверы (с данными релея).
    mode table — в подстроке таблицы (горизонтально), card — внутри карточки (вертикально).
-   Компактный вариант: капслок, мелкий шрифт, минимальные отступы. */
+   Узлы — зелёные капс-чипы (как статусные), данные — мелкая подпись под чипом. */
 .relays-flow-row > td { padding: 2px 12px 10px 20px; }
 .relay-flow {
     display: grid;
@@ -43,23 +43,17 @@ LICENSE file in the root directory of this source tree.
     padding: 8px 6px;
 }
 .relay-flow--card { grid-template-columns: 1fr; justify-items: center; }
-.flow-node {
-    display: flex; flex-direction: column; align-items: center; text-align: center; gap: 2px;
-    padding: 4px 6px;
+.flow-step {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
     min-width: 0;
 }
-.relay-flow--card .flow-node { width: 100%; }
-.flow-title {
-    display: inline-flex; align-items: center; gap: 5px;
-    color: var(--on-surface); font-weight: 500;
-    font-size: var(--body-small-size); line-height: var(--body-small-line);
+.flow-chip {
+    max-width: 100%;
     letter-spacing: 0.06em; text-transform: uppercase;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
-.flow-title svg { width: 14px; height: 14px; }
 .flow-hint {
     font-size: var(--body-small-size); line-height: var(--body-small-line);
-    color: var(--neutral-text);
+    color: var(--neutral-text); text-align: center;
 }
 .flow-targets { display: flex; flex-direction: column; gap: 2px; }
 .flow-link {

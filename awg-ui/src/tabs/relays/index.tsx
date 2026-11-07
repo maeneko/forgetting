@@ -7,7 +7,7 @@ import {
     apiFetch, timeAgo, copyText,
     type RelayInfo, type RelayBindInput, type RelayJoinResult, type NodeInfo, type PageProps,
 } from '../../lib/shared';
-import { IcoPlus, IcoRefresh, IcoTrash, IcoCopy, IcoClose, IcoSettings, IcoGear, IcoRelay, IcoGlobe } from '../../components/icons';
+import { IcoPlus, IcoRefresh, IcoTrash, IcoCopy, IcoClose, IcoSettings } from '../../components/icons';
 import './relays.css';
 
 // Виды привязок — те же, что в бэке (internal/ui/relays.go): vpn идёт UDP к VPN-порту
@@ -295,8 +295,9 @@ function RelaySettingsModal({ token, relay, serverList, onClose, showMsg }: {
     );
 }
 
-// Схема под релеем: панель → релей → выбранные серверы, с данными этого релея.
-// mode table — горизонтальная (строка таблицы), card — вертикальная (карточка на узком экране).
+// Схема под релеем: панель → релей → выбранные серверы (с данными релея). Три капс-чипа,
+// как статусные в списке; данные — мелкой подписью под чипом. mode table — под строкой
+// таблицы (горизонтально), card — внутри карточки (вертикально).
 function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeInfo[]; mode: 'table' | 'card' }) {
     const state = relay.pending ? 'ждёт подключение'
         : relay.online ? 'на связи' + (relay.version ? ` · v${relay.version}` : '')
@@ -311,24 +312,26 @@ function RelayFlow({ relay, servers, mode }: { relay: RelayInfo; servers: NodeIn
     });
     return (
         <div className={`relay-flow${mode === 'card' ? ' relay-flow--card' : ''}`}>
-            <div className="flow-node">
-                <span className="flow-title"><IcoGear /> Панель</span>
+            <div className="flow-step">
+                <span className="chip chip--online flow-chip"><span className="chip-dot" />Панель</span>
                 <span className="flow-hint">привязки и пуш агенту</span>
             </div>
             <div className="flow-link">
                 <span className="flow-arr">⟶</span>
                 <span className="flow-what">строка + привязки</span>
             </div>
-            <div className="flow-node">
-                <span className="flow-title"><IcoRelay /> {relay.name}</span>
+            <div className="flow-step">
+                <span className={`chip chip--${relay.online ? 'online' : 'offline'} flow-chip`}>
+                    <span className="chip-dot" />{relay.name}
+                </span>
                 <span className="flow-hint">{state}</span>
             </div>
             <div className="flow-link">
                 <span className="flow-arr">⟶</span>
                 <span className="flow-what">пересылка udp/tcp</span>
             </div>
-            <div className="flow-node">
-                <span className="flow-title"><IcoGlobe /> Серверы</span>
+            <div className="flow-step">
+                <span className="chip chip--online flow-chip"><span className="chip-dot" />Серверы</span>
                 <span className="flow-hint">
                     {targets.length ? (
                         <span className="flow-targets">{targets.map((t, i) => <span key={i}>{t}</span>)}</span>
