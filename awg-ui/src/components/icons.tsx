@@ -138,6 +138,13 @@ export const IcoHistory = () => (
     </svg>
 );
 
+// Релей: два встречных луча через точку пересылки (стрелка входа и выхода).
+export const IcoRelay = () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="2.5"/><path d="M3 12h6.5"/><path d="M14.5 12H21"/><path d="M21 12l-2.5-2.5M21 12l-2.5 2.5"/><path d="M3 12l2.5-2.5M3 12l2.5 2.5"/>
+    </svg>
+);
+
 export const IcoClose = () => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
         <line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/>
@@ -152,4 +159,5 @@ export const ICONS: Record<string, () => JSX.Element> = {
     pulse:  IcoPulse,
     move:   IcoMove,
     history: IcoHistory,
+    relay:  IcoRelay,
 };

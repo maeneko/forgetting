@@ -1,0 +1,50 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Стили вкладки «Релеи». Общее (палитра, btn, chip, field, table-card, node-modal,
+   toolbar) остаётся в App.css — здесь только релейные привязки и ряды списков. */
+
+.relays-hint {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--neutral-text);
+}
+.relays-hint--warn { color: var(--error); }
+
+/* Редактор привязок в модалке: ряды «вид → сервер → порт → убрать». */
+.bind-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 120px auto;
+    gap: 8px;
+    align-items: center;
+}
+.bind-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.relays-add-bind { margin: 12px 0 0; align-self: flex-start; }
+.bind-row .field--listen { text-align: right; }
+
+/* Список релеев. */
+.relay-binds-line {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+    font-family: var(--mono);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.relay-loss {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+}
+/* < 840px: таблица скрыта (.table-card в App.css), показываются карточки. */
+.relays-cards { display: none; flex-direction: column; gap: 12px; }
+.relays-count { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+
+@media (max-width: 839px) {
+    .relays-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    :is(.relays-count, .empty-cards) { grid-column: 1 / -1; }
+}
+
+@media (max-width: 720px) {
+    .bind-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .bind-row .field--listen { grid-column: 1 / -1; text-align: left; }
+}

@@ -699,6 +699,9 @@ func Main(args []string) {
 		}
 	case "join":
 		c.joinCore(sub, hasSub, a2, hasA2)
+	case "relay-apply":
+		// Скрытая команда: её запускает агент на ноде-реле по пушу панели, оператору она не нужна.
+		c.relayApply(sub, hasSub)
 	case "unjoin":
 		c.unjoinCore()
 	case "rehome":

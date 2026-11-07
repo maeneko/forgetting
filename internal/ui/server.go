@@ -870,6 +870,7 @@ func (a *App) routes() *Router {
 
 	app.Use("/ui/nodes", auth)
 	app.Mount("/ui/nodes", a.nodes.router())
+	app.Use("/ui/relays", auth)
 	app.Mount("/ui/relays", a.nodes.relayRouter())
 	app.Use("/ui/masterkeys", auth)
 	app.Mount("/ui/masterkeys", a.sub.masterKeysRouter())

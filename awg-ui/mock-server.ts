@@ -45,6 +45,45 @@ const mnodes: MNode[] = [
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
 
+// ── релеи (awgrelay://) ──
+interface MRelayBind { kind: string; server_id?: number; listen?: number }
+interface MRelay { id: number; name: string; online: boolean; pending: boolean; last_seen: number | null; version: string | null; binds: MRelayBind[] }
+const mrelays: MRelay[] = [
+    { id: 1, name: "RU relay", online: true, pending: false, last_seen: null, version: MOCK_VERSION,
+      binds: [{ kind: "vpn", server_id: 0, listen: 51820 }, { kind: "sub", listen: 443 }] },
+    { id: 2, name: "SPb edge", online: false, pending: true, last_seen: null, version: null,
+      binds: [{ kind: "vpn", server_id: 0, listen: 51821 }] },
+];
+let relayId = 2;
+// Строка подключения БЕЗ маршрутов: релей подключается, затем панель пришлёт привязки
+// агенту (в моке они просто живут с записью релея).
+const relayStr = (id: number) => "awgrelay://" + Buffer.from(JSON.stringify({
+    v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url"),
+})).toString("base64url");
+const relayBindsOk = (binds: unknown): MRelayBind[] | null => {
+    if (binds === undefined || binds === null) return [];
+    if (!Array.isArray(binds) || binds.length > 8) return null;
+    const out: MRelayBind[] = [];
+    for (const b of binds) {
+        const kind = String((b as { kind?: unknown }).kind ?? "");
+        if (!(["vpn", "hub", "sub", "ui"] as const).includes(kind as "vpn")) return null;
+        const o: MRelayBind = { kind };
+        if (kind === "vpn") {
+            const sid = Number((b as { server_id?: unknown }).server_id);
+            if (!mnodes.some(n => n.id === sid) && sid !== 0) return null;
+            o.server_id = sid;
+        }
+        const listen = (b as { listen?: unknown }).listen;
+        if (listen !== undefined && listen !== null) {
+            const p = Number(listen);
+            if (!Number.isInteger(p) || p <= 0 || p > 65535) return null;
+            o.listen = p;
+        }
+        out.push(o);
+    }
+    return out;
+};
+
 // ── API-ключи ──
 const apiKeys = [{ id: 1, label: "ci-bot", prefix: "awgk_Xk2mQ9aB…", server_id: 0, servers: [0], created_at: now() - 86400 * 5, last_used: now() - 3600 as number | null }];
 let apiId = 1;
@@ -92,6 +131,37 @@ const nodeView = () => [
         health: n.online ? { server: n.name, ip: n.ip, gen: n.gen, peers: (usersOf[n.id] ?? []).length, awg_up: true, module: "3.0.1", tools: "1.0.0" } : null })),
 ];
 app.get("/ui/nodes", (_q, r) => r.json({ hub: true, local: true, version: MOCK_VERSION, nodes: nodeView() }));
+app.get("/ui/relays", (_q, r) => r.json({ hub: true, relays: mrelays.map(({ id, name, online, pending, last_seen, version, binds }) => ({ id, name, online, pending, last_seen, version, binds })) }));
+app.post("/ui/relays", (q, r) => {
+    const name = String(q.body.name ?? "");
+    if (!name || name.length > 40) return r.status(400).json({ error: "Имя: до 40 символов, без переводов строк и <>" });
+    const binds = relayBindsOk(q.body.binds);
+    if (binds === null) return r.status(400).json({ error: "binds: до 8 пересылок с корректными видами и портами" });
+    const id = ++relayId;
+    mrelays.push({ id, name, online: false, pending: true, last_seen: null, version: null, binds });
+    setTimeout(() => { const n = mrelays.find(x => x.id === id); if (n) { n.pending = false; n.online = true; n.version = MOCK_VERSION; } }, 60_000);
+    r.status(201).json({ id, name, join: relayStr(id), expires_in: 3600 });
+});
+app.post("/ui/relays/:id/bind", (q, r) => {
+    const n = mrelays.find(x => x.id === Number(q.params.id));
+    if (!n) return r.status(404).json({ error: "Не найден" });
+    const binds = relayBindsOk(q.body.binds);
+    if (binds === null) return r.status(400).json({ error: "binds: до 8 пересылок с корректными видами и портами" });
+    n.binds = binds;
+    if (!n.pending) return r.json({ id: n.id, name: n.name, pushed: true, note: "" });
+    r.json({ id: n.id, name: n.name, join: relayStr(n.id), expires_in: 3600 });
+});
+app.post("/ui/relays/:id/join", (q, r) => {
+    const n = mrelays.find(x => x.id === Number(q.params.id));
+    if (!n) return r.status(404).json({ error: "Не найден" });
+    if (!n.pending) return r.status(409).json({ error: "Релей уже подключён — строка не нужна" });
+    r.json({ id: n.id, name: n.name, join: relayStr(n.id), expires_in: 3600 });
+});
+app.delete("/ui/relays/:id", (q, r) => {
+    const i = mrelays.findIndex(x => x.id === Number(q.params.id));
+    if (i < 0) return r.status(404).json({ error: "Не найден" });
+    mrelays.splice(i, 1); r.json({ success: true });
+});
 app.post("/ui/nodes", (q, r) => {
     const name = String(q.body.name ?? "");
     if (!name || name.length > 40) return r.status(400).json({ error: "Имя: до 40 символов, без переводов строк и <>" });

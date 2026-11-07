@@ -1,0 +1,7 @@
+{
+  "id": "relays",
+  "label": "Релеи",
+  "icon": "relay",
+  "group": "main",
+  "order": 1.4
+}

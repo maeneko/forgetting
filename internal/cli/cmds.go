@@ -192,9 +192,10 @@ func relayRoutes(host string, hubPort int64, j jsjson.Object) string {
 	return strings.Join(routes, ",")
 }
 
-// joinRelay — хвост команды `join 'awgrelay://…'`: строки подключения релея. Маршруты уже
-// в строке (панель собрала их из привязок): пишем их в cli.env, роль — relay, агент даст
-// панели статус. VPN и панель на реле не ставятся — это отдельная роль установки.
+// joinRelay — хвост команды `join 'awgrelay://…'`: подключение релея к панели. Строка без
+// маршрутов: в cli.env пишутся только адрес панели и роль relay, привязки приходят по пушу
+// от панели через агента (`awg-control relay-apply`). VPN и панель на реле не ставятся —
+// это отдельная роль установки.
 func (c *CLI) joinRelay(j jsjson.Object) {
 	h, hok := j.Get2("h").(string)
 	pin, pinok := j.Get2("pin").(string)
@@ -209,30 +210,6 @@ func (c *CLI) joinRelay(j jsjson.Object) {
 		!iok || !sok || !reJoinSec.MatchString(sec) {
 		inv()
 	}
-	udp, tcp, n := "", "", 0
-	for _, r := range arrOf(j.Get2("routes")) {
-		ro, ok := r.(jsjson.Object)
-		if !ok {
-			inv()
-		}
-		net, _ := ro.Get2("net").(string)
-		listen, lok := isPosInt(ro.Get2("listen"), 65536)
-		target, tok := ro.Get2("target").(string)
-		if !(net == "udp" || net == "tcp") || !lok || !tok || !reJoinHost.MatchString(target) ||
-			!strings.Contains(target, ":") {
-			inv()
-		}
-		n++
-		if net == "udp" {
-			udp = appendPart(udp, fmt.Sprintf("%d=%s", listen, target))
-		} else {
-			tcp = appendPart(tcp, fmt.Sprintf("%d=%s", listen, target))
-		}
-	}
-	if n == 0 {
-		errorf("  В строке нет ни одного маршрута — пересылать нечего")
-		os.Exit(1)
-	}
 	if c.isNode && !c.confirmYes(fmt.Sprintf("  Релей уже настроен (core %s). Перепривязать?", os.Getenv("CORE_HOST"))) {
 		return
 	}
@@ -244,33 +221,77 @@ func (c *CLI) joinRelay(j jsjson.Object) {
 	for _, kv := range [][2]string{
 		{"CORE_HOST", h}, {"CORE_PORT", fmt.Sprint(port)}, {"CORE_PIN", pin}, {"NODE_ID", fmt.Sprint(id)},
 		{"JOIN_SECRET", sec}, {"NODE_ROLE", "relay"}, {"NODE_PANEL", "off"}, {"LOCAL_NODE", "off"},
-		{"RELAY_UDP", udp}, {"RELAY_TCP", tcp},
+		// Свежая привязка panel-маршрутов не содержит — приоритет за пушем, накопленное стираем.
+		{"RELAY_UDP", ""}, {"RELAY_TCP", ""},
 	} {
 		content = updateEnvVar(content, kv[0], kv[1])
 	}
 	content = removeEnvVar(content, "CORE_ENDPOINT") // адрес прежней панели к новой не относится
 	c.writeEnvFile(content)
 	fmt.Printf("\n  %s Релей настроен: core %s:%d, релей #%d\n", green("✓"), h, port, id)
-	if udp != "" {
-		fmt.Println("  " + dim("UDP (VPN-клиенты → ноды): "+udp))
-	}
-	if tcp != "" {
-		fmt.Println("  " + dim("TCP (панель/подписка/хаб нод): "+tcp))
-	}
+	fmt.Println("  " + dim("Привязки серверов агент получит от панели после подключения"))
 	c.restartFresh()
 }
 
-func appendPart(list, s string) string {
-	if list == "" {
-		return s
+// relayApply — хвост команды `relay-apply <b64>` (запускает агент по пушу панели, оператору
+// не нужна): на машине релея перезаписать RELAY_UDP/RELAY_TCP в cli.env и перезапустить
+// awg-relay. Пустые строки — привязок больше нет: awg-relay остановить. Сервисная карта env
+// обновляется по ходу: start() читает её же, а не cli.env.
+func (c *CLI) relayApply(payload string, hasPayload bool) {
+	if !hasPayload {
+		errorf("  Usage: awg-control relay-apply <b64<{udp,tcp}>>")
+		os.Exit(1)
 	}
-	return list + "," + s
+	if !c.isRelay {
+		errorf("  Нода не релей (NODE_ROLE=relay в cli.env) — привязки не к чему применять")
+		os.Exit(1)
+	}
+	v, err := jsjson.Decode(fromB64url(payload))
+	j, isObj := v.(jsjson.Object)
+	if err != nil || !isObj {
+		errorf("  Привязки повреждены")
+		os.Exit(1)
+	}
+	udp, _ := j.Get2("udp").(string)
+	tcp, _ := j.Get2("tcp").(string)
+	if !parseRoutes(udp) || !parseRoutes(tcp) {
+		errorf("  Привязки неверного формата или от другой версии панели")
+		os.Exit(1)
+	}
+	content := c.readEnvFile()
+	content = updateEnvVar(content, "RELAY_UDP", udp)
+	content = updateEnvVar(content, "RELAY_TCP", tcp)
+	c.writeEnvFile(content)
+	c.setSvcEnv("relay", "RELAY_UDP", udp)
+	c.setSvcEnv("relay", "RELAY_TCP", tcp)
+	c.stop("relay")
+	if udp != "" || tcp != "" {
+		c.start("relay")
+		fmt.Printf("  %s Привязки применены\n", green("✓"))
+	} else {
+		fmt.Printf("  %s Привязок нет: awg-relay остановлен\n", green("✓"))
+	}
 }
 
-// arrOf — массив из JSON: не массив — пустой список (joinRelay сам ругнётся на пустые маршруты).
-func arrOf(v any) []any {
-	a, _ := v.([]any)
-	return a
+// parseRoutes — строка маршрутов «порт=target,порт=target»: у частей валидный порт и адрес.
+// Пустая строка легальна (так стираются все привязки).
+func parseRoutes(list string) bool {
+	if list == "" {
+		return true
+	}
+	for _, part := range strings.Split(list, ",") {
+		port, rest, ok := strings.Cut(part, "=")
+		if !ok || !posPort(port) || !reJoinHost.MatchString(rest) || !strings.Contains(rest, ":") {
+			return false
+		}
+	}
+	return true
+}
+
+// posPort — порт «1..65535» в строке.
+func posPort(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n > 0 && n < 65536
 }
 
 func (c *CLI) unjoinCore() {

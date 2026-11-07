@@ -6,6 +6,7 @@
 package ui
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -16,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/maeneko/forgetting/internal/jsjson"
+	"github.com/coder/websocket"
 )
 
 // relayBind — одна пересылка релея: вид (vpn/hub/sub/ui), порт слушателя и цель.
@@ -164,27 +166,47 @@ func appendRoute(list string, port int, target string) string {
 	return list + "," + part
 }
 
-// relayJoinString — awgrelay://: те же поля, что у awgjoin://, плюс маршруты релея.
+// relayJoinString — awgrelay://: те же поля, что у awgjoin://, без маршрутов. Привязки
+// релей получает по пушу от панели через агента после подключения (автозагрузка — v1,
+// строка выписывается на машине один раз).
 func (n *Nodes) relayJoinString(host string, id int64, secret []byte) string {
-	_, _, routes, err := n.relayRoutes(id)
-	warnf2 := func(f string, a ...any) { warnf("relays: "+f, a...) }
-	if err != nil {
-		warnf2("маршруты релея #%d не собраны: %v", id, err)
-		routes = []any{}
-	}
 	b := jsjson.MustMarshal(jsjson.Object{{Key: "v", Val: 1}, {Key: "h", Val: host}, {Key: "p", Val: n.port},
-		{Key: "pin", Val: b64url.EncodeToString(n.pin)}, {Key: "n", Val: id}, {Key: "s", Val: b64url.EncodeToString(secret)},
-		{Key: "routes", Val: routes}})
+		{Key: "pin", Val: b64url.EncodeToString(n.pin)}, {Key: "n", Val: id}, {Key: "s", Val: b64url.EncodeToString(secret)}})
 	return "awgrelay://" + b64url.EncodeToString(b)
 }
 
-// anyObj — []jsjson.Object → []any для ответов.
-func anyObj(in []jsjson.Object) []any {
-	out := make([]any, 0, len(in))
-	for _, o := range in {
+// bindsView — привязки релея для UI-редактора: {kind, server_id?, listen}.
+func (n *Nodes) bindsView(relayID int64) []any {
+	binds := n.bindsOf(relayID)
+	out := make([]any, 0, len(binds))
+	for _, b := range binds {
+		o := jsjson.Object{{Key: "kind", Val: b.Kind}, {Key: "listen", Val: b.Listen}}
+		if b.ServerID.Valid {
+			o = append(o, jsjson.KV{Key: "server_id", Val: b.ServerID.Int64})
+		}
 		out = append(out, o)
 	}
 	return out
+}
+
+// pushRelay — пуш маршрутов живому релею: {t:"relay", udp, tcp} (fire-and-forget, как
+// metrics_res у ноды). false — релей не подключён: привязки применятся при его
+// переподключении (push при ready-хэншейке).
+func (n *Nodes) pushRelay(id int64) bool {
+	udp, tcp, _, err := n.relayRoutes(id)
+	if err != nil {
+		warnf("relays: маршруты релея #%d не собраны: %v", id, err)
+		return false
+	}
+	n.mu.Lock()
+	c := n.conns[id]
+	n.mu.Unlock()
+	if c == nil {
+		return false
+	}
+	msg := jsjson.Object{{Key: "t", Val: "relay"}, {Key: "udp", Val: udp}, {Key: "tcp", Val: tcp}}
+	c.ws.Write(context.Background(), websocket.MessageText, jsjson.MustMarshal(msg))
+	return true
 }
 
 // relayRouter — роуты /ui/relays (за JWT): список, создание, смена привязок, удаление.
@@ -194,7 +216,13 @@ func (n *Nodes) relayRouter() *Router {
 	}
 	rt := newRouter()
 	rt.Get("/", func(c *Ctx) bool {
-		return c.JSON(200, jsjson.Object{{Key: "hub", Val: n.hubReady()}, {Key: "relays", Val: anyObj(n.RelayList())}})
+		relays := n.RelayList()
+		out := make([]any, 0, len(relays))
+		for _, o := range relays {
+			o = append(o, jsjson.KV{Key: "binds", Val: n.bindsView(o.Get2("id").(int64))})
+			out = append(out, o)
+		}
+		return c.JSON(200, jsjson.Object{{Key: "hub", Val: n.hubReady()}, {Key: "relays", Val: out}})
 	})
 	rt.Post("/", func(c *Ctx) bool {
 		if !n.hubReady() {
@@ -207,9 +235,6 @@ func (n *Nodes) relayRouter() *Router {
 		binds, err := n.parseBinds(c.Obj().Get2("binds"))
 		if err != nil {
 			return c.Error(400, err.Error())
-		}
-		if len(binds) == 0 {
-			return c.Error(400, "Нужна хотя бы одна пересылка (binds)")
 		}
 		host := n.hostOf(c)
 		if !reHost.MatchString(host) {
@@ -230,10 +255,9 @@ func (n *Nodes) relayRouter() *Router {
 		return c.JSON(201, jsjson.Object{{Key: "id", Val: id}, {Key: "name", Val: name},
 			{Key: "join", Val: n.relayJoinString(host, id, secret)}, {Key: "expires_in", Val: joinTTL}})
 	})
-	// Новая привязка для релея, который ещё не подключался. После привязки ключа релея изменить
-	// маршруты заочно нельзя: join-секрет одноразовый, а маршруты релей берёт из своего cli.env.
-	// Значит — пересоздать релей либо править cli.env и перезапускать awg-relay вручную;
-	// дотянуть это до агента по WSS оставим на v2.
+	// Смена привязок: у ещё не подключившегося релея — вместе с переписью join-строки
+	// (секрет одноразовый), у подключённого — пуш свежих маршрутов агенту. Пуш может не
+	// пройти (релей offline): привязки сохранены, применятся при его подключении.
 	rt.Post("/:id/bind", func(c *Ctx) bool {
 		id, ok := n.idOf(c)
 		var row *nodeRow
@@ -247,11 +271,16 @@ func (n *Nodes) relayRouter() *Router {
 		if err != nil {
 			return c.Error(400, err.Error())
 		}
-		if len(binds) == 0 {
-			return c.Error(400, "Нужна хотя бы одна пересылка (binds)")
+		if err := n.setBinds(id, binds); err != nil {
+			return c.Error(500, "Не удалось сохранить привязки")
 		}
 		if row.Pub.Valid {
-			return c.Error(409, "Релей уже подключён — маршруты правятся в его cli.env (RELAY_UDP/RELAY_TCP) и перезапуском awg-relay")
+			pushed := n.pushRelay(id)
+			note := ""
+			if !pushed {
+				note = "Релей не на связи — привязки сохранены и применятся, когда он подключится"
+			}
+			return c.JSON(200, jsjson.Object{{Key: "id", Val: id}, {Key: "name", Val: row.Name}, {Key: "pushed", Val: pushed}, {Key: "note", Val: note}})
 		}
 		host := n.hostOf(c)
 		if !reHost.MatchString(host) {
@@ -261,9 +290,33 @@ func (n *Nodes) relayRouter() *Router {
 		rand.Read(secret)
 		h := sha256.Sum256(secret)
 		n.a.db.Exec("UPDATE nodes SET join_hash = ?, join_expires = ? WHERE id = ? AND pub IS NULL", h[:], now()+joinTTL, id)
-		if err := n.setBinds(id, binds); err != nil {
-			return c.Error(500, "Не удалось сохранить привязки")
+		return c.JSON(200, jsjson.Object{{Key: "id", Val: id}, {Key: "name", Val: row.Name},
+			{Key: "join", Val: n.relayJoinString(host, id, secret)}, {Key: "expires_in", Val: joinTTL}})
+	})
+	// Перевыписать строку подключения: релей ещё не привязал ключ (секрет одноразовый).
+	rt.Post("/:id/join", func(c *Ctx) bool {
+		id, ok := n.idOf(c)
+		var row *nodeRow
+		if ok {
+			row = n.row(id)
 		}
+		if row == nil || !row.isRelay() {
+			return c.Error(404, "Не найден")
+		}
+		if row.Pub.Valid {
+			return c.Error(409, "Релей уже подключён — строка не нужна")
+		}
+		if !n.hubReady() {
+			return c.Error(503, "Приём нод не настроен (NODE_PORT / сертификат)")
+		}
+		host := n.hostOf(c)
+		if !reHost.MatchString(host) {
+			return c.Error(400, "Не удалось определить адрес core")
+		}
+		secret := make([]byte, 16)
+		rand.Read(secret)
+		h := sha256.Sum256(secret)
+		n.a.db.Exec("UPDATE nodes SET join_hash = ?, join_expires = ? WHERE id = ? AND pub IS NULL", h[:], now()+joinTTL, id)
 		return c.JSON(200, jsjson.Object{{Key: "id", Val: id}, {Key: "name", Val: row.Name},
 			{Key: "join", Val: n.relayJoinString(host, id, secret)}, {Key: "expires_in", Val: joinTTL}})
 	})
@@ -292,11 +345,12 @@ func (n *Nodes) relayRouter() *Router {
 
 // parseBinds — binds из запроса: [{kind, server_id?, listen?}]. Порт слушателя берётся из
 // запроса, по умолчанию — порт цели; занятая другим bind'ом — следующий свободный. Все цели
-// проверяются сразу: профиль сервера или наружный адрес ядра (SUB_HOST).
+// проверяются сразу: профиль сервера или наружный адрес ядра (SUB_HOST). Пустой список
+// легален — релей подключается без маршрутов, привязываются серверы после (пуш агенту).
 func (n *Nodes) parseBinds(v any) ([]relayBind, error) {
 	in, _ := v.([]any)
-	if len(in) == 0 || len(in) > 8 {
-		return nil, fmt.Errorf("binds: от 1 до 8 пересылок")
+	if len(in) > 8 {
+		return nil, fmt.Errorf("binds: до 8 пересылок")
 	}
 	var binds []relayBind
 	for _, raw := range in {
@@ -322,9 +376,15 @@ func (n *Nodes) parseBinds(v any) ([]relayBind, error) {
 			if !b.ServerID.Valid {
 				return nil, fmt.Errorf("binds: для vpn нужен server_id")
 			}
-			row := n.row(b.ServerID.Int64)
-			if row == nil || row.isRelay() {
-				return nil, fmt.Errorf("binds: сервер #%d не найден", b.ServerID.Int64)
+			// 0 — свой сервер панели: строки в nodes он не имеет (id 0 синтезируется в UI-списке),
+			// его endpoint проверит targetOf через server_profiles.
+			if b.ServerID.Int64 != 0 {
+				row := n.row(b.ServerID.Int64)
+				if row == nil || row.isRelay() {
+					return nil, fmt.Errorf("binds: сервер #%d не найден", b.ServerID.Int64)
+				}
+			} else if !n.local {
+				return nil, fmt.Errorf("binds: сервер #0 не найден")
 			}
 		} else if b.ServerID.Valid {
 			return nil, fmt.Errorf("binds: server_id задаётся только для kind vpn")

@@ -94,6 +94,37 @@ export interface ShapingStatus {
     rateUp:    number;
 }
 
+// Релей (awgrelay://) из списка GET /ui/relays. pending — ещё ни разу не
+// подключался: только для такого можно выдать строку. Привязки выходят без
+// маршрутов — серверы привязываются после подключения (пуш агенту).
+export interface RelayInfo {
+    id:        number;
+    name:      string;
+    online:    boolean;
+    pending:   boolean;
+    last_seen: number | null;
+    version?:  string | null;
+    binds?:    RelayBindInput[];
+}
+// Пересылка релея: куда и что пересылать. listen не задан — порт цели,
+// занятый другой привязкой порт панель сдвигает сама (детерминированно).
+export interface RelayBindInput {
+    kind:      'vpn' | 'hub' | 'sub' | 'ui';
+    server_id?: number;      // только для kind 'vpn'
+    listen?:    number;
+}
+// Ответ POST /ui/relays, POST /ui/relays/:id/bind и POST /ui/relays/:id/join: строка для
+// `awg-ctrl join 'awgrelay://…'` на машине релея, действует час. bind у подключённого
+// релея вместо join отдаёт pushed — привязки ушли агенту по пушу.
+export interface RelayJoinResult {
+    id:         number;
+    name:       string;
+    join?:      string;
+    expires_in?: number;
+    pushed?:    boolean;
+    note?:      string;
+}
+
 // Блокировка BitTorrent (GET/PUT /api/torrent на awg-ctrl сервера).
 export interface TorrentStatus {
     settings: { enabled: boolean };

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -594,6 +595,19 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 				r := a.execute(m)
 				send(jsjson.Object{{Key: "t", Val: "res"}, {Key: "id", Val: id}, {Key: "status", Val: r.status}, {Key: "data", Val: r.data}})
 			}()
+		case t == "relay" && ready:
+			// Панель прислала свежие привязки (udp/tcp — строки вида «порт=target,порт=target»).
+			// Применение — отдельным процессом CLI: тот правит cli.env (RELAY_UDP/RELAY_TCP)
+			// и перезапускает awg-relay; дублировать эту логику в агенте незачем.
+			udp, uok := m.Get2("udp").(string)
+			tcp, tok := m.Get2("tcp").(string)
+			if !uok || !tok {
+				continue
+			}
+			payload, err := jsjson.Marshal(jsjson.Object{{Key: "udp", Val: udp}, {Key: "tcp", Val: tcp}})
+			if err == nil {
+				go a.applyRelay(b64.EncodeToString(payload))
+			}
 		}
 	}
 }
@@ -604,6 +618,25 @@ func (a *Agent) setLink(l *coreLink) {
 	a.mu.Lock()
 	a.link = l
 	a.mu.Unlock()
+}
+
+// applyRelay — `awg-control relay-apply <b64>` отдельным процессом: CLI правит cli.env и
+// сервис awg-relay. Ошибки и вывод — в журнал агента: панель видит релея по метрикам,
+// журналу и статусу портов, а не по ответу на пуш.
+func (a *Agent) applyRelay(payload string) {
+	exe, err := os.Executable()
+	if err != nil {
+		a.c.Errorf("agent: relay-apply не запущен: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, exe, "relay-apply", payload).CombinedOutput()
+	if err != nil {
+		a.c.Errorf("agent: relay-apply: %v: %s", err, strings.TrimSpace(string(out)))
+		return
+	}
+	a.c.Logf("agent: привязки релея применены: %s", strings.TrimSpace(string(out)))
 }
 
 // deliver — ответ core на запрос метрик.

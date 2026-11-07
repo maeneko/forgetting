@@ -641,6 +641,11 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			first += " — без подписи до апгрейда: старый агент, обновите ноду, чтобы хаб скрылся от сканеров"
 		}
 		logf("nodes: «%s» (#%d) подключена%s", row.Name, row.ID, first)
+		// Релей: строка awgrelay:// выдаётся без маршрутов — привязки пушим сразу после
+		// ready (порядок в сокете сохраняется: агент сперва увидит ready, потом relay).
+		if row.isRelay() {
+			n.pushRelay(row.ID)
+		}
 		go n.refreshHealth(row.ID)
 		go n.fireOnline(int(row.ID))
 	}
