@@ -30,12 +30,15 @@ export const TAB_GROUPS = [
 export type TabGroupId = (typeof TAB_GROUPS)[number]['id'];
 
 // Сериализуемая часть из metadata.json.
+// hidden — вкладка «готова, пока не показываем»: код в сборке (роут работает, openTab
+// ведёт на неё), но в меню её нет. Включение — убрать "hidden" из metadata.json вкладки.
 export interface TabMeta {
     id:      string;
     label:   string;
     icon:    string;     // имя иконки → ICONS
     group:   TabGroupId; // группа меню; без поля — 'main'
     order?:  number;     // порядок внутри группы (по возрастанию; без него — 0)
+    hidden?: boolean;    // не показывать в меню; роут при этом живёт
     requires?: 'prometheus';   // вкладка в меню только при условии: 'prometheus' — встроенный Prometheus установлен
     chrome?: TabChrome;
 }
@@ -81,6 +84,7 @@ function toMeta(name: string, raw: unknown): TabMeta {
         icon:   str('icon'),
         group:  group as TabGroupId,
         order:  m.order as number | undefined,
+        hidden: m.hidden === true,
         requires: m.requires as 'prometheus' | undefined,
         chrome: m.chrome as TabChrome | undefined,
     };
@@ -104,9 +108,12 @@ export const TABS: TabDef[] = Object.entries(metas)
         TAB_GROUPS.findIndex(g => g.id === a.group) - TAB_GROUPS.findIndex(g => g.id === b.group)
         || (a.order ?? 0) - (b.order ?? 0));
 
+// Скрытые вкладки ("hidden": true) — из меню, но не из сборки: их роут продолжает работать.
+export const VISIBLE_TABS = TABS.filter(t => !t.hidden);
+
 // Вкладки по группам для меню; пустые группы не показываем.
 export const TABS_BY_GROUP = TAB_GROUPS
-    .map(g => ({ ...g, tabs: TABS.filter(t => t.group === g.id) }))
+    .map(g => ({ ...g, tabs: VISIBLE_TABS.filter(t => t.group === g.id) }))
     .filter(g => g.tabs.length > 0);
 
 // id вкладок используются как ключ активной вкладки — дубли ломают переключение.

@@ -3,5 +3,6 @@
   "label": "Прокси",
   "icon": "shield",
   "group": "extra",
-  "order": 1
+  "order": 1,
+  "hidden": true
 }

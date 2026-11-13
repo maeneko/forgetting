@@ -379,8 +379,48 @@ app.put("/api/torrent", (q, r) => {
     r.json(torrentView(id));
 });
 
-// Маскировка первого пакета (I1): у каждого сервера своя; Frankfurt (1) — старая нода без маршрута (404).
-// «Сменить» берёт случайный шаблон из примеров — как GenI1 в awg-ctrl, только без случайных полей.
+// Telegram-прокси (MTProto): состояние по серверам; сервер 0 поднят с самого начала — с живой
+// ссылкой (адрес — как в /health). Frankfurt (1) — старая нода без маршрута (404 → «обновите»).
+// Порты 22 и 80 изображают занятые (409), как ss -tln на реальной машине.
+const mtprotoOf: Record<number, { port: number; secret: string; running: boolean }> = {
+    0: { port: 443, secret: "ee" + crypto.randomBytes(16).toString("hex"), running: true },
+};
+const mtprotoIP: Record<number, string> = { 0: "203.0.113.7", 1: "198.51.100.4", 4: "192.0.2.44" };
+const mtprotoView = (id: number) => {
+    const t = mtprotoOf[id] ?? { port: 0, secret: "", running: false };
+    const ip = mtprotoIP[id] ?? "203.0.113.7";
+    return {
+        port: t.port, secret: t.secret, running: t.running, binary: "/usr/local/bin/mtg",
+        link: t.port && t.secret ? `https://t.me/proxy?server=${ip}&port=${t.port}&secret=${t.secret}` : undefined,
+    };
+};
+app.get("/api/mtproto", (q, r) => tsid(q) === 1 ? r.status(404).json({ error: "Not found" }) : r.json(mtprotoView(tsid(q))));
+app.post("/api/mtproto", (q, r) => {
+    const id = tsid(q), b = q.body ?? {};
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    const port = Number(b.port ?? 443);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return r.status(400).json({ error: "Порт: целое число от 1 до 65535" });
+    if (port === 22 || port === 80) return r.status(409).json({ error: `Порт ${port} уже занят другой программой` });
+    const prev = mtprotoOf[id];
+    mtprotoOf[id] = { port, secret: prev?.secret || "ee" + crypto.randomBytes(16).toString("hex"), running: true };
+    r.json(mtprotoView(id));
+});
+app.post("/api/mtproto/rotate", (q, r) => {
+    const id = tsid(q);
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    const t = mtprotoOf[id];
+    if (!t?.port) return r.status(409).json({ error: "Прокси не поднят — менять секрет нечего" });
+    t.secret = "ee" + crypto.randomBytes(16).toString("hex");
+    r.json(mtprotoView(id));
+});
+app.delete("/api/mtproto", (q, r) => {
+    const id = tsid(q);
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    if (mtprotoOf[id]) mtprotoOf[id].running = false;
+    r.json(mtprotoView(id));
+});
+
+// Маскировка первого пакета (I1): у каждого сервера своя; Frankfurt (1) — старая нода без маршрута (404).// «Сменить» берёт случайный шаблон из примеров — как GenI1 в awg-ctrl, только без случайных полей.
 const I1_SAMPLES = [
     { kind: "dns",  label: "DNS-запрос к ya.ru",            i1: "<r 2><b 0x01000001000000000001027961027275000001000100002904d0000000000000>" },
     { kind: "quic", label: "QUIC Initial, 1250 байт",       i1: "<b 0xc30000000108><r 8><b 0x00><b 0x0044e2><r 1232>" },
