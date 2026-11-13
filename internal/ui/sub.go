@@ -257,6 +257,7 @@ func newSub(a *App) (*Sub, error) {
 	s.loadAudit()
 	// Как в Node: подписки на события реестра — при создании, до старта хаба и до
 	// проверок ключей API (порядок вето при удалении сервера тот же).
+	s.healDeadServers()
 	a.nodes.OnOnline(func(id int) { go s.reconcile(id) })
 	a.nodes.BeforeDelete(s.beforeServerDelete)
 	a.nodes.AfterDelete(s.afterServerDelete)

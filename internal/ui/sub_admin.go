@@ -98,6 +98,12 @@ func (s *Sub) visible(masterID int64, scope []int) bool {
 		return true
 	}
 	for _, id := range s.serverIDsOf(s.a.db, masterID) {
+		// Мёртвый сервер (удалён из реестра) не может входить в область API-ключа —
+		// не считаем его нарушением, иначе ключ-сирота 403-ит навсегда. Реестр не
+		// загружен (тесты) — фильтр не работает, как раньше.
+		if s.a.nodes != nil && !s.a.nodes.Exists(id) {
+			continue
+		}
 		if !containsInt(scope, id) {
 			return false
 		}
@@ -1057,4 +1063,79 @@ func (s *Sub) beforeServerDelete(id int, force bool) *deleteVeto {
 func (s *Sub) afterServerDelete(id int) {
 	s.a.db.Exec("DELETE FROM master_servers WHERE server_id = ?", id)
 	s.a.db.Exec("DELETE FROM master_keys WHERE revoked_at IS NOT NULL AND id NOT IN (SELECT master_id FROM master_servers)")
+}
+
+// healDeadServers — самозалечивание при старте: ссылки на серверы, которых в реестре больше
+// нет. Остаются после жёстких удалений и от версий панели до вето beforeServerDelete: живой
+// мастер-ключ с мёртвым сервером для всех API-ключей отвечает 403 «вне области» (мёртвый id не
+// входит ни в одну область) и не лечится никак, пока его не тронут в панели вручную.
+// Мёртвые ссылки чистятся (это же делает afterServerDelete при штатном удалении), ключам без
+// единого сервера даётся набор по умолчанию — тот же выбор, что у createMaster; заявки пиров
+// его устройств на новом сервере сведёт reconcile, когда нода выйдет в онлайн (device_peers
+// со ставкой peer_pub = NULL).
+func (s *Sub) healDeadServers() {
+	valid := map[int]bool{}
+	for _, id := range s.a.nodes.IDs() {
+		valid[id] = true
+	}
+	if len(valid) == 0 {
+		return // реестр пуст — панель ещё не настроена, сравнивать не с чем
+	}
+	ids := make([]string, 0, len(valid))
+	for id := range valid {
+		ids = append(ids, fmt.Sprintf("%d", id))
+	}
+	inList := strings.Join(ids, ",")
+	for _, q := range []string{
+		"DELETE FROM master_servers WHERE server_id NOT IN (" + inList + ")",
+		"DELETE FROM device_peers WHERE server_id NOT IN (" + inList + ")",
+		"DELETE FROM peer_tombstones WHERE server_id NOT IN (" + inList + ")",
+		"DELETE FROM server_profiles WHERE server_id NOT IN (" + inList + ")",
+	} {
+		s.a.db.Exec(q)
+	}
+	targets := s.defaultServers()
+	if len(targets) == 0 {
+		if d := s.a.nodes.DefaultID(); valid[d] {
+			targets = []int{d}
+		}
+	}
+	if len(targets) == 0 {
+		return // живого сервера нет — ключам без серверов дать нечего
+	}
+	rows, err := s.a.db.Query("SELECT " + masterCols + " FROM master_keys m WHERE m.revoked_at IS NULL AND m.id NOT IN (SELECT master_id FROM master_servers)")
+	if err != nil {
+		warnf("sub: самозалечивание: %v", err)
+		return
+	}
+	var empty []*masterRow
+	for rows.Next() {
+		if m := scanMaster(rows, false); m != nil {
+			empty = append(empty, m)
+		}
+	}
+	rows.Close()
+	if len(empty) == 0 {
+		return
+	}
+	if err := s.a.tx(func(tx *sql.Tx) error {
+		for _, m := range empty {
+			devices := s.devicesOf(tx, m.ID)
+			for _, sid := range targets {
+				if _, err := tx.Exec("INSERT OR IGNORE INTO master_servers (master_id, server_id) VALUES (?, ?)", m.ID, sid); err != nil {
+					return err
+				}
+				for _, d := range devices {
+					if _, err := tx.Exec("INSERT OR IGNORE INTO device_peers (device_id, server_id) VALUES (?, ?)", d.ID, sid); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		warnf("sub: самозалечивание (назначение серверов): %v", err)
+		return
+	}
+	logf("sub: серверы-сироты вычищены, ключам без серверов назначено %v: %d шт.", targets, len(empty))
 }
