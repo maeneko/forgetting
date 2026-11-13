@@ -25,6 +25,7 @@ export interface TabChrome {
 export const TAB_GROUPS = [
     { id: 'main',   label: 'Основное' },
     { id: 'server', label: 'О сервере' },
+    { id: 'extra',  label: 'Доп' },
 ] as const;
 export type TabGroupId = (typeof TAB_GROUPS)[number]['id'];
 
