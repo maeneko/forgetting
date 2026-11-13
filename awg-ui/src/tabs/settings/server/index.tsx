@@ -9,8 +9,7 @@ import './server.css';
 // Раздел «Сервер» вкладки «Настройки»: деление канала между устройствами (CAKE) и блокировка BitTorrent
 // для сервера из шапки (при его смене вкладка перемонтируется). Сами настройки живут в awg-ctrl этого
 // сервера — запрос идёт обычным прокси с X-Server-Id, так что ядро и ноды настраиваются одинаково.
-// Telegram-прокси был здесь, потом — вкладкой «Прокси» (8354fb3); пока снят с показа, бэкенд
-// (/api/mtproto*) и mock-server с ним остаются.
+// Telegram-прокси живёт отдельной вкладкой «Прокси» (группа «Доп», tabs/proxy).
 export default function ServerSettings({ token, showMsg }: PageProps) {
     const [st, setSt]           = useState<ShapingStatus | null>(null);
     const [enabled, setEnabled] = useState(false);
