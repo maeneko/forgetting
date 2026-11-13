@@ -109,7 +109,10 @@ export const TABS: TabDef[] = Object.entries(metas)
         || (a.order ?? 0) - (b.order ?? 0));
 
 // Скрытые вкладки ("hidden": true) — из меню, но не из сборки: их роут продолжает работать.
-export const VISIBLE_TABS = TABS.filter(t => !t.hidden);
+// В dev-режиме (мок, vite) их можно показать параметром ?show-hidden=1 — предпросмотр
+// спрятанных фич; в собранной панели параметр не действует.
+const showHidden = import.meta.env.DEV && new URLSearchParams(location.search).has('show-hidden');
+export const VISIBLE_TABS = TABS.filter(t => !t.hidden || showHidden);
 
 // Вкладки по группам для меню; пустые группы не показываем.
 export const TABS_BY_GROUP = TAB_GROUPS
