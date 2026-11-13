@@ -1,7 +1,0 @@
-{
-  "id": "proxy",
-  "label": "Прокси",
-  "icon": "shield",
-  "group": "extra",
-  "order": 1
-}
