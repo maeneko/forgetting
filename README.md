@@ -124,6 +124,7 @@ sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/maeneko/forgetting/ma
 | `UNINSTALL` | `y` — удалить без меню и без подтверждения |
 | `AMNEZIA_PPA_SUITE` | серия PPA для Debian (`focal`/`jammy`/`noble`) |
 | `REPO_BASE`, `REPO_FALLBACK`, `ARCHIVE_URL`, `AWG_LOCAL_TARBALL` | откуда брать архив релиза (своё зеркало, локальный файл) |
+| `MTG`, `MTG_VERSION` | `1`/`0` — ставить ли mtg (MTProto-прокси для Telegram из панели) без вопроса; версия mtg |
 | `BRAND`, `CHANNEL` | имя продукта в баннерах и панели |
 
 ### Обновление и удаление

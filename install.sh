@@ -212,6 +212,13 @@ case "$(uname -m)" in
 esac
 ARCHIVE_NAME="awgcontrol-${VERSION}-linux-${GOARCH:-unknown}.tar.gz"
 ARCHIVE_URL="${ARCHIVE_URL:-}"
+# mtg — MTProto-прокси для Telegram (9seconds/mtg v2): карточка «Telegram-прокси» в панели
+# поднимает его через awg-ctrl, когда бинарник найден. Ставится опционально — VPN без него
+# полноценный. MTG=1/y — ставить без вопроса, MTG=0/n — не ставить.
+MTG="${MTG:-}"
+MTG_VERSION="${MTG_VERSION:-2.3.0}"
+MTG_BASE="${MTG_BASE:-https://github.com/9seconds/mtg/releases/download}"
+MTG_BIN="${MTG_BIN:-/usr/local/bin/mtg}"
 PROJECT="/opt/awg-control"
 AMNEZIA_DIR="/etc/amnezia"
 AWG_DIR="$AMNEZIA_DIR/amneziawg"
@@ -403,6 +410,10 @@ uninstall_all() {
     if command -v systemctl &>/dev/null && [[ -f "$unit" ]]; then
         run systemctl disable --now awg-control.service || true
     fi
+    # MTProto-прокси из панели: юнит и порт ставил awg-ctrl, при удалении тоже снимаем.
+    if [[ -f /etc/systemd/system/awg-mtproto.service ]]; then
+        run systemctl disable --now awg-mtproto.service || true
+    fi
     # Prometheus из `awg-ctrl monitor install` — только наш (метка в конфиге); чужой не трогаем.
     if [[ -x "$BIN" ]] && grep -qs '^# managed by forgetting' /etc/prometheus/prometheus.yml; then
         info "Prometheus, поставленный панелью"
@@ -448,6 +459,7 @@ uninstall_all() {
         rm -f /etc/systemd/system/awg-control.service
         command -v systemctl &>/dev/null && { run systemctl daemon-reload || true; }
     fi
+    rm -f /etc/systemd/system/awg-mtproto.service
     [[ "$(readlink /usr/local/bin/awg-ctrl 2>/dev/null)" == "$BIN" ]] && rm -f /usr/local/bin/awg-ctrl
     # Пути — константы из шапки; :? — страховка от пустой переменной.
     rm -rf "${PROJECT:?}" "${AMNEZIA_DIR:?}"
@@ -655,6 +667,42 @@ $(printf '    %s\n' "${urls[@]}")
     chmod 755 "$BIN"
     "$BIN" version >/dev/null 2>&1 || fail "Бинарник $BIN не запускается (архив не под эту архитектуру?)"
     ok "Архив проверен"
+}
+
+# install_mtg — бинарник mtg для Telegram-прокси из панели. Не критичен для VPN: не скачался
+# или пользователь отказался — панель покажет подсказку, поставить можно и позже, руками.
+# В архиве релиза один каталог mtg-<версия>-linux-<арх>/ с бинарником внутри.
+install_mtg() {
+    if [[ "$MTG" =~ ^(0|n|no)$ ]]; then return 0; fi
+    if [[ -z "$GOARCH" ]]; then
+        warn "Архитектура $(uname -m) не поддерживается mtg — Telegram-прокси без него не поднять"
+        return 0
+    fi
+    if "$MTG_BIN" -v 2>/dev/null | head -1 | grep -q "^$MTG_VERSION"; then
+        ok "mtg v${MTG_VERSION} уже установлен"
+        return 0
+    fi
+    local tmp="/tmp/mtg-${MTG_VERSION}-linux-${GOARCH}.tar.gz"
+    local inner="mtg-${MTG_VERSION}-linux-${GOARCH}/mtg"
+    info "скачиваю mtg v${MTG_VERSION}"
+    if ! curl -fsSL --connect-timeout 15 "$MTG_BASE/v${MTG_VERSION}/mtg-${MTG_VERSION}-linux-${GOARCH}.tar.gz" -o "$tmp"; then
+        warn "mtg не скачался — Telegram-прокси можно включить после ручной установки (${MTG_BASE})"
+        return 0
+    fi
+    if ! tar -xzf "$tmp" -C /tmp "$inner"; then
+        warn "не удалось распаковать mtg — установите вручную с ${MTG_BASE}"
+        rm -f "$tmp"
+        return 0
+    fi
+    install -m 0755 "/tmp/$inner" "$MTG_BIN" 2>/dev/null \
+        || { mkdir -p "$(dirname "$MTG_BIN")" && install -m 0755 "/tmp/$inner" "$MTG_BIN"; } \
+        || { warn "не удалось установить mtg в $MTG_BIN — положите бинарник туда сами"; rm -rf "/tmp/$inner" "$tmp"; return 0; }
+    rm -rf "/tmp/$inner" "$tmp"
+    if ! "$MTG_BIN" -v &>/dev/null; then
+        warn "mtg не запускается (не та архитектура?) — установите вручную с ${MTG_BASE}"
+        return 0
+    fi
+    ok "mtg v${MTG_VERSION} → $MTG_BIN"
 }
 
 # remove_legacy — при обновлении убрать код прежней версии: TS-исходники, node_modules и старую
@@ -1213,6 +1261,12 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     download_extract
     install_command
 
+    # mtg обновляем, только если он уже стоит или просили явно (MTG=1): обновление
+    # не навязывает новый бинарник тем, кто Telegram-прокси не использует.
+    if [[ "$MTG" =~ ^(1|y|yes)$ ]] || [[ -x "$MTG_BIN" ]]; then
+        install_mtg
+    fi
+
     # Установке без секретного пути панели — выдаём его (UI_PREFIX=off — оставить без пути):
     # иначе обновлённый сервер по-прежнему узнаётся сканером по странице логина. cli.env
     # обновление не переписывает, поэтому дописываем одну строку.
@@ -1641,6 +1695,12 @@ fi
 step "2/6  Файлы проекта"
 
 download_extract
+
+# mtg — по вопросу: нужен только для Telegram-прокси из панели, VPN работает и без него.
+if [[ -z "$MTG" ]]; then
+    ask MTG "Установить mtg — MTProto-прокси для Telegram из панели? [Y/n]: "
+fi
+install_mtg
 
 step "3/6  Ключи и конфиг AWG"
 
