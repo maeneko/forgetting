@@ -312,6 +312,43 @@ func (s *Server) routes() []route {
 		// awg-agent нод. Интерфейс не трогается: I1 нужен только клиентам (см. i1.go).
 		R("GET", "/api/masking", false, a, func(c *rctx) (result, error) { return ok(maskingInfo(s.cfg().Params.I1)) }),
 
+		// Telegram MTProto-прокси (mtg). GET — статус; POST {port} — поднять/сменить порт;
+		// POST /rotate — новый секрет (ссылка утекла); DELETE — остановить (секрет и порт
+		// остаются, подъём заново вернёт ту же ссылку).
+		R("GET", "/api/mtproto", false, a, func(c *rctx) (result, error) { return ok(s.mtprotoStatus()) }),
+
+		R("POST", "/api/mtproto", true, a, func(c *rctx) (result, error) {
+			port := 443
+			if v := c.obj().Get2("port"); v != nil {
+				n := jsToNumber(v)
+				if math.IsNaN(n) || n != math.Trunc(n) || n < 1 || n > 65535 {
+					return result{}, httpErr(400, "Порт: целое число от 1 до 65535")
+				}
+				port = int(n)
+			}
+			st, err := s.mtprotoUp(port)
+			if err != nil {
+				return result{}, err
+			}
+			return ok(st)
+		}),
+
+		R("POST", "/api/mtproto/rotate", true, a, func(c *rctx) (result, error) {
+			st, err := s.mtprotoRotate()
+			if err != nil {
+				return result{}, err
+			}
+			return ok(st)
+		}),
+
+		R("DELETE", "/api/mtproto", true, a, func(c *rctx) (result, error) {
+			st, err := s.mtprotoStop()
+			if err != nil {
+				return result{}, err
+			}
+			return ok(st)
+		}),
+
 		R("POST", "/api/masking", true, a, func(c *rctx) (result, error) { return ok(maskingInfo(s.regenI1())) }),
 
 		R("POST", "/awg/restart", true, a, func(c *rctx) (result, error) {

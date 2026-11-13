@@ -135,6 +135,16 @@ export interface TorrentStatus {
     error?:   string;
 }
 
+// MTProto-прокси (mtg) на ноде: статус из GET /api/mtproto. port 0 — прокси не поднимали.
+export interface MTProtoStatus {
+    port:    number;
+    secret:  string;
+    running: boolean;
+    link?:   string;   // https://t.me/proxy?server=…&port=…&secret=…
+    binary:  string;   // найденный mtg; «» — не найден (нужна установка)
+    error?:  string;
+}
+
 // «1 сервер», «3 сервера», «5 серверов»
 export function serversLabel(n: number): string {
     const m10 = n % 10, m100 = n % 100;
