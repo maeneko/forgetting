@@ -82,8 +82,10 @@ func scanNode(row interface{ Scan(...any) error }) (*nodeRow, error) {
 }
 
 // isRelay — запись это релей (awgrelay://), а не VPN-сервер: его нет в списке серверов,
-// у него нет awg-ctrl, и запросы RPC к нему панель не отправляет.
-func (r *nodeRow) isRelay() bool { return r.Role.Valid && r.Role.String == "relay" }
+// у него нет awg-ctrl, и запросы RPC к нему панель не отправляет. nil-запись (id нет в
+// реестре — например, локальный сервер #0, у которого строки в nodes нет по устройству
+// реестра) — не релей: вызывать безопасно, вызывающие полагаются на это.
+func (r *nodeRow) isRelay() bool { return r != nil && r.Role.Valid && r.Role.String == "relay" }
 
 // health — сводка /health сервера; ip — как пришло (`d.ip ?? ""`).
 type health struct {
