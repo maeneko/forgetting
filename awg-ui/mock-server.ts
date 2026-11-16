@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.4.1";
+const MOCK_VERSION = "0.5.5";
 
 // ── пользователи (vpn://) ──
 interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
@@ -40,7 +40,7 @@ const mnodes: MNode[] = [
     { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
     { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
-    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.5" },   // новее панели — жёлтый чип
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.6" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
@@ -385,12 +385,15 @@ app.put("/api/torrent", (q, r) => {
 const mtprotoOf: Record<number, { port: number; secret: string; running: boolean }> = {
     0: { port: 443, secret: "ee" + crypto.randomBytes(16).toString("hex"), running: true },
 };
+const mtprotoBinary: Record<number, string> = { 0: "/usr/local/bin/mtg" };
 const mtprotoIP: Record<number, string> = { 0: "203.0.113.7", 1: "198.51.100.4", 4: "192.0.2.44" };
 const mtprotoView = (id: number) => {
     const t = mtprotoOf[id] ?? { port: 0, secret: "", running: false };
     const ip = mtprotoIP[id] ?? "203.0.113.7";
+    const bin = mtprotoBinary[id] ?? "";
     return {
-        port: t.port, secret: t.secret, running: t.running, binary: "/usr/local/bin/mtg",
+        port: t.port, secret: t.secret, running: t.running, binary: bin,
+        managed: bin === "/usr/local/bin/mtg",
         link: t.port && t.secret ? `https://t.me/proxy?server=${ip}&port=${t.port}&secret=${t.secret}` : undefined,
     };
 };
@@ -398,6 +401,7 @@ app.get("/api/mtproto", (q, r) => tsid(q) === 1 ? r.status(404).json({ error: "N
 app.post("/api/mtproto", (q, r) => {
     const id = tsid(q), b = q.body ?? {};
     if (id === 1) return r.status(404).json({ error: "Not found" });
+    if (!mtprotoBinary[id]) return r.status(503).json({ error: "Компонент прокси не установлен. Установите его в панели и повторите." });
     const port = Number(b.port ?? 443);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return r.status(400).json({ error: "Порт: целое число от 1 до 65535" });
     if (port === 22 || port === 80) return r.status(409).json({ error: `Порт ${port} уже занят другой программой` });
@@ -411,6 +415,27 @@ app.post("/api/mtproto/rotate", (q, r) => {
     const t = mtprotoOf[id];
     if (!t?.port) return r.status(409).json({ error: "Прокси не поднят — менять секрет нечего" });
     t.secret = "ee" + crypto.randomBytes(16).toString("hex");
+    r.json(mtprotoView(id));
+});
+app.post("/api/mtproto/mtg", (q, r) => {
+    const id = tsid(q);
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    if (mtprotoBinary[id]) return r.status(409).json({ error: `Компонент прокси уже установлен: ${mtprotoBinary[id]}` });
+    mtprotoBinary[id] = "/usr/local/bin/mtg";
+    r.json(mtprotoView(id));
+});
+app.delete("/api/mtproto/mtg", (q, r) => {
+    const id = tsid(q);
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    if (!mtprotoBinary[id]) return r.status(404).json({ error: "Компонент прокси не установлен" });
+    delete mtprotoBinary[id];
+    if (mtprotoOf[id]) mtprotoOf[id].running = false;
+    r.json(mtprotoView(id));
+});
+app.delete("/api/mtproto/service", (q, r) => {
+    const id = tsid(q);
+    if (id === 1) return r.status(404).json({ error: "Not found" });
+    delete mtprotoOf[id];
     r.json(mtprotoView(id));
 });
 app.delete("/api/mtproto", (q, r) => {

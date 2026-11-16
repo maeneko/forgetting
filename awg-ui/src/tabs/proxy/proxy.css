@@ -3,8 +3,14 @@ Copyright (c) 2026 Ivan Vasilev
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 */
-/* Вкладка «Прокси» — карточка Telegram-прокси. Классы те же, что у карточек раздела «Сервер»
-   настроек (разметка совпадает); строки .ss-* и .chip — глобальные, из App.css. */
+/* Вкладка «Прокси» — две карточки: слева описание, справа управление.
+   Классы строк .ss-* и .chip — глобальные, из App.css. */
+.proxy-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    align-items: stretch;
+}
 .proxy-card {
     display: flex; flex-direction: column; gap: 12px;
     background: var(--surface-container);
@@ -14,4 +20,26 @@ LICENSE file in the root directory of this source tree.
 .proxy-card .ss-section { margin: 0; }
 .proxy-card .ss-status { background: var(--surface-container-lowest); }
 .proxy-card .st-hint { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); overflow-wrap: anywhere; }
-.proxy-actions { display: flex; justify-content: flex-end; }
+/* Заголовок правой карточки; справа — статус и кнопка включения одной группой. */
+.proxy-card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.proxy-card-power { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.proxy-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+
+/* Состояние компонентов прокси: mtg и systemd-сервис. Кнопки — справа, чтобы
+   «Удалить» не стояла рядом с включением и не нажималась случайно. */
+.proxy-components { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid var(--outline-variant); }
+.proxy-component { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.proxy-component-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.proxy-component-text .st-hint { overflow-wrap: anywhere; }
+.proxy-component .btn { flex: none; }
+
+/* Средняя и компактная ширина: карточки друг под другом, описание сверху. */
+@media (max-width: 839px) {
+    .proxy-layout { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 599px) {
+    .proxy-card-power { width: 100%; }
+    .proxy-card-power .btn { flex: 1; }
+    .proxy-component { align-items: stretch; }
+    .proxy-component .btn { width: 100%; }
+}

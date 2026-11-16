@@ -341,6 +341,32 @@ func (s *Server) routes() []route {
 			return ok(st)
 		}),
 
+		// mtg: поставить/удалить сам бинарник. Установка качает архив с GitHub и может
+		// идти дольше обычного RPC (см. rpcSlow в internal/ui/nodes.go), поэтому без s.mu.
+		R("POST", "/api/mtproto/mtg", false, a, func(c *rctx) (result, error) {
+			st, err := s.mtprotoInstallBinary()
+			if err != nil {
+				return result{}, err
+			}
+			return ok(st)
+		}),
+		R("DELETE", "/api/mtproto/mtg", false, a, func(c *rctx) (result, error) {
+			st, err := s.mtprotoRemoveBinary()
+			if err != nil {
+				return result{}, err
+			}
+			return ok(st)
+		}),
+
+		// Полное удаление прокси: юнит, конфиг, порт и секрет. Бинарник mtg остаётся.
+		R("DELETE", "/api/mtproto/service", true, a, func(c *rctx) (result, error) {
+			st, err := s.mtprotoRemoveService()
+			if err != nil {
+				return result{}, err
+			}
+			return ok(st)
+		}),
+
 		R("DELETE", "/api/mtproto", true, a, func(c *rctx) (result, error) {
 			st, err := s.mtprotoStop()
 			if err != nil {

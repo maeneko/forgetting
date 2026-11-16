@@ -142,6 +142,7 @@ export interface MTProtoStatus {
     running: boolean;
     link?:   string;   // https://t.me/proxy?server=…&port=…&secret=…
     binary:  string;   // найденный mtg; «» — не найден (нужна установка)
+    managed: boolean;  // бинарник лежит там, куда его ставит панель; только такой можно удалить
     error?:  string;
 }
 

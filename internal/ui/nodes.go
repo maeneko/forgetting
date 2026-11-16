@@ -309,7 +309,7 @@ func (n *Nodes) rpc(id int64, method, path string, body any) *CtrlResp {
 	rid := c.seq
 	p := &pending{ch: make(chan *CtrlResp, 1)}
 	timeout := rpcTimeout
-	if strings.HasPrefix(path, "/awg/") {
+	if strings.HasPrefix(path, "/awg/") || strings.HasPrefix(path, "/api/mtproto/mtg") {
 		timeout = rpcSlow
 	}
 	p.timer = time.AfterFunc(timeout, func() {
