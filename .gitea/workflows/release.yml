@@ -72,7 +72,7 @@ jobs:
           id=$(curl -sS -X POST "$API/releases" \
                  -H "Authorization: token $TOKEN" \
                  -H "Content-Type: application/json" \
-                 -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"prerelease\":true}" \
+                 -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"prerelease\":false}" \
                | release_id)
 
           if [ -z "$id" ]; then

@@ -46,4 +46,4 @@ jobs:
         run: |
           VERSION="${TAG#v}"
           gh release create "${TAG}" awgcontrol-"${VERSION}"-linux-*.tar.gz \
-            --target "${GITHUB_SHA}" --title "${TAG}" --generate-notes --prerelease
+            --target "${GITHUB_SHA}" --title "${TAG}" --generate-notes --latest
