@@ -1,0 +1,76 @@
+{
+  "generated_at": 1700000060,
+  "range": "1h",
+  "step": 15,
+  "from": 1699996460,
+  "to": 1700000060,
+  "scope": [
+    1
+  ],
+  "partial": false,
+  "prometheus": {
+    "installed": true,
+    "degraded": false,
+    "source": "local"
+  },
+  "totals": {
+    "master_keys": 1,
+    "devices": 1,
+    "device_slots": 5,
+    "peers": 30,
+    "peers_online": 31,
+    "servers_total": 1,
+    "servers_online": 0
+  },
+  "platforms": {
+    "total": 1,
+    "known": 1,
+    "by_os": [
+      { "os": "android", "devices": 1 },
+      { "os": "windows", "devices": 0 },
+      { "os": "macos", "devices": 0 },
+      { "os": "linux", "devices": 0 },
+      { "os": "ios", "devices": 0 },
+      { "os": "other", "devices": 0 },
+      { "os": "unknown", "devices": 0 }
+    ]
+  },
+  "traffic": {
+    "window": { "rx_bytes": 7000, "tx_bytes": 5000 },
+    "cumulative": { "rx_bytes": 900000, "tx_bytes": 800000 }
+  },
+  "servers": [
+    {
+      "id": 1,
+      "name": "nl-1",
+      "online": false,
+      "pending": false,
+      "outdated": false,
+      "version": "0.5.5",
+      "ok": true,
+      "up": 1,
+      "peers": 30,
+      "peers_online": 31,
+      "rx_bytes": 900000,
+      "tx_bytes": 800000,
+      "down_bps": 1200,
+      "up_bps": 2200,
+      "window_rx_bytes": 7000,
+      "window_tx_bytes": 5000,
+      "bandwidth_bits": 1000000,
+      "cpu_percent": 13.5,
+      "mem_percent": 41,
+      "cores": 4,
+      "mem_total_bytes": 8000000,
+      "heavy": 3,
+      "congested": null
+    }
+  ],
+  "series": {
+    "down_bps": [[1699996800, 1000], [1700000060, 1200]],
+    "up_bps": [[1699996800, 2000], [1700000060, 2200]],
+    "online_peers": [[1699996800, 30], [1700000060, 31]],
+    "cpu_percent": [[1699996800, 12.5], [1700000060, 13.5]],
+    "mem_percent": [[1699996800, 40], [1700000060, 41]]
+  }
+}

@@ -88,6 +88,12 @@ type Monitor struct {
 	srcMu sync.Mutex
 	src   *promSource // найденный Prometheus; nil — ещё не искали или не нашли
 	srcAt time.Time
+
+	// Публичный /api/v1/monitor: лимит по ключу API и кэш собранных снимков.
+	limMu    sync.Mutex
+	apiLimit *limiter
+	statsMu  sync.Mutex
+	stats    map[string]*monCall
 }
 
 // promSource — где Prometheus: local — на этой машине, иначе на ноде node (через её агента).
@@ -106,6 +112,8 @@ func newMonitor(a *App) *Monitor {
 		localEnabled: strings.ToLower(envOr("LOCAL_NODE", "on")) != "off",
 		onNode:       os.Getenv("CORE_HOST") != "",
 		http:         &http.Client{Transport: &http.Transport{Proxy: nil}},
+		apiLimit:     newLimiter(60, time.Minute, func(k string) { logf("monitor: лимит 60/мин исчерпан ключом API #%s", k) }),
+		stats:        map[string]*monCall{},
 	}
 }
 
@@ -163,19 +171,47 @@ func (m *Monitor) findSource() *promSource {
 }
 
 // promGet — JSON-ответ Prometheus (path с запросом): напрямую или через агента ноды.
+// Бюджет панельный: 8 с на локальный HTTP, у ноды — её RPC-таймаут (15 с).
 func (m *Monitor) promGet(src *promSource, path string, q url.Values) (any, error) {
+	return m.promGetT(src, path, q, 0)
+}
+
+// promGetT — то же с явным бюджетом вызова: timeout > 0 ограничивает и локальный HTTP,
+// и ожидание ответа ноды. Публичному API нужен свой, более короткий бюджет, чем вкладке.
+func (m *Monitor) promGetT(src *promSource, path string, q url.Values, timeout time.Duration) (any, error) {
 	if src == nil {
 		return nil, errProm
 	}
 	path += "?" + q.Encode()
 	if !src.local {
-		r, err := m.a.nodes.CtrlFor(src.node)("GET", "/prom"+path, nil)
-		if err != nil || r.Status < 200 || r.Status >= 300 {
+		type result struct {
+			data any
+			err  error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			r, err := m.a.nodes.CtrlFor(src.node)("GET", "/prom"+path, nil)
+			if err != nil || r.Status < 200 || r.Status >= 300 {
+				ch <- result{nil, errProm}
+				return
+			}
+			ch <- result{r.Data, nil}
+		}()
+		if timeout <= 0 {
+			x := <-ch
+			return x.data, x.err
+		}
+		select {
+		case x := <-ch:
+			return x.data, x.err
+		case <-time.After(timeout):
 			return nil, errProm
 		}
-		return r.Data, nil
 	}
-	c := &http.Client{Transport: m.http.Transport, Timeout: 8 * time.Second}
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	c := &http.Client{Transport: m.http.Transport, Timeout: timeout}
 	resp, err := c.Get(m.promURL + path)
 	if err != nil {
 		return nil, errProm
@@ -189,12 +225,24 @@ func (m *Monitor) promGet(src *promSource, path string, q url.Values) (any, erro
 }
 
 func (m *Monitor) rangeQuery(src *promSource, query string, start, end, step int64) (*series, error) {
+	return m.rangeQueryT(src, query, start, end, step, 0)
+}
+
+func (m *Monitor) rangeQueryT(src *promSource, query string, start, end, step int64, timeout time.Duration) (*series, error) {
 	q := url.Values{}
 	q.Set("query", query)
 	q.Set("start", strconv.FormatInt(start, 10))
 	q.Set("end", strconv.FormatInt(end, 10))
 	q.Set("step", strconv.FormatInt(step, 10))
-	data, err := m.promGet(src, "/api/v1/query_range", q)
+	var (
+		data any
+		err  error
+	)
+	if timeout > 0 {
+		data, err = m.promGetT(src, "/api/v1/query_range", q, timeout)
+	} else {
+		data, err = m.promGet(src, "/api/v1/query_range", q)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -237,10 +285,22 @@ func (m *Monitor) rangeQuery(src *promSource, query string, start, end, step int
 
 // instantQuery — значение на момент time по каждому server_id.
 func (m *Monitor) instantQuery(src *promSource, query string, time_ int64) (map[int]float64, error) {
+	return m.instantQueryT(src, query, time_, 0)
+}
+
+func (m *Monitor) instantQueryT(src *promSource, query string, time_ int64, timeout time.Duration) (map[int]float64, error) {
 	q := url.Values{}
 	q.Set("query", query)
 	q.Set("time", strconv.FormatInt(time_, 10))
-	data, err := m.promGet(src, "/api/v1/query", q)
+	var (
+		data any
+		err  error
+	)
+	if timeout > 0 {
+		data, err = m.promGetT(src, "/api/v1/query", q, timeout)
+	} else {
+		data, err = m.promGet(src, "/api/v1/query", q)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +320,92 @@ func (m *Monitor) instantQuery(src *promSource, query string, time_ int64) (map[
 		}
 	}
 	return out, nil
+}
+
+// monData — результат веера запросов вкладки: ряды по ключам promQueries, объём за период
+// и мгновенные значения «сейчас» для rated. errs — ошибка каждого запроса по порядку;
+// вкладка падает на первой, публичный API показывает degraded и отдаёт остальное.
+type monData struct {
+	from, to int64
+	series   map[string]*series
+	usedDown map[int]float64
+	usedUp   map[int]float64
+	nowVals  map[string]map[int]float64
+	errs     []error
+}
+
+// queryAll — параллельный веер вкладки «Монитор»: 11 рядов, 2 increase за период и, если
+// окно расширено, мгновенные «сейчас» для rated. Общий для вкладки и /api/v1/monitor.
+func (m *Monitor) queryAll(src *promSource, rg promRange) (*monData, error) {
+	return m.queryAllT(src, rg, 0)
+}
+
+// queryAllT — то же с явным бюджетом каждого запроса (0 — панельный).
+func (m *Monitor) queryAllT(src *promSource, rg promRange, timeout time.Duration) (*monData, error) {
+	end := now()
+	start := end - rg.seconds
+	window := promRateWindow
+	if rg.step > 120 {
+		window = strconv.FormatInt(rg.step, 10) + "s"
+	}
+	got := make([]*series, len(promQueries))
+	errs := make([]error, len(promQueries)+2+len(rated))
+	// Объём за весь период: increase() по тем же монотонным счётчикам (сбросы счётчика он учитывает).
+	// Окно расширено — «сейчас» с конца ряда было бы средним за шаг; берём мгновенные значения по 2m.
+	var usedDown, usedUp map[int]float64
+	nowVals := map[string]map[int]float64{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, pq := range promQueries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], errs[i] = m.rangeQueryT(src, withWindow(pq.q, window), start, end, rg.step, timeout)
+		}()
+	}
+	span := strconv.FormatInt(rg.seconds, 10) + "s"
+	n := len(promQueries)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		usedDown, errs[n] = m.instantQueryT(src, `sum by (server_id, server) (increase(awg_link_transmit_bytes_total[`+span+`]))`, end, timeout)
+	}()
+	go func() {
+		defer wg.Done()
+		usedUp, errs[n+1] = m.instantQueryT(src, `sum by (server_id, server) (increase(awg_link_receive_bytes_total[`+span+`]))`, end, timeout)
+	}()
+	if window != promRateWindow {
+		for j, k := range rated {
+			for _, pq := range promQueries {
+				if pq.key != k {
+					continue
+				}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					v, err := m.instantQueryT(src, pq.q, end, timeout)
+					errs[n+2+j] = err
+					mu.Lock()
+					nowVals[k] = v
+					mu.Unlock()
+				}()
+			}
+		}
+	}
+	wg.Wait()
+	s := map[string]*series{}
+	for i, pq := range promQueries {
+		s[pq.key] = got[i]
+	}
+	d := &monData{from: start, to: end, series: s, usedDown: usedDown, usedUp: usedUp, nowVals: nowVals, errs: errs}
+	var first error
+	for _, err := range errs {
+		if err != nil {
+			first = err
+			break
+		}
+	}
+	return d, first
 }
 
 // total — сумма (или максимум) рядов по меткам времени.
@@ -416,62 +562,16 @@ func (m *Monitor) router() *Router {
 			return c.Error(400, "range: 1h, 6h, 24h, 7d или 30d")
 		}
 		src := m.source()
-		end := now()
-		start := end - rg.seconds
-		window := promRateWindow
-		if rg.step > 120 {
-			window = strconv.FormatInt(rg.step, 10) + "s"
+		d, err := m.queryAll(src, rg)
+		if err != nil {
+			m.forgetSource()
+			return c.Error(502, err.Error())
 		}
+		start, end := d.from, d.to
+		usedDown, usedUp, nowVals := d.usedDown, d.usedUp, d.nowVals
 		got := make([]*series, len(promQueries))
-		errs := make([]error, len(promQueries)+2+len(rated))
-		// Объём за весь период: increase() по тем же монотонным счётчикам (сбросы счётчика он учитывает).
-		// Окно расширено — «сейчас» с конца ряда было бы средним за шаг; берём мгновенные значения по 2m.
-		var usedDown, usedUp map[int]float64
-		nowVals := map[string]map[int]float64{}
-		var mu sync.Mutex
-		var wg sync.WaitGroup
 		for i, pq := range promQueries {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				got[i], errs[i] = m.rangeQuery(src, withWindow(pq.q, window), start, end, rg.step)
-			}()
-		}
-		span := strconv.FormatInt(rg.seconds, 10) + "s"
-		n := len(promQueries)
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			usedDown, errs[n] = m.instantQuery(src, `sum by (server_id, server) (increase(awg_link_transmit_bytes_total[`+span+`]))`, end)
-		}()
-		go func() {
-			defer wg.Done()
-			usedUp, errs[n+1] = m.instantQuery(src, `sum by (server_id, server) (increase(awg_link_receive_bytes_total[`+span+`]))`, end)
-		}()
-		if window != promRateWindow {
-			for j, k := range rated {
-				for _, pq := range promQueries {
-					if pq.key != k {
-						continue
-					}
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						v, err := m.instantQuery(src, pq.q, end)
-						errs[n+2+j] = err
-						mu.Lock()
-						nowVals[k] = v
-						mu.Unlock()
-					}()
-				}
-			}
-		}
-		wg.Wait()
-		for _, err := range errs {
-			if err != nil {
-				m.forgetSource()
-				return c.Error(502, err.Error())
-			}
+			got[i] = d.series[pq.key]
 		}
 		used := func(v map[int]float64, id int) any {
 			if x, ok := v[id]; ok {

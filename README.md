@@ -373,11 +373,37 @@ curl -s -X POST http://HOST:PORT/api/v1/masterkeys \
 | `POST /api/v1/masterkeys/:id/devices/:device/rekey` | Устройство сменит ключ при следующем опросе |
 | `POST /api/v1/masterkeys/:id/devices/:device/psk` | Новый PSK: `{ id, pending }` — `pending` серверов ждут ноду |
 
+#### Монитор `GET /api/v1/monitor`
+
+Снимок для внешнего монитора: трафик, нагрузка и платформы устройств одним запросом.
+
+```bash
+curl -s "http://HOST:PORT/api/v1/monitor?range=24h&server=all" -H "X-Api-Key: awgk_xxx"
+```
+
+| Параметр | Значение |
+|---|---|
+| `range` | `1h` (по умолчанию), `6h`, `24h`, `7d`, `30d` — окно графиков; `400` на любое другое |
+| `server` | `3`, `1,2`, повтор параметра или `all` (по умолчанию — весь набор ключа). Пересекается с набором серверов ключа: чужой id → `400 server: нет доступа` |
+
+Ответ — агрегаты, без имён устройств, меток, IP и приватных полей: `totals` (мастер-ключи,
+устройства, места, пиры, серверы онлайн), `platforms` (устройства по ОС: `android`, `windows`,
+`macos`, `linux`, `ios`, `other`, `unknown`), `traffic { window, cumulative }` в байтах,
+`servers[]` (онлайн, пиры, скорости `down_bps`/`up_bps` в бит/с, CPU и память в процентах),
+`series` (`down_bps`, `up_bps`, `online_peers`, `cpu_percent`, `mem_percent` — пары
+`[unix_ts, value]`) и `scope` — фактически отданные серверы.
+
+Без Prometheus ручка всё равно отвечает `200`: `prometheus.installed: false`, `traffic` и
+`series` — `null`, остальное на месте. Часть запросов не удалась — `prometheus.degraded: true`
+и `partial: true`, пострадавшие поля `null`. Снимок кешируется на 60 секунд по `range` и
+набору серверов; больше 60 запросов в минуту с одного ключа — `429` и `Retry-After: 60`.
+
 | Код | Когда |
 |---|---|
 | `401 {"error":"API key required"}` | заголовка нет или он не начинается с `awgk_` |
 | `401 {"error":"Invalid API key"}` | ключ не найден — удалён или неверен |
 | `502 {"error":"awg-ctrl недоступен"}` | awg-ui посредничает, а awg-ctrl не отвечает |
+| `429 {"error":"Too many requests"}` | больше 60 запросов в минуту с одного API-ключа (только `/api/v1/monitor`) |
 
 Ключи лежат в собственной БД панели (`/etc/amnezia/amneziawg/ui.db`), поэтому переустановка их
 не трогает. Сама awg-ctrl про внешние ключи ничего не знает: awg-ui ходит к ней своей
@@ -406,7 +432,7 @@ TOKEN=$(curl -s -X POST http://HOST:PORT/login \
 
 | Метод | Ответ |
 |---|---|
-| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.5.3" }` — имя и версия панели для вордмарка; за авторизацией, чтобы сканер не опознал панель |
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.5.6" }` — имя и версия панели для вордмарка; за авторизацией, чтобы сканер не опознал панель |
 | `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
 | `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
 

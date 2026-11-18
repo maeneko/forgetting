@@ -470,11 +470,14 @@ func (m *Metrics) render() string {
 		out.add("awg_peer_sent_bytes_total", "counter", "Отправлено пиру, байт.", peers(func(p any) any { return field(p, "tx") }))
 	}
 
-	var masters, devices int64
-	m.a.db.QueryRow("SELECT COUNT(*) AS n FROM master_keys WHERE revoked_at IS NULL").Scan(&masters)
-	m.a.db.QueryRow("SELECT COUNT(*) AS n FROM devices").Scan(&devices)
-	out.add("awg_master_keys", "gauge", "Мастер-ключей sen:// (без удаляемых).", []sample{{nil, masters}})
-	out.add("awg_devices", "gauge", "Устройств sen://.", []sample{{nil, devices}})
+	reg := m.a.registryStats(nil)
+	byOS := []sample{}
+	for _, c := range platformCounts(reg.rows) {
+		byOS = append(byOS, sample{[]label{{"os", c.os}}, c.devices})
+	}
+	out.add("awg_master_keys", "gauge", "Мастер-ключей sen:// (без удаляемых).", []sample{{nil, reg.masters}})
+	out.add("awg_devices", "gauge", "Устройств sen://.", []sample{{nil, reg.devices}})
+	out.add("awg_devices_by_os", "gauge", "Устройств sen:// по ОС (android, windows, macos, linux, ios, other, unknown).", byOS)
 	out.add("awg_scrape_duration_seconds", "gauge", "Сколько панель собирала метрики.", []sample{{nil, time.Since(t0).Seconds()}})
 	return out.b.String()
 }

@@ -861,6 +861,7 @@ func (a *App) routes() *Router {
 
 	// ВАЖНО: /api/v1 — до JWT-прокси на /api, иначе прокси потребует JWT вместо ключа.
 	app.Use("/api/v1", a.requireAPIKey)
+	app.Get("/api/v1/monitor", a.monitor.apiMonitor)
 	app.Use("/api/v1/users", a.pickKeyServer)
 	app.Post("/api/v1/users", a.extUsersCreate)
 	app.Get("/api/v1/users", a.extUsersList)
