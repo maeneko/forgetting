@@ -16,6 +16,22 @@ type kv = jsjson.KV
 
 func ok(v any) (result, error)      { return result{200, v}, nil }
 func created(v any) (result, error) { return result{201, v}, nil }
+
+// bodyHost — необязательный FakeTLS-домен из тела POST. Пустое поле = «не задан»
+// (берётся сохранённый/по умолчанию). Саму валидацию делает mtprotoUp/mtprotoRotate:
+// она же нормализует регистр и отвечает 400 с префиксом «host:».
+func bodyHost(c *rctx) (string, error) {
+	v := c.obj().Get2("host")
+	if v == nil {
+		return "", nil
+	}
+	h, isStr := v.(string)
+	if !isStr {
+		return "", httpErr(400, "host: строка")
+	}
+	return h, nil
+}
+
 func (s *Server) routes() []route {
 	a := []func(*rctx) error{s.auth}
 	an := []func(*rctx) error{s.auth, validateName}
@@ -312,9 +328,10 @@ func (s *Server) routes() []route {
 		// awg-agent нод. Интерфейс не трогается: I1 нужен только клиентам (см. i1.go).
 		R("GET", "/api/masking", false, a, func(c *rctx) (result, error) { return ok(maskingInfo(s.cfg().Params.I1)) }),
 
-		// Telegram MTProto-прокси (mtg). GET — статус; POST {port} — поднять/сменить порт;
-		// POST /rotate — новый секрет (ссылка утекла); DELETE — остановить (секрет и порт
-		// остаются, подъём заново вернёт ту же ссылку).
+		// Telegram MTProto-прокси (mtg). GET — статус; POST {port, host?} — поднять/сменить
+		// порт (host — FakeTLS-домен, без него берётся сохранённый); POST /rotate — новый
+		// секрет (ссылка утекла); DELETE — остановить (секрет и порт остаются, подъём
+		// заново вернёт ту же ссылку).
 		R("GET", "/api/mtproto", false, a, func(c *rctx) (result, error) { return ok(s.mtprotoStatus()) }),
 
 		R("POST", "/api/mtproto", true, a, func(c *rctx) (result, error) {
@@ -326,7 +343,11 @@ func (s *Server) routes() []route {
 				}
 				port = int(n)
 			}
-			st, err := s.mtprotoUp(port)
+			host, err := bodyHost(c)
+			if err != nil {
+				return result{}, err
+			}
+			st, err := s.mtprotoUp(port, host)
 			if err != nil {
 				return result{}, err
 			}
@@ -334,7 +355,11 @@ func (s *Server) routes() []route {
 		}),
 
 		R("POST", "/api/mtproto/rotate", true, a, func(c *rctx) (result, error) {
-			st, err := s.mtprotoRotate()
+			host, err := bodyHost(c)
+			if err != nil {
+				return result{}, err
+			}
+			st, err := s.mtprotoRotate(host)
 			if err != nil {
 				return result{}, err
 			}

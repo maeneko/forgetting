@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.6";
+const MOCK_VERSION = "0.5.7";
 
 // ── пользователи (vpn://) ──
 interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
@@ -40,7 +40,7 @@ const mnodes: MNode[] = [
     { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
     { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
-    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.7" },   // новее панели — жёлтый чип
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.8" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
@@ -379,22 +379,65 @@ app.put("/api/torrent", (q, r) => {
     r.json(torrentView(id));
 });
 
-// Telegram-прокси (MTProto): состояние по серверам; сервер 0 поднят с самого начала — с живой
-// ссылкой (адрес — как в /health). Frankfurt (1) — старая нода без маршрута (404 → «обновите»).
+// Telegram-прокси (MTProto): состояние по серверам. Сервер 0 — рабочий: живая ссылка и открытый
+// порт. Frankfurt (1) — старая нода без маршрута (404 → «сервер без awg-ctrl»). Tokyo (2) — сервис
+// упал при старте с пустым FakeTLS-хостом (error как journal tail, port > 0, running false).
+// Amsterdam (3) — без бинарника mtg. Helsinki (4) — чисто остановлен + закрытый фаервол.
 // Порты 22 и 80 изображают занятые (409), как ss -tln на реальной машине.
-const mtprotoOf: Record<number, { port: number; secret: string; running: boolean }> = {
-    0: { port: 443, secret: "ee" + crypto.randomBytes(16).toString("hex"), running: true },
+//
+// Второй сценарий падения на дефолтном сервере: MOCK_PROXY_DOWN=1 npm run dev:mock — сервер 0
+// отвечает running:false + error, включение уходит в честный error-тост, а не в «Прокси поднят».
+interface MProxy {
+    port: number; secret: string; running: boolean; host: string; error?: string;
+    firewall?: { backend: "ufw" | "firewalld" | "iptables" | "none"; port_open: boolean; error?: string };
+}
+const DEFAULT_HOST = "storage.googleapis.com";
+// Секрет mtg v2: "ee" + 16 случайных байт hex + hex(домен FakeTLS) — ровно то, что генерит mtg.
+const mtgSecret = (host: string) =>
+    "ee" + crypto.randomBytes(16).toString("hex") + Buffer.from(host, "utf8").toString("hex");
+const mtprotoOf: Record<number, MProxy> = {
+    0: { port: 443, secret: mtgSecret(DEFAULT_HOST), running: true, host: DEFAULT_HOST,
+         firewall: { backend: "ufw", port_open: true } },
+    2: { port: 443, secret: mtgSecret(DEFAULT_HOST), running: false, host: "",
+         error: "proxying: hostname cannot be empty",
+         firewall: { backend: "ufw", port_open: true } },
+    3: { port: 0, secret: "", running: false, host: "",
+         firewall: { backend: "none", port_open: false, error: "ufw не найден" } },
+    4: { port: 8443, secret: mtgSecret("cdn.jsdelivr.net"), running: false, host: "cdn.jsdelivr.net",
+         firewall: { backend: "firewalld", port_open: false, error: "firewall-cmd: команда не найдена" } },
 };
-const mtprotoBinary: Record<number, string> = { 0: "/usr/local/bin/mtg" };
+const mtprotoBinary: Record<number, string> = {
+    0: "/usr/local/bin/mtg", 2: "/usr/local/bin/mtg", 4: "/usr/local/bin/mtg",
+};
 const mtprotoIP: Record<number, string> = { 0: "203.0.113.7", 1: "198.51.100.4", 4: "192.0.2.44" };
+// Та же проверка, что у бэкенда: ASCII-хост с минимум одной точкой; пустой — допустим (дефолт).
+const MOCK_HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+const mockHostErr = (h: unknown): string => {
+    if (h === undefined || h === null) return "";
+    const s = String(h).trim();
+    if (!s) return "";
+    if (s.length > 253 || !MOCK_HOST_RE.test(s)) return "host: нужен ASCII-домен, например storage.googleapis.com";
+    return "";
+};
 const mtprotoView = (id: number) => {
-    const t = mtprotoOf[id] ?? { port: 0, secret: "", running: false };
+    let t = mtprotoOf[id] ?? { port: 0, secret: "", running: false, host: "" };
+    if (id === 0 && process.env.MOCK_PROXY_DOWN === "1")
+        t = { ...t, running: false, error: "proxying: hostname cannot be empty" };
     const ip = mtprotoIP[id] ?? "203.0.113.7";
     const bin = mtprotoBinary[id] ?? "";
+    const link = t.port > 0 && t.secret && t.running
+        ? `https://t.me/proxy?server=${ip}&port=${t.port}&secret=${t.secret}`
+        : "";
     return {
-        port: t.port, secret: t.secret, running: t.running, binary: bin,
+        port: t.port, secret: t.secret, host: t.host, running: t.running, binary: bin,
         managed: bin === "/usr/local/bin/mtg",
-        link: t.port && t.secret ? `https://t.me/proxy?server=${ip}&port=${t.port}&secret=${t.secret}` : undefined,
+        // Сервис «установлен», если есть бинарник и сохранённый порт, — не по одному port > 0.
+        installed: !!bin && t.port > 0,
+        link,
+        link_reason: link ? undefined : (bin ? "прокси остановлен" : "нужен бинарник mtg"),
+        firewall: t.firewall,
+        // error — это journal tail: у чисто остановленного сервиса (4) его нет, у упавшего (2) — есть.
+        error: t.error ?? (t.port > 0 && !t.running && !t.host ? "proxying: hostname cannot be empty" : undefined),
     };
 };
 app.get("/api/mtproto", (q, r) => tsid(q) === 1 ? r.status(404).json({ error: "Not found" }) : r.json(mtprotoView(tsid(q))));
@@ -405,16 +448,25 @@ app.post("/api/mtproto", (q, r) => {
     const port = Number(b.port ?? 443);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return r.status(400).json({ error: "Порт: целое число от 1 до 65535" });
     if (port === 22 || port === 80) return r.status(409).json({ error: `Порт ${port} уже занят другой программой` });
+    const hErr = mockHostErr(b.host);
+    if (hErr) return r.status(400).json({ error: hErr });
     const prev = mtprotoOf[id];
-    mtprotoOf[id] = { port, secret: prev?.secret || "ee" + crypto.randomBytes(16).toString("hex"), running: true };
+    const host = String(b.host ?? "").trim() || prev?.host || DEFAULT_HOST;
+    // Домен зашит в секрет mtg: при смене хоста секрет пересобирается, иначе FakeTLS развалится.
+    const secret = prev && prev.host === host && prev.secret ? prev.secret : mtgSecret(host);
+    mtprotoOf[id] = { port, secret, running: true, host, firewall: prev?.firewall };
     r.json(mtprotoView(id));
 });
 app.post("/api/mtproto/rotate", (q, r) => {
-    const id = tsid(q);
+    const id = tsid(q), b = q.body ?? {};
     if (id === 1) return r.status(404).json({ error: "Not found" });
     const t = mtprotoOf[id];
     if (!t?.port) return r.status(409).json({ error: "Прокси не поднят — менять секрет нечего" });
-    t.secret = "ee" + crypto.randomBytes(16).toString("hex");
+    const hErr = mockHostErr(b.host);
+    if (hErr) return r.status(400).json({ error: hErr });
+    const host = String(b.host ?? "").trim() || t.host || DEFAULT_HOST;
+    t.host = host;
+    t.secret = mtgSecret(host);
     r.json(mtprotoView(id));
 });
 app.post("/api/mtproto/mtg", (q, r) => {

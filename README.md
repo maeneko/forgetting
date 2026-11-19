@@ -405,6 +405,37 @@ curl -s "http://HOST:PORT/api/v1/monitor?range=24h&server=all" -H "X-Api-Key: aw
 | `502 {"error":"awg-ctrl недоступен"}` | awg-ui посредничает, а awg-ctrl не отвечает |
 | `429 {"error":"Too many requests"}` | больше 60 запросов в минуту с одного API-ключа (только `/api/v1/monitor`) |
 
+#### Здоровье `GET /api/v1/health`
+
+Срез состояния серверов для внешнего монитора: отвечает **всегда** `200`, даже если часть серверов
+недоступна или Prometheus не установлен — панель не изобретает данные, а показывает что есть.
+
+```bash
+curl -s "http://HOST:PORT/api/v1/health" -H "X-Api-Key: awgk_xxx"
+```
+
+Набор серверов — тот же, что у ключа (`api_key_servers`); отдельного параметра нет: ключ,
+выданный на все серверы, получает все.
+
+Каждый сервер набора — отдельный элемент `servers[]`, отсортированный по `id`:
+`{ id, name, online, up, peers, peers_online, rx_bytes, tx_bytes, cores, load, mem_total_bytes,
+mem_available_bytes, cpu_percent, source }`. `online` — awg-ctrl ответил прямо сейчас, а не
+последнее известное состояние; `source` — `ctrl` или `none`. Неизвестное значение — `null`,
+поле не исчезает. Недоступный сервер остаётся в списке:
+
+```json
+{"id": 2, "name": "Сингапур", "online": false, "up": null, "peers": null,
+ "peers_online": null, "rx_bytes": null, "tx_bytes": null, "cores": null,
+ "load": null, "mem_total_bytes": null, "mem_available_bytes": null,
+ "cpu_percent": null, "source": "none", "error": "ctrl недоступен"}
+```
+
+`cpu_percent` считается по дельтам счётчиков `/proc/stat` между двумя запросами: при первом
+обращении и после сброса счётчиков — `null`. `summary` — сумма по серверам набора:
+`servers_total`, `servers_online`, `servers_up`, `peers`, `peers_online`. В ответе нет ни
+устройств, ни ключей, ни IP — только агрегаты. Лимит общий с `/monitor`: 60 запросов в минуту
+с одного ключа, дальше `429` и `Retry-After: 60`.
+
 Ключи лежат в собственной БД панели (`/etc/amnezia/amneziawg/ui.db`), поэтому переустановка их
 не трогает. Сама awg-ctrl про внешние ключи ничего не знает: awg-ui ходит к ней своей
 внутренней авторизацией. Управлять ключами можно и без панели, по JWT: `GET/POST /ui/apikeys`
@@ -432,7 +463,7 @@ TOKEN=$(curl -s -X POST http://HOST:PORT/login \
 
 | Метод | Ответ |
 |---|---|
-| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.5.6" }` — имя и версия панели для вордмарка; за авторизацией, чтобы сканер не опознал панель |
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.5.7" }` — имя и версия панели для вордмарка; за авторизацией, чтобы сканер не опознал панель |
 | `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
 | `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
 
