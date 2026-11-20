@@ -103,6 +103,7 @@ type App struct {
 
 	internalKey ed25519.PrivateKey
 	httpLocal   *http.Client
+	httpSlow    *http.Client // /awg/*: рестарт и upgrade идут долго, общий таймаут им не годится
 
 	db *sql.DB
 
@@ -141,8 +142,11 @@ func New() (*App, error) {
 		version:  pick("VERSION", ""),
 		ctrlURL:  "http://127.0.0.1:" + envOr("AWGCTRL_PORT", "3005"),
 		baseDir:  cwd,
-		// awg-ctrl на loopback: системный прокси сюда не нужен.
-		httpLocal:     &http.Client{Transport: &http.Transport{Proxy: nil}},
+		// awg-ctrl на loopback: системный прокси сюда не нужен. У быстрых запросов таймаут
+		// обязателен: мёртвый локальный awg-ctrl не должен держать ни /ui/nodes, ни прокси.
+		httpLocal: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 5 * time.Second},
+		// /awg/* и mtg идут долго (рестарт, upgrade) — им отдельный клиент, иначе 5 с в обрез.
+		httpSlow:      &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: rpcSlow},
 		revoked:       map[string]bool{},
 		loginAttempts: map[string]*rateEntry{},
 	}
@@ -249,7 +253,14 @@ func (a *App) ctrlLocal(method, path string, body any) (*CtrlResp, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+iauth.Mint(a.internalKey, "awg-ui", nowFn()))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.httpLocal.Do(req)
+	client := a.httpLocal
+	// Всё, что меняет состояние, ходит в awg/awg-quick и может идти долго (reissue, sync,
+	// рестарт): короткий таймаут оставлен только чтениям — именно они не должны держать панель.
+	slow := method != "GET" || strings.HasPrefix(path, "/awg/") || strings.HasPrefix(path, "/api/mtproto/mtg")
+	if a.httpSlow != nil && slow {
+		client = a.httpSlow
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -352,50 +363,74 @@ func (a *App) checkRate(ip string) (bool, int) {
 // ключа не хранится — только SHA-256 и префикс для показа в панели.
 
 type apiKeyRow struct {
-	ID        int64
-	Label     string
-	KeyHash   string
-	Prefix    string
-	ServerID  int
-	CreatedAt int64
-	LastUsed  sql.NullInt64
+	ID         int64
+	Label      string
+	KeyHash    string
+	Prefix     string
+	ServerID   int
+	CreatedAt  int64
+	LastUsed   sql.NullInt64
+	AllServers bool // ключ видит весь реестр серверов, включая добавленные после создания
 }
 
 func (a *App) initAPIKeys() error {
-	_, err := a.db.Exec(`
+	if _, err := a.db.Exec(`
     CREATE TABLE IF NOT EXISTS api_keys (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        label      TEXT    NOT NULL,
-        key_hash   TEXT    NOT NULL UNIQUE,
-        prefix     TEXT    NOT NULL,
-        server_id  INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        last_used  INTEGER
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        label       TEXT    NOT NULL,
+        key_hash    TEXT    NOT NULL UNIQUE,
+        prefix      TEXT    NOT NULL,
+        server_id   INTEGER NOT NULL DEFAULT 0,
+        created_at  INTEGER NOT NULL,
+        last_used   INTEGER,
+        all_servers INTEGER NOT NULL DEFAULT 1
     );
     -- Какие серверы видит ключ: на них он заводит vpn://-пользователей и в их пределах
     -- управляет мастер-ключами. api_keys.server_id — сервер по умолчанию для /api/v1/users,
-    -- всегда входит в набор.
+    -- всегда входит в набор. При all_servers = 1 строк здесь нет: набор — весь реестр на
+    -- момент запроса (серверы, добавленные позже, ключ видит сам).
     CREATE TABLE IF NOT EXISTS api_key_servers (
         key_id    INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
         server_id INTEGER NOT NULL,
         PRIMARY KEY (key_id, server_id)
     );
-    -- Ключи со времён одного сервера: набор — их server_id.
+`); err != nil {
+		return err
+	}
+	// all_servers — «ключ видит все серверы»: в api_key_servers при этом пусто. Новые ключи
+	// создаются так (DEFAULT 1): ограничение набора — осознанное действие в панели.
+	if !hasColumn(a.db, "api_keys", "all_servers") {
+		if _, err := a.db.Exec("ALTER TABLE api_keys ADD COLUMN all_servers INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return err
+		}
+		// Миграция: все существующие ключи остаются явными (0). Доказать намерение «видеть
+		// всё» у старого ключа нельзя — до этой колонки набор всегда задавался строками
+		// (initAPIKeys при каждом старте достраивал ключу строку с его server_id), так что
+		// строка ниже возвращает такой ключ ровно в прежнее состояние. «Все серверы» —
+		// политика только для ключей, созданных после обновления.
+		if _, err := a.db.Exec("UPDATE api_keys SET all_servers = 0"); err != nil {
+			return err
+		}
+	}
+	// Ключи со времён одного сервера: набор — их server_id. Только явные (all_servers = 0):
+	// «всем» строки не нужны, иначе нарушился бы инвариант «sentinel или строки, но не оба».
+	_, err := a.db.Exec(`
     INSERT OR IGNORE INTO api_key_servers (key_id, server_id)
-        SELECT id, server_id FROM api_keys WHERE id NOT IN (SELECT key_id FROM api_key_servers);
+        SELECT id, server_id FROM api_keys
+        WHERE all_servers = 0 AND id NOT IN (SELECT key_id FROM api_key_servers);
 `)
 	return err
 }
 
 func scanKey(row interface{ Scan(...any) error }) (*apiKeyRow, error) {
 	k := &apiKeyRow{}
-	if err := row.Scan(&k.ID, &k.Label, &k.KeyHash, &k.Prefix, &k.ServerID, &k.CreatedAt, &k.LastUsed); err != nil {
+	if err := row.Scan(&k.ID, &k.Label, &k.KeyHash, &k.Prefix, &k.ServerID, &k.CreatedAt, &k.LastUsed, &k.AllServers); err != nil {
 		return nil, err
 	}
 	return k, nil
 }
 
-const keyCols = "id, label, key_hash, prefix, server_id, created_at, last_used"
+const keyCols = "id, label, key_hash, prefix, server_id, created_at, last_used, all_servers"
 
 func (a *App) keyByID(q queryer, id int64) *apiKeyRow {
 	k, _ := scanKey(q.QueryRow("SELECT "+keyCols+" FROM api_keys WHERE id = ?", id))
@@ -429,28 +464,74 @@ func (a *App) keyServers(q queryer, id int64) []int {
 	return ints(q, "SELECT server_id FROM api_key_servers WHERE key_id = ? ORDER BY server_id", id)
 }
 
-// setKeyServers — набор серверов ключа целиком. Сервер по умолчанию остаётся, если он в
-// наборе, иначе — наименьший из набора.
-func (a *App) setKeyServers(id int64, ids []int) error {
+// allServerIDs — весь реестр серверов на сейчас (релеи не серверы). Не nil: пустая область
+// ключа — это пустой набор, а не nil («панель видит всё»).
+func (a *App) allServerIDs() []int {
+	ids := []int{}
+	if a.nodes != nil {
+		if v := a.nodes.IDs(); v != nil {
+			ids = v
+		}
+	}
+	return ids
+}
+
+// keyScope — серверы ключа на момент запроса. all_servers — весь реестр (и серверы,
+// добавленные после создания ключа), иначе явный набор из api_key_servers.
+func (a *App) keyScope(k *apiKeyRow) []int {
+	if k == nil {
+		return []int{}
+	}
+	if k.AllServers {
+		return a.allServerIDs()
+	}
+	return a.keyServers(a.db, k.ID)
+}
+
+// setKeyScope — набор серверов ключа целиком: all — «все серверы» (строк нет), иначе явный
+// список. Sentinel и строки вместе не живут: переключение в одном tx чистит/заменяет оба.
+// Сервер по умолчанию остаётся, если он в наборе (у «всех» — существует), иначе — наименьший.
+func (a *App) setKeyScope(id int64, all bool, ids []int) error {
 	row := a.keyByID(a.db, id)
 	if row == nil {
 		return nil
 	}
+	sid := row.ServerID
+	if all {
+		if a.nodes == nil || !a.nodes.Exists(sid) {
+			if a.nodes != nil {
+				sid = a.nodes.DefaultID()
+			}
+		}
+	} else if len(ids) > 0 && !containsInt(ids, sid) {
+		sid = ids[0]
+	}
 	return a.tx(func(tx *sql.Tx) error {
+		flag := 0
+		if all {
+			flag = 1
+		}
+		if _, err := tx.Exec("UPDATE api_keys SET all_servers = ?, server_id = ? WHERE id = ?", flag, sid, id); err != nil {
+			return err
+		}
 		if _, err := tx.Exec("DELETE FROM api_key_servers WHERE key_id = ?", id); err != nil {
 			return err
 		}
-		for _, sid := range ids {
-			if _, err := tx.Exec("INSERT OR IGNORE INTO api_key_servers (key_id, server_id) VALUES (?, ?)", id, sid); err != nil {
+		if all {
+			return nil
+		}
+		for _, s := range ids {
+			if _, err := tx.Exec("INSERT OR IGNORE INTO api_key_servers (key_id, server_id) VALUES (?, ?)", id, s); err != nil {
 				return err
 			}
 		}
-		if !containsInt(ids, row.ServerID) {
-			_, err := tx.Exec("UPDATE api_keys SET server_id = ? WHERE id = ?", ids[0], id)
-			return err
-		}
 		return nil
 	})
+}
+
+// setKeyServers — явный набор (старый контракт: панель, уборка после удаления сервера).
+func (a *App) setKeyServers(id int64, ids []int) error {
+	return a.setKeyScope(id, false, ids)
 }
 
 func containsInt(s []int, v int) bool {
@@ -482,16 +563,56 @@ func (a *App) serverList(v any, exists func(int) bool) ([]int, bool) {
 	return ids, true
 }
 
-// parseKeyServers — набор серверов из тела: непустой, без повторов, только существующие.
-func (a *App) parseKeyServers(v any) ([]int, string) {
-	if l, ok := v.([]any); !ok || len(l) == 0 {
-		return nil, "Нужен хотя бы один сервер"
+// keySet — набор серверов ключа из тела панели:
+//   - all:true, servers отсутствует или servers:null — «все серверы» (sentinel all_servers);
+//   - servers:[] — ошибка: ключ без серверов не нужен;
+//   - servers:[…] — явный набор: только существующие, без повторов, по возрастанию.
+//
+// given — в теле было хоть одно из полей (PATCH с пустым телом не должен расширять ключ).
+func (a *App) keySet(b jsjson.Object) (all bool, ids []int, given bool, msg string) {
+	av, hasAll := b.Get("all")
+	sv, hasServers := b.Get("servers")
+	given = hasAll || hasServers
+	if hasAll && truthy(av) {
+		return true, nil, given, ""
 	}
-	ids, ok := a.serverList(v, a.nodes.Exists)
+	if !hasServers || sv == nil {
+		return true, nil, given, ""
+	}
+	if _, ok := sv.([]any); !ok {
+		return false, nil, given, "servers: нужен массив серверов"
+	}
+	if len(arr(sv)) == 0 {
+		return false, nil, given, "servers: пустой набор недопустим"
+	}
+	ids, ok := a.serverList(sv, a.nodes.Exists)
 	if !ok {
-		return nil, "Такого сервера нет"
+		return false, nil, given, "servers: такого сервера нет"
 	}
-	return ids, ""
+	return false, ids, given, ""
+}
+
+// keyDefaultID — сервер по умолчанию из тела: defaultServerId (или старый server_id), только
+// существующий в реестре; иначе def.
+func (a *App) keyDefaultID(b jsjson.Object, def int) int {
+	for _, key := range []string{"defaultServerId", "server_id"} {
+		v, ok := b.Get(key)
+		if !ok || v == nil {
+			continue
+		}
+		if f := jsToNumberAny(v); f == float64(int(f)) && a.nodes.Exists(int(f)) {
+			return int(f)
+		}
+	}
+	return def
+}
+
+// keyServersJSON — набор в ответе панели: null у «всех» (набор не перечислен), иначе список.
+func keyServersJSON(all bool, ids []int) any {
+	if all {
+		return nil
+	}
+	return intsJSON(ids)
 }
 
 func hashKey(key string) string {
@@ -537,10 +658,18 @@ func (a *App) apiKeysList(c *Ctx) bool {
 	rows.Close()
 	out := []any{}
 	for _, k := range keys {
+		var srv any
+		if !k.AllServers {
+			srv = intsJSON(a.keyServers(a.db, k.ID))
+		}
 		out = append(out, jsjson.Object{
-			{Key: "id", Val: k.ID}, {Key: "label", Val: k.Label}, {Key: "prefix", Val: k.Prefix},
-			{Key: "server_id", Val: k.ServerID}, {Key: "created_at", Val: k.CreatedAt}, {Key: "last_used", Val: nullInt(k.LastUsed)},
-			{Key: "servers", Val: intsJSON(a.keyServers(a.db, k.ID))},
+			{Key: "id", Val: k.ID}, {Key: "label", Val: k.Label}, {Key: "name", Val: k.Label}, {Key: "prefix", Val: k.Prefix},
+			{Key: "allServers", Val: k.AllServers}, {Key: "servers", Val: srv},
+			{Key: "defaultServerId", Val: k.ServerID},
+			{Key: "createdAt", Val: k.CreatedAt}, {Key: "lastUsed", Val: nullInt(k.LastUsed)},
+			// Старые имена: текущая панель читает их, пока не перешла на контракт выше.
+			{Key: "server_id", Val: k.ServerID}, {Key: "created_at", Val: k.CreatedAt},
+			{Key: "last_used", Val: nullInt(k.LastUsed)},
 		})
 	}
 	return c.JSON(200, jsjson.Object{{Key: "keys", Val: out}})
@@ -559,42 +688,42 @@ func jsString(v any) (string, bool) {
 	return "", false
 }
 
-// servers — набор серверов ключа; без него — server_id (по-старому) или сервер по умолчанию.
+// Новый ключ: {label|name, servers?, all?, defaultServerId?}. Без servers/all — «все серверы»
+// (решение: ограничение набора — отдельное действие в панели). servers:[] — 400.
 func (a *App) apiKeysCreate(c *Ctx) bool {
 	b := c.Obj()
 	label, labelOK := jsString(b.Get2("label"))
 	if !truthy(b.Get2("label")) || !labelOK || !reKeyLabel.MatchString(label) {
-		return c.Error(400, "Метка: буквы, цифры, пробел, _ и -, до 40 символов")
+		// name — синоним label в контракте панели.
+		label, labelOK = jsString(b.Get2("name"))
+		if !truthy(b.Get2("name")) || !labelOK || !reKeyLabel.MatchString(label) {
+			return c.Error(400, "Метка: буквы, цифры, пробел, _ и -, до 40 символов")
+		}
 	}
-	// server_id === undefined в JSON — только отсутствие ключа; null — это Number(null) = 0.
-	sidRaw, sidPresent := b.Get("server_id")
-	var serversV any
-	if s := b.Get2("servers"); s != nil {
-		serversV = s
-	} else if !sidPresent {
-		serversV = []any{float64(a.nodes.DefaultID())}
-	} else {
-		serversV = []any{jsToNumberAny(sidRaw)}
-	}
-	ids, msg := a.parseKeyServers(serversV)
+	all, ids, _, msg := a.keySet(b)
 	if msg != "" {
 		return c.Error(400, msg)
 	}
-	sid := ids[0]
-	if sidPresent {
-		if f := jsToNumberAny(sidRaw); f == float64(int(f)) && containsInt(ids, int(f)) {
-			sid = int(f)
+	sid := a.keyDefaultID(b, a.nodes.DefaultID())
+	if !all {
+		if !containsInt(ids, sid) {
+			sid = ids[0]
 		}
+	} else if !a.nodes.Exists(sid) {
+		sid = a.nodes.DefaultID()
 	}
 	key, hash, prefix := genAPIKey()
 	var id int64
 	err := a.tx(func(tx *sql.Tx) error {
-		r, err := tx.Exec("INSERT INTO api_keys (label, key_hash, prefix, server_id, created_at) VALUES (?, ?, ?, ?, ?)",
-			label, hash, prefix, sid, now())
+		r, err := tx.Exec("INSERT INTO api_keys (label, key_hash, prefix, server_id, created_at, all_servers) VALUES (?, ?, ?, ?, ?, ?)",
+			label, hash, prefix, sid, now(), boolInt(all))
 		if err != nil {
 			return err
 		}
 		id, _ = r.LastInsertId()
+		if all {
+			return nil
+		}
 		for _, s := range ids {
 			if _, err := tx.Exec("INSERT OR IGNORE INTO api_key_servers (key_id, server_id) VALUES (?, ?)", id, s); err != nil {
 				return err
@@ -606,8 +735,17 @@ func (a *App) apiKeysCreate(c *Ctx) bool {
 		return c.Error(500, "Internal server error")
 	}
 	// Открытое значение отдаётся один раз — дальше в БД только хэш.
-	return c.JSON(201, jsjson.Object{{Key: "id", Val: id}, {Key: "label", Val: b.Get2("label")}, {Key: "prefix", Val: prefix},
-		{Key: "key", Val: key}, {Key: "server_id", Val: sid}, {Key: "servers", Val: intsJSON(ids)}})
+	return c.JSON(201, jsjson.Object{{Key: "id", Val: id}, {Key: "label", Val: label}, {Key: "name", Val: label}, {Key: "prefix", Val: prefix},
+		{Key: "key", Val: key}, {Key: "allServers", Val: all}, {Key: "servers", Val: keyServersJSON(all, ids)},
+		{Key: "defaultServerId", Val: sid}, {Key: "server_id", Val: sid}})
+}
+
+// boolInt — 0/1 для SQLite: логических колонок в ui.db нет.
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // paramID — Number(req.params.id): ok, если целое.
@@ -619,20 +757,69 @@ func paramID(s string) (int64, bool) {
 	return int64(f), true
 }
 
+// PATCH {servers:[…]} | {all:true} — тот же смысл, что у POST. Сужение набора не блокируется,
+// но в ответе приходят живые мастер-ключи, которые ключ перестанет видеть (lostMasters):
+// панель показывает их в подтверждении.
 func (a *App) apiKeysPatch(c *Ctx) bool {
 	id, ok := paramID(c.Params["id"])
-	if !ok || a.keyByID(a.db, id) == nil {
+	row := a.keyByID(a.db, id)
+	if !ok || row == nil {
 		return c.Error(404, "Не найден")
 	}
-	ids, msg := a.parseKeyServers(c.Obj().Get2("servers"))
+	all, ids, given, msg := a.keySet(c.Obj())
 	if msg != "" {
 		return c.Error(400, msg)
 	}
-	if err := a.setKeyServers(id, ids); err != nil {
+	if !given {
+		return c.Error(400, "servers или all: нужен набор серверов")
+	}
+	after := ids
+	if all {
+		after = a.allServerIDs()
+	}
+	lost := a.lostMasters(a.keyScope(row), after)
+	if err := a.setKeyScope(id, all, ids); err != nil {
 		return c.Error(500, "Internal server error")
 	}
-	row := a.keyByID(a.db, id)
-	return c.JSON(200, jsjson.Object{{Key: "id", Val: id}, {Key: "server_id", Val: row.ServerID}, {Key: "servers", Val: intsJSON(ids)}})
+	if row = a.keyByID(a.db, id); row == nil {
+		return c.Error(404, "Не найден")
+	}
+	return c.JSON(200, jsjson.Object{{Key: "id", Val: id}, {Key: "allServers", Val: row.AllServers},
+		{Key: "servers", Val: keyServersJSON(row.AllServers, ids)}, {Key: "defaultServerId", Val: row.ServerID},
+		{Key: "server_id", Val: row.ServerID}, {Key: "lostMasters", Val: lost}})
+}
+
+// lostMasters — живые (не отозванные) мастер-ключи, которые видны API-ключу сейчас и перестанут
+// быть видны в наборе after. Считается до применения, поэтому before — старый набор.
+// Список ключей читается и закрывается заранее: у a.db одно соединение, и запрос внутри
+// незакрытых rows (visible → master_servers) встал бы навсегда.
+func (a *App) lostMasters(before, after []int) []any {
+	out := []any{}
+	if a.sub == nil {
+		return out
+	}
+	type masterLabel struct {
+		id    int64
+		label string
+	}
+	var masters []masterLabel
+	rows, err := a.db.Query("SELECT id, label FROM master_keys WHERE revoked_at IS NULL ORDER BY id")
+	if err != nil {
+		return out
+	}
+	for rows.Next() {
+		var m masterLabel
+		if rows.Scan(&m.id, &m.label) == nil {
+			masters = append(masters, m)
+		}
+	}
+	rows.Close()
+	for _, m := range masters {
+		if a.sub.visible(m.id, before) && !a.sub.visible(m.id, after) {
+			out = append(out, jsjson.Object{{Key: "id", Val: m.id}, {Key: "label", Val: m.label}})
+		}
+	}
+	return out
 }
 
 func (a *App) apiKeysDelete(c *Ctx) bool {
@@ -696,6 +883,9 @@ func (a *App) apiKeysAfterDelete(id int) {
 		}
 		a.setKeyServers(k.id, rest)
 	}
+	// Ключ «все серверы» строк не имеет, но помнит server_id по умолчанию; если это был
+	// удалённый сервер, без X-Server-Id он бы 404-ил на /api/v1/users. Берём сервер панели.
+	a.db.Exec("UPDATE api_keys SET server_id = ? WHERE all_servers = 1 AND server_id = ?", a.nodes.DefaultID(), id)
 }
 
 // ── Внешний API: ключ и сервер ──────────────────────────────────────────────
@@ -711,7 +901,9 @@ func (a *App) requireAPIKey(c *Ctx) bool {
 	}
 	a.db.Exec("UPDATE api_keys SET last_used = ? WHERE id = ?", now(), row.ID)
 	c.apiKey = row
-	c.servers = a.keyServers(a.db, row.ID)
+	// all_servers разворачивается в реестр на момент запроса: сервер, добавленный после
+	// создания ключа, ключ видит сразу. Ниже по коду — всегда конкретные id, без sentinel.
+	c.servers = a.keyScope(row)
 	return true
 }
 
@@ -817,6 +1009,75 @@ func (a *App) extUsersDelete(c *Ctx) bool {
 	return c.JSON(r.Status, r.Data)
 }
 
+// extUsersBlock — блокировка пользователя внешней системой (биллинг). Reason необязателен:
+// manual — по решению оператора, api (по умолчанию) — по решению внешней системы. Ставится та
+// же отметка users.blocked_reason, что у панели, поэтому /sub/v1/config и статистика видят
+// блокировку без маппинга. 404 — пользователя нет, 502 — awg-ctrl не отвечает.
+func (a *App) extUsersBlock(c *Ctx) bool {
+	name := c.Params["name"]
+	reason := "api"
+	if v, ok := c.Obj().Get("reason"); ok && v != nil {
+		r, isStr := v.(string)
+		if !isStr || (r != "manual" && r != "api") {
+			return c.Error(400, "reason: manual или api")
+		}
+		reason = r
+	}
+	r, err := a.extCtrl(c)("POST", "/api/users/"+encodeURIComponent(name)+"/block",
+		jsjson.Object{{Key: "reason", Val: reason}})
+	if err != nil {
+		return unavailable(c)
+	}
+	if r.Status == 404 {
+		return c.Error(404, "пользователь не найден")
+	}
+	if r.Status >= 400 {
+		return c.JSON(r.Status, r.Data)
+	}
+	// Уже заблокированный пользователь сохраняет прежнюю причину — отдаём то, что в БД.
+	if got, ok := str(field(r.Data, "blocked_reason")); ok && got != "" {
+		reason = got
+	}
+	return c.JSON(200, jsjson.Object{{Key: "success", Val: true}, {Key: "name", Val: name}, {Key: "reason", Val: reason}})
+}
+
+// extUsersUnblock — снятие блокировки: blocked_at и blocked_reason очищаются, пир возвращается
+// в conf/ядро. Идемпотентно: повторный unblock тоже 200.
+func (a *App) extUsersUnblock(c *Ctx) bool {
+	name := c.Params["name"]
+	r, err := a.extCtrl(c)("POST", "/api/users/"+encodeURIComponent(name)+"/unblock", nil)
+	if err != nil {
+		return unavailable(c)
+	}
+	if r.Status == 404 {
+		return c.Error(404, "пользователь не найден")
+	}
+	if r.Status >= 400 {
+		return c.JSON(r.Status, r.Data)
+	}
+	return c.JSON(200, jsjson.Object{{Key: "success", Val: true}, {Key: "name", Val: name}})
+}
+
+// extUsersUsageReset — сброс израсходованного трафика (внешний биллинг обнуляет счётчик при
+// продлении подписки). Счётчик живёт в awg-ctrl выбранного сервера ключа, туда и уходит
+// запрос — тем же путём, что у панели. Идемпотентно: повторный сброс тоже 200, счётчик 0.
+// Отсутствие пользователя отдаём своим текстом (внешний контракт не зависит от формулировки
+// awg-ctrl), недоступный awg-ctrl — 502, как у остальных маршрутов /api/v1.
+func (a *App) extUsersUsageReset(c *Ctx) bool {
+	name := c.Params["name"]
+	r, err := a.extCtrl(c)("POST", "/api/users/"+encodeURIComponent(name)+"/usage/reset", nil)
+	if err != nil {
+		return unavailable(c)
+	}
+	if r.Status == 404 {
+		return c.Error(404, "пользователь не найден")
+	}
+	if r.Status >= 400 {
+		return c.JSON(r.Status, r.Data)
+	}
+	return c.JSON(200, jsjson.Object{{Key: "success", Val: true}, {Key: "name", Val: name}})
+}
+
 // ── Маршруты ────────────────────────────────────────────────────────────────
 
 func (a *App) login(c *Ctx) bool {
@@ -866,6 +1127,12 @@ func (a *App) routes() *Router {
 	app.Use("/api/v1/users", a.pickKeyServer)
 	app.Post("/api/v1/users", a.extUsersCreate)
 	app.Get("/api/v1/users", a.extUsersList)
+	// Блокировка/разблокировка — до /users/:name: подпуть не должен зависеть от порядка
+	// объявления (как и сброс счётчика).
+	app.Post("/api/v1/users/:name/block", a.extUsersBlock)
+	app.Post("/api/v1/users/:name/unblock", a.extUsersUnblock)
+	// Сброс счётчика — до /users/:name: подпуть не должен зависеть от порядка объявления.
+	app.Post("/api/v1/users/:name/usage/reset", a.extUsersUsageReset)
 	app.Get("/api/v1/users/:name", a.extUsersGet)
 	app.Delete("/api/v1/users/:name", a.extUsersDelete)
 	app.Mount("/api/v1/masterkeys", a.sub.apiRouter(func(c *Ctx) []int { return c.servers }))

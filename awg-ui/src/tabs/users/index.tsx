@@ -4,13 +4,123 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     apiFetch, vpnKeyToConf, downloadFile, copyText, bytes, timeAgo, genLabel,
-    type User, type PageProps, type AwgGen,
+    limitBytes, limitDate, limitDay, timeLeft, inputDate, parseInputDate, blockText,
+    LIMIT_UNITS, limitAmount, limitUnit, parseLimitAmount, TB, type LimitUnit,
+    type BlockReason, type User, type PageProps, type AwgGen,
 } from '../../lib/shared';
 import { qrDataUrl } from '../../lib/qr';
-import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe } from '../../components/icons';
+import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe, IcoHistory, IcoPower } from '../../components/icons';
 import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
+import DateField from './DateField';
 import './users.css';
+
+interface LimErrors { date?: string; amount?: string; general?: string }
+interface LimEdit { name: string; date: string; amount: string; unit: LimitUnit }
+
+// Проверки до запроса: пусто — «без ограничения», остальное должно быть числом в разумных пределах.
+const checkLimits = (e: LimEdit): LimErrors => {
+    const errs: LimErrors = {};
+    if (e.date) {
+        const ts = parseInputDate(e.date);
+        if (ts === null || Number.isNaN(ts)) errs.date = 'Некорректная дата';
+    }
+    const b = parseLimitAmount(e.amount, e.unit);
+    if (b !== null) {
+        if (Number.isNaN(b)) errs.amount = 'Нужно число, например 250';
+        else if (b < 1024 ** 2) errs.amount = 'Минимум 1 МБ';
+        else if (b > 1024 * TB) errs.amount = 'Больше 1024 ТБ не бывает';
+    }
+    return errs;
+};
+
+// Подсказка под полем даты: «до 12.03.2027 14:30 · осталось 12 дней» или предупреждение о прошлом.
+const dateHint = (v: string): { text: string; warm?: boolean } => {
+    if (!v) return { text: 'Без ограничения по сроку' };
+    const ts = parseInputDate(v);
+    if (ts === null || Number.isNaN(ts)) return { text: 'Дата не распознана', warm: true };
+    return { text: `${limitDate(ts)} · ${timeLeft(ts)}`, warm: ts * 1000 <= Date.now() };
+};
+const trafficHint = (v: string, unit: LimitUnit): { text: string } => {
+    const b = parseLimitAmount(v, unit);
+    if (b === null) return { text: 'Без ограничения по трафику' };
+    if (Number.isNaN(b) || b <= 0) return { text: 'Нужно положительное число' };
+    if (b < 1024 ** 2) return { text: 'Минимум 1 МБ' };
+    return { text: `= ${limitBytes(b)}` };
+};
+
+// Доступ закрыт: непустая причина, флаг blocked или истёкший срок. expired проверяем
+// отдельно — бэкенд может не выставить blocked и оставить blockReason пустым, а ключ
+// уже не работает; «онлайн» у такого читается как «подключается».
+const accessReason = (x: { blocked?: boolean; blockReason?: BlockReason | null; expired?: boolean }): BlockReason | null =>
+    x.blockReason ?? (x.expired ? 'expired' : x.blocked ? 'manual' : null);
+
+// Статус в таблице и карточке: у закрытого доступа — причина блокировки, а не сетевая
+// активность (одна формулировка на обе вкладки — blockText из shared).
+function StatusChip({ u }: { u: User }) {
+    const reason = accessReason(u);
+    if (reason) return (
+        <span className="chip chip--error">
+            <span className="chip-dot" />{blockText(reason)}
+        </span>
+    );
+    return (
+        <span className={`chip chip--${u.online ? 'online' : 'offline'}`}>
+            <span className="chip-dot" />
+            {u.online
+                ? 'онлайн'
+                : u.lastHandshake
+                    ? timeAgo(u.lastHandshake) + ' назад'
+                    : 'никогда'}
+        </span>
+    );
+}
+
+// Лимиты пользователя: израсходовано и срок. Про блокировку говорит чип статуса —
+// здесь только лимиты, чтобы не дублировать красный чип в строке.
+// Капсула срока живёт в строке имени (справа от него), а не под шкалой: дата видна
+// рядом с именем, как у мастер-ключей. Полная дата с временем — в подсказке.
+// Всё читается защитно — старый awg-ctrl этих полей не отдаёт вовсе.
+function LimitsCell({ u }: { u: User }) {
+    const limit = u.trafficLimitBytes ?? null;
+    const used  = u.usedBytes ?? 0;
+    const hasTraffic = limit != null && limit > 0;
+    const hasDate = u.expiresAt != null && u.expiresAt > 0;
+    // Шкала и цвет — про трафик, а не про блокировку: красной она становится, только когда
+    // лимит действительно исчерпан. Закрытый вручную при 12 из 200 ГБ — обычная полоска.
+    const exhausted = hasTraffic && used >= (limit as number);
+    const pct = hasTraffic ? Math.min(100, Math.round((used / (limit as number)) * 100)) : 0;
+    const tone = exhausted ? ' lim-bar-fill--over' : pct >= 85 ? ' lim-bar-fill--warn' : '';
+    const tip = [
+        hasTraffic ? `Израсходовано ${limitBytes(used)} из ${limitBytes(limit)}` : '',
+        hasDate ? `до ${limitDate(u.expiresAt)}${timeLeft(u.expiresAt) ? ` · ${timeLeft(u.expiresAt)}` : ''}` : '',
+    ].filter(Boolean).join(' · ');
+    if (!hasTraffic) {
+        // срок без трафика показывает капсула у имени — под шкалой дублировать нечего
+        return hasDate ? null : <div className="lim-cell"><span className="lim-none">без лимитов</span></div>;
+    }
+    return (
+        <div className="lim-cell" title={tip || undefined}>
+            <div className="lim-usage">
+                <span className="lim-usage-text">
+                    <span className={exhausted ? 'lim-used lim-used--over' : 'lim-used'}>{limitBytes(used)}</span>
+                    <span className="lim-of"> из {limitBytes(limit)}</span>
+                </span>
+                <span className="lim-bar" role="progressbar" aria-label="Израсходовано трафика"
+                    aria-valuemin={0} aria-valuemax={limit as number} aria-valuenow={Math.min(used, limit as number)}>
+                    <span className={`lim-bar-fill${tone}`} style={{ width: `${pct}%` }} />
+                </span>
+            </div>
+        </div>
+    );
+}
+
+// Капсула срока: «до 29.10», справа от имени. Полная дата — в подсказке.
+function WhenChip({ u }: { u: User }) {
+    if (u.expiresAt == null || u.expiresAt <= 0) return null;
+    const tip = `до ${limitDate(u.expiresAt)}${timeLeft(u.expiresAt) ? ` · ${timeLeft(u.expiresAt)}` : ''}`;
+    return <span className="lim-when" title={tip}>до {limitDay(u.expiresAt)}</span>;
+}
 
 // Вкладка «Пользователи»: форма создания + таблица (десктоп) / карточки (мобильный)
 // + модалка QR. Сервер-бар сверху рендерит App. Свой стейт и поллинг — здесь.
@@ -18,6 +128,13 @@ export default function UsersPage({ token, showMsg }: PageProps) {
     const [users, setUsers]     = useState<User[]>([]);
     const [newName, setNewName] = useState('');
     const [qrModal, setQrModal] = useState<{ name: string; dataUrl: string; vpnKey: string } | null>(null);
+    // Диалог «Лимиты…»: поля хранятся строками (пусто — без ограничения), состояние
+    // блокировки и счётчик читаются из самого пользователя — после reload они свежие.
+    const [lim, setLim]       = useState<LimEdit | null>(null);
+    const [limErr, setLimErr] = useState<LimErrors>({});
+    const [limBusy, setLimBusy] = useState(false);
+    // Открыт календарь срока: Esc в нём закрывает только поповер, а не весь диалог.
+    const [dateOpen, setDateOpen] = useState(false);
     // Поколение, на котором сейчас работает интерфейс. Ключи, выданные на другом
     // поколении, уже не подключатся — их надо перевыпустить.
     const [serverGen, setServerGen] = useState<AwgGen>('2');
@@ -115,6 +232,65 @@ export default function UsersPage({ token, showMsg }: PageProps) {
         }
     }, [token, showMsg]);
 
+    // ── Лимиты: диалог, быстрые действия ──
+    const openLimits = useCallback((u: User) => {
+        setLim({ name: u.name, date: inputDate(u.expiresAt), amount: limitAmount(u.trafficLimitBytes), unit: limitUnit(u.trafficLimitBytes) });
+        setLimErr({});
+        setDateOpen(false);
+    }, []);
+    const closeLimits = useCallback(() => { setLim(null); setLimErr({}); }, []);
+
+    const saveLimits = useCallback(async () => {
+        if (!lim) return;
+        const errs = checkLimits(lim);
+        if (errs.date || errs.amount) { setLimErr(errs); return; }
+        setLimBusy(true); setLimErr({});
+        try {
+            await apiFetch('PUT', `/api/users/${encodeURIComponent(lim.name)}/limits`, token, {
+                expires_at: parseInputDate(lim.date),
+                traffic_limit_bytes: parseLimitAmount(lim.amount, lim.unit),
+            });
+            showMsg('Лимиты сохранены');
+            closeLimits();
+            await loadUsers(token);
+        } catch (e: any) {
+            const d = e?.response?.data ?? {};
+            setLimErr({
+                general: d.error ?? 'Не удалось сохранить лимиты',
+                date: d.errors?.expires_at, amount: d.errors?.traffic_limit_bytes,
+            });
+        } finally { setLimBusy(false); }
+    }, [lim, token, showMsg, closeLimits, loadUsers]);
+
+    // Блокировка и сброс счётчика применяются сразу, без «Сохранить».
+    const limAct = useCallback(async (path: string, ok: string) => {
+        if (!lim) return;
+        setLimBusy(true); setLimErr({});
+        try {
+            await apiFetch('POST', `/api/users/${encodeURIComponent(lim.name)}/${path}`, token);
+            showMsg(ok);
+            await loadUsers(token);
+        } catch (e: any) {
+            setLimErr({ general: e?.response?.data?.error ?? 'Ошибка запроса' });
+        } finally { setLimBusy(false); }
+    }, [lim, token, showMsg, loadUsers]);
+
+    // Данные для диалога берём из списка: после сброса счётчика они обновятся сами.
+    const limUser = lim ? users.find(u => u.name === lim.name) ?? null : null;
+    const limReason = limUser
+        ? limUser.blockReason ?? (limUser.expired ? 'expired' : limUser.blocked ? 'manual' : null)
+        : null;
+    const limBusyNow = !!limUser?.blocked || !!limUser?.expired;
+
+    // Esc закрывает диалог — как у остальных модалок вкладки. Открытый календарь
+    // перехватывает Esc сам, поэтому в этом случае диалог не трогаем.
+    useEffect(() => {
+        if (!lim) return;
+        const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && !dateOpen) closeLimits(); };
+        document.addEventListener('keydown', key);
+        return () => document.removeEventListener('keydown', key);
+    }, [lim, dateOpen, closeLimits]);
+
     // Загрузить пользователей и запустить поллинг статистики, пока вкладка открыта.
     useEffect(() => {
         if (!token) return;
@@ -154,7 +330,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
             </div>
 
             <div className="table-card">
-                <table>
+                <table className="users-table">
                     <thead>
                         <tr>
                             <th>#</th>
@@ -173,36 +349,39 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                         ) : users.map((u, i) => (
                             <tr key={u.name}>
                                 <td className="td-num">{i + 1}</td>
-                                <td>
-                                    <span className={`chip chip--${u.online ? 'online' : 'offline'}`}>
-                                        <span className="chip-dot" />
-                                        {u.online
-                                            ? 'онлайн'
-                                            : u.lastHandshake
-                                                ? timeAgo(u.lastHandshake) + ' назад'
-                                                : 'никогда'}
-                                    </span>
-                                </td>
+                                <td><StatusChip u={u} /></td>
                                 <td><span className="user-chips"><PriorityChip priority={u.priority} torrent={u.torrent} /><TorrentChip torrent={u.torrent} /></span></td>
                                 <td>
-                                    {u.name}
-                                    {u.key_gen !== serverGen && (
-                                        <span
-                                            className="tip-wrap user-gen"
-                                            data-tip={`Ключ выдан на ${genLabel(u.key_gen)}, сервер работает на ${genLabel(serverGen)}`}
-                                        >
-                                            <span className="chip chip--error">
-                                                <span className="chip-dot" />
-                                                {genLabel(u.key_gen)}
-                                            </span>
+                                    <span className="user-name-cell">
+                                        <span className="user-name-line">
+                                            <span className="user-name-text">{u.name}</span>
+                                            {u.key_gen !== serverGen && (
+                                                <span
+                                                    className="tip-wrap user-gen"
+                                                    data-tip={`Ключ выдан на ${genLabel(u.key_gen)}, сервер работает на ${genLabel(serverGen)}`}
+                                                >
+                                                    <span className="chip chip--error">
+                                                        <span className="chip-dot" />
+                                                        {genLabel(u.key_gen)}
+                                                    </span>
+                                                </span>
+                                            )}
+                                            <WhenChip u={u} />
                                         </span>
-                                    )}
+                                        <LimitsCell u={u} />
+                                    </span>
                                 </td>
                                 <td className="td-mono">{u.ip}</td>
                                 <td>{bytes(u.rx)}</td>
                                 <td>{bytes(u.tx)}</td>
                                 <td className="td-actions">
                                     <div className="actions">
+                                        <button
+                                            className="btn-icon"
+                                            title="Лимиты…"
+                                            aria-label="Лимиты"
+                                            onClick={() => openLimits(u)}
+                                        ><IcoHistory /></button>
                                         <button
                                             className="btn-icon"
                                             title="QR-код vpn://"
@@ -237,15 +416,9 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                         {genLabel(u.key_gen)}
                                     </span>
                                 )}
+                                <WhenChip u={u} />
                             </div>
-                            <span className={`chip chip--${u.online ? 'online' : 'offline'}`}>
-                                <span className="chip-dot" />
-                                {u.online
-                                    ? 'онлайн'
-                                    : u.lastHandshake
-                                        ? timeAgo(u.lastHandshake) + ' назад'
-                                        : 'никогда'}
-                            </span>
+                            <StatusChip u={u} />
                         </div>
                         <div className="user-card-ip">
                             <IcoGlobe />
@@ -253,6 +426,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                             <PriorityChip priority={u.priority} torrent={u.torrent} />
                             <TorrentChip torrent={u.torrent} />
                         </div>
+                        <LimitsCell u={u} />
                         <div className="user-card-metrics">
                             <div className="metric-block">
                                 <span className="metric-label">↓ rx</span>
@@ -269,6 +443,10 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                 aria-label="QR-код"
                                 onClick={() => showQR(u.name)}
                             ><IcoQR /> QR</button>
+                            <button
+                                className="btn btn--outline"
+                                onClick={() => openLimits(u)}
+                            ><IcoHistory /> Лимиты</button>
                             <button
                                 className="btn btn--danger btn--sq"
                                 aria-label="Удалить"
@@ -305,6 +483,97 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                     </div>
                 </div>
             )}
+
+            {lim && (() => {
+                const dh = dateHint(lim.date), th = trafficHint(lim.amount, lim.unit);
+                const used = limUser?.usedBytes ?? 0;
+                const limit = limUser?.trafficLimitBytes ?? null;
+                return (
+                    <div className="node-scrim" onClick={closeLimits}>
+                        <div className="node-modal lim-dialog" role="dialog" aria-modal="true"
+                            aria-labelledby="lim-title" onClick={e => e.stopPropagation()}>
+                            <h3 className="node-modal-title" id="lim-title">Лимиты · {lim.name}</h3>
+                            <p className="node-modal-hint">Пустое поле — без ограничения. Блокировка и сброс счётчика применяются сразу.</p>
+
+                            <div className="lim-field">
+                                <label className="lim-label" htmlFor="lim-date">Действует до</label>
+                                <DateField
+                                    id="lim-date"
+                                    value={lim.date}
+                                    invalid={!!limErr.date}
+                                    describedBy="lim-date-hint"
+                                    onOpenChange={setDateOpen}
+                                    onChange={date => {
+                                        setLim(v => v && { ...v, date });
+                                        setLimErr(v => ({ ...v, date: undefined }));
+                                    }}
+                                />
+                                {limErr.date
+                                    ? <span className="lim-err" id="lim-date-hint">{limErr.date}</span>
+                                    : <span className={`lim-hint${dh.warm ? ' lim-hint--warm' : ''}`} id="lim-date-hint">{dh.text}</span>}
+                            </div>
+
+                            <div className="lim-field">
+                                <label className="lim-label" htmlFor="lim-amount">Лимит трафика</label>
+                                <div className="lim-traffic">
+                                    <input id="lim-amount" className="field lim-amount" type="number" min={0} step="any" inputMode="decimal"
+                                        placeholder="без ограничения" value={lim.amount}
+                                        onChange={e => {
+                                            const amount = e.target.value;
+                                            setLim(v => v && { ...v, amount });
+                                            setLimErr(v => ({ ...v, amount: undefined }));
+                                        }} />
+                                    <select className="field lim-unit" value={lim.unit} aria-label="Единица лимита"
+                                        onChange={e => setLim(v => v && { ...v, unit: e.target.value as LimitUnit })}>
+                                        {LIMIT_UNITS.map(x => <option key={x} value={x}>{x}</option>)}
+                                    </select>
+                                </div>
+                                {limErr.amount
+                                    ? <span className="lim-err">{limErr.amount}</span>
+                                    : <span className="lim-hint">{th.text}</span>}
+                            </div>
+
+                            <div className="lim-now">
+                                <span className="lim-now-title">
+                                    Израсходовано {limitBytes(used)}{limit != null ? ` из ${limitBytes(limit)}` : ''}
+                                </span>
+                                <span className="lim-now-sub">
+                                    {limBusyNow ? blockText(limReason) : 'Доступ открыт'}
+                                    {limUser?.remainingBytes != null ? ` · осталось ${limitBytes(limUser.remainingBytes)}` : ''}
+                                </span>
+                            </div>
+
+                            <div className="lim-quick">
+                                <button className="btn btn--outline" onClick={() => limAct('usage/reset', 'Счётчик сброшен')} disabled={limBusy}>
+                                    <IcoRefresh /> Сбросить счётчик
+                                </button>
+                                {limReason === 'manual' ? (
+                                    <button className="btn btn--tonal" onClick={() => limAct('unblock', 'Доступ открыт')} disabled={limBusy}>
+                                        <IcoPower /> Разблокировать
+                                    </button>
+                                ) : limBusyNow ? (
+                                    <span className="lim-note">
+                                        Закрыт по {limReason === 'traffic' ? 'трафику' : 'сроку'} — сбросьте счётчик или снимите ограничение
+                                    </span>
+                                ) : (
+                                    <button className="btn btn--danger" onClick={() => limAct('block', 'Пользователь заблокирован')} disabled={limBusy}>
+                                        <IcoPower /> Заблокировать
+                                    </button>
+                                )}
+                            </div>
+
+                            {limErr.general && !limErr.date && !limErr.amount && (
+                                <p className="lim-err lim-err--general" role="alert">{limErr.general}</p>
+                            )}
+
+                            <div className="node-modal-actions">
+                                <button className="btn btn--text" onClick={closeLimits}>Отмена</button>
+                                <button className="btn btn--primary" onClick={saveLimits} disabled={limBusy}>Сохранить</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
         </>
     );
 }

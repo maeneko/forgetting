@@ -19,6 +19,16 @@ type userRow struct {
 	PskKey     string `json:"psk_key"`
 	KeyGen     string `json:"key_gen"`
 	VpnKeyPrev string `json:"vpn_key_prev"`
+
+	// Лимиты обычных vpn://-пользователей (usage.go): NULL — без ограничения.
+	ExpiresAt         *int64  `json:"expires_at"`
+	TrafficLimitBytes *int64  `json:"traffic_limit_bytes"`
+	UsedRx            int64   `json:"used_rx"`
+	UsedTx            int64   `json:"used_tx"`
+	UsedBytes         int64   `json:"used_bytes"`
+	Blocked           bool    `json:"blocked"`
+	BlockedAt         *int64  `json:"blocked_at"`
+	BlockedReason     *string `json:"blocked_reason"`
 }
 
 type peerRow struct {
@@ -88,6 +98,22 @@ func initSchema(db *sql.DB) error {
 			return err
 		}
 	}
+	// Лимиты и учёт трафика: существующие строки остаются «без ограничений» (NULL) с нулевым
+	// расходом, поэтому старые базы открываются без миграции данных.
+	for _, c := range []struct{ name, ddl string }{
+		{"expires_at", "ALTER TABLE users ADD COLUMN expires_at INTEGER"},
+		{"traffic_limit_bytes", "ALTER TABLE users ADD COLUMN traffic_limit_bytes INTEGER"},
+		{"used_rx", "ALTER TABLE users ADD COLUMN used_rx INTEGER NOT NULL DEFAULT 0"},
+		{"used_tx", "ALTER TABLE users ADD COLUMN used_tx INTEGER NOT NULL DEFAULT 0"},
+		{"blocked_at", "ALTER TABLE users ADD COLUMN blocked_at INTEGER"},
+		{"blocked_reason", "ALTER TABLE users ADD COLUMN blocked_reason TEXT"},
+	} {
+		if !cols[c.name] {
+			if _, err := db.Exec(c.ddl); err != nil {
+				return err
+			}
+		}
+	}
 	for _, q := range []string{
 		`CREATE TABLE IF NOT EXISTS config (
             key   TEXT PRIMARY KEY,
@@ -149,16 +175,38 @@ func (s *Server) setCfg(key, value string) {
 	}
 }
 
-const userCols = "name, ip, pub_key, vpn_key, psk_key, key_gen, vpn_key_prev"
+const userCols = "name, ip, pub_key, vpn_key, psk_key, key_gen, vpn_key_prev, " +
+	"expires_at, traffic_limit_bytes, used_rx, used_tx, blocked_at, blocked_reason"
 
 func scanUsers(rows *sql.Rows) ([]userRow, error) {
 	defer rows.Close()
 	out := []userRow{}
 	for rows.Next() {
 		var u userRow
-		if err := rows.Scan(&u.Name, &u.IP, &u.PubKey, &u.VpnKey, &u.PskKey, &u.KeyGen, &u.VpnKeyPrev); err != nil {
+		var expires, limit, blockedAt sql.NullInt64
+		var blockedReason sql.NullString
+		if err := rows.Scan(&u.Name, &u.IP, &u.PubKey, &u.VpnKey, &u.PskKey, &u.KeyGen, &u.VpnKeyPrev,
+			&expires, &limit, &u.UsedRx, &u.UsedTx, &blockedAt, &blockedReason); err != nil {
 			return nil, err
 		}
+		if expires.Valid {
+			v := expires.Int64
+			u.ExpiresAt = &v
+		}
+		if limit.Valid {
+			v := limit.Int64
+			u.TrafficLimitBytes = &v
+		}
+		if blockedAt.Valid {
+			v := blockedAt.Int64
+			u.BlockedAt = &v
+		}
+		if blockedReason.Valid {
+			v := blockedReason.String
+			u.BlockedReason = &v
+		}
+		u.Blocked = u.BlockedAt != nil
+		u.UsedBytes = u.UsedRx + u.UsedTx
 		out = append(out, u)
 	}
 	return out, rows.Err()

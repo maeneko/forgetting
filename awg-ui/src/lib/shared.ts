@@ -8,7 +8,7 @@ export type AwgGen = '2' | '3.1';
 // Текущая приоритетность ключа/устройства: «background» — канал занят, а он давно качает больше своей доли.
 export type Priority = 'normal' | 'background';
 
-export interface User {
+export interface User extends Limits {
     name:          string;
     ip:            string;
     pub_key:       string;
@@ -20,6 +20,20 @@ export interface User {
     tx?:           number;
     priority?:     Priority;     // нет у awg-ctrl старше деления канала
     torrent?:      boolean;      // пытался качать торренты за последние 10 минут (при включённой блокировке)
+}
+
+// ── Лимиты времени и трафика: общие для vpn:// пользователей и sen:// мастер-ключей ──
+// Всё, кроме usedBytes, может отсутствовать: панель работает и со старым awg-ctrl,
+// который про лимиты ничего не знает.
+export type BlockReason = 'expired' | 'traffic' | 'manual' | 'api';
+export interface Limits {
+    expiresAt?:         number | null;   // unix-секунды; null — срок не ограничен
+    trafficLimitBytes?: number | null;   // null — трафик не ограничен
+    usedBytes?:         number;          // израсходовано с последнего сброса счётчика
+    remainingBytes?:    number | null;   // null — лимита нет
+    blocked?:           boolean;
+    blockReason?:       BlockReason | null;
+    expired?:           boolean;         // отдельный флаг: срок вышел, даже если доступ ещё не закрыт
 }
 export interface ServerInfo {
     name:  string;
@@ -237,3 +251,88 @@ export function timeAgo(ts: number | undefined): string {
     if (sec < 3600) return Math.floor(sec / 60) + ' мин';
     return Math.floor(sec / 3600) + ' ч';
 }
+
+// ── Форматирование лимитов (вкладки «Пользователи» и «Мастер-ключи») ──
+// Десятичная приставка — не «1024 ГБ», а «1 ТБ»: счётчик трафика читают глазами.
+export const GB = 1024 ** 3;
+export const TB = 1024 ** 4;
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const num = (v: number): string => {
+    const r = Math.round(v * 10) / 10;
+    return String(r).replace('.', ',');          // русская запятая в «1,5 ТБ»
+};
+
+// Байты → «250 ГБ», «1,5 ТБ», «12 МБ»: до одного знака, единица через неразрывный пробел.
+export function limitBytes(n: number | null | undefined): string {
+    if (n == null || !Number.isFinite(n) || n < 0) return '—';
+    if (n >= TB) return `${num(n / TB)}\u00A0ТБ`;
+    if (n >= GB) return `${num(n / GB)}\u00A0ГБ`;
+    return `${num(n / 1024 ** 2)}\u00A0МБ`;
+}
+
+// unix-секунды → «12.03.2027 14:30», локальное время (как в поле datetime-local).
+export function limitDate(ts: number | null | undefined): string {
+    if (ts == null || !Number.isFinite(ts) || ts <= 0) return '—';
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return '—';
+    return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+// Короткая дата для чипа «до 12.03»; год добавляется, только если он не текущий.
+export function limitDay(ts: number | null | undefined): string {
+    if (ts == null || !Number.isFinite(ts) || ts <= 0) return '—';
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return '—';
+    const md = `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+    return d.getFullYear() === new Date().getFullYear() ? md : `${md}.${d.getFullYear()}`;
+}
+
+// «осталось 12 дней», «осталось 5 ч», «срок истёк».
+export function timeLeft(ts: number | null | undefined): string {
+    if (ts == null || !Number.isFinite(ts) || ts <= 0) return '';
+    const sec = ts - Math.floor(Date.now() / 1000);
+    if (sec <= 0) return 'срок истёк';
+    if (sec < 3600) return `осталось ${Math.max(1, Math.floor(sec / 60))} мин`;
+    if (sec < 86400) return `осталось ${Math.floor(sec / 3600)} ч`;
+    const d = Math.floor(sec / 86400), m10 = d % 10, m100 = d % 100;
+    const word = m10 === 1 && m100 !== 11 ? 'день' : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? 'дня' : 'дней';
+    return `осталось ${d} ${word}`;
+}
+
+// unix-секунды ↔ значение <input type="datetime-local">. Пустая строка — «без ограничения»;
+// некорректная дата даёт NaN, вызывающий показывает ошибку.
+export function inputDate(ts: number | null | undefined): string {
+    if (ts == null || !Number.isFinite(ts) || ts <= 0) return '';
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+export function parseInputDate(v: string): number | null {
+    if (!v) return null;
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? Math.floor(t / 1000) : NaN;
+}
+
+// Поле лимита трафика: число + единица (ГБ/ТБ). Пустое поле — «без ограничения»,
+// мусор — NaN, чтобы вызывающий показал ошибку рядом с полем.
+export const LIMIT_UNITS = ['ГБ', 'ТБ'] as const;
+export type LimitUnit = typeof LIMIT_UNITS[number];
+export const LIMIT_UNIT_BYTES: Record<LimitUnit, number> = { 'ГБ': GB, 'ТБ': TB };
+export const limitUnit = (n: number | null | undefined): LimitUnit => (n != null && n >= TB ? 'ТБ' : 'ГБ');
+export function limitAmount(n: number | null | undefined): string {
+    if (n == null || !Number.isFinite(n) || n <= 0) return '';
+    const u = limitUnit(n);
+    return String(Math.round((n / LIMIT_UNIT_BYTES[u]) * 100) / 100).replace('.', ',');
+}
+export function parseLimitAmount(v: string, unit: LimitUnit): number | null {
+    const s = v.trim().replace(',', '.');
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? Math.round(n * LIMIT_UNIT_BYTES[unit]) : NaN;
+}
+
+// «заблокирован: трафик» — одна формулировка для обеих вкладок.
+export const blockText = (r?: BlockReason | null): string =>
+    r === 'expired' ? 'заблокирован: срок' : r === 'traffic' ? 'заблокирован: трафик'
+        : r === 'manual' ? 'заблокирован: вручную'
+        : r === 'api' ? 'заблокирован: по API' : 'заблокирован';

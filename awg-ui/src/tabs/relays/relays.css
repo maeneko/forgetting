@@ -3,101 +3,490 @@ Copyright (c) 2026 Ivan Vasilev
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 */
-/* Стили вкладки «Релеи». Общее (палитра, btn, chip, field, table-card, node-modal,
-   toolbar) остаётся в App.css — здесь только релейные привязки и ряды списков. */
+/* Стили вкладки «Релеи». Общая система (btn, chip, field, toolbar, node-modal) —
+   в App.css; здесь только релейные блоки с префиксом .relay-: карточка релея,
+   редактор привязок, состояния списка и полноэкранный диалог на телефоне. */
 
-.relays-hint {
+/* ── Пояснения над списком ─────────────────────────────────────────────────── */
+.relay-note {
     font-size: var(--body-medium-size); line-height: var(--body-medium-line);
-    color: var(--neutral-text);
-}
-.relays-hint--warn { color: var(--error); }
-/* Экспериментальность релеев — тем же стилем, что «Подписка работает без TLS» в мастер-ключах. */
-.relays-notice {
-    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
-    color: var(--on-error-container);
-    background: var(--error-container);
-    border-radius: var(--shape-large);
-    padding: 10px 16px;
-}
-
-/* Редактор привязок в модалке: ряды «вид → сервер → порт → убрать». */
-.bind-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 120px auto;
-    gap: 8px;
-    align-items: center;
-}
-.bind-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.relays-add-bind { margin: 12px 0 0; align-self: flex-start; }
-.bind-row .field--listen { text-align: right; }
-
-/* Список релеев. */
-/* < 840px: таблица скрыта (.table-card в App.css), показываются карточки. */
-.relays-cards { display: none; flex-direction: column; gap: 12px; }
-.relays-count { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
-
-/* Схема под каждым релеем: панель → релей → выбранные серверы (с данными релея).
-   mode table — в подстроке таблицы (горизонтально), card — внутри карточки (вертикально).
-   Узлы — зелёные капс-чипы (как статусные), данные — мелкая подпись под чипом. */
-.relays-flow-row > td { padding: 1px 12px 8px 20px; }
-.relay-flow {
-    display: grid;
-    /* Схема — по содержимому (fit-content): капсулы равные по ширине и размером с самый
-       широкий текст, а не растянутые на треть всей строки таблицы. */
-    grid-template-columns: 1fr auto 1fr auto 1fr;
-    width: fit-content;
-    max-width: 100%;
-    margin-inline: auto;
-    align-items: stretch;
-    gap: 4px;
+    color: var(--on-surface-variant);
     background: var(--surface-container);
-    border: 0.5px solid var(--outline-variant);
-    border-radius: var(--shape-medium, 12px);
-    padding: 6px 4px;
+    border-radius: var(--shape-large);
+    padding: 12px 16px;
 }
-.relay-flow--card { grid-template-columns: 1fr; justify-items: stretch; width: 100%; }
-.flow-step {
-    display: flex;
+/* Приём нод выключен: это не «экспериментально», а помеха работе — роль error */
+.relay-note--warn { background: var(--error-container); color: var(--on-error-container); }
+
+/* ── Тулбар: сводка слева, действия справа ────────────────────────────────── */
+.relay-summary {
+    margin-right: auto;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Список карточек ──────────────────────────────────────────────────────── */
+/* До 1280 — одна колонка: карточка шире, пересылки читаются строкой. */
+.relay-list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
     min-width: 0;
 }
-/* Большой чип с данными внутри: заголовок капсом, под ним — инфа.
-   Все три капсулы — одинакового размера (растягиваются на колонку по ширине и по высоте). */
-.chip.flow-chip {
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
-    width: 100%; height: 100%;
-    padding: 4px 10px;
-    max-width: 100%;
-    white-space: normal;
+@media (min-width: 1280px) {
+    .relay-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.flow-chip .chip-name {
-    display: inline-flex; align-items: center; gap: 5px;
+
+.relay-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+    padding: 16px 18px;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--shape-extra-large);
+    animation: relay-card-in var(--duration-medium2) var(--ease-emphasized-decelerate) backwards;
+}
+@keyframes relay-card-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* Шапка: иконка-жетон, имя, состояние справа; подпись — под именем.
+   Сетка, а не flex: на телефоне подпись уходит на всю ширину одной строкой. */
+.relay-card-head {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    grid-template-areas:
+        "glyph name state"
+        "glyph sub  state";
+    align-items: start;
+    column-gap: 12px;
+    row-gap: 2px;
+    min-width: 0;
+}
+.relay-glyph {
+    grid-area: glyph;
+    flex-shrink: 0;
+    width: 40px; height: 40px;
+    border-radius: var(--shape-full);
+    background: var(--primary-container);
+    color: var(--on-primary-container);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.relay-glyph svg { width: 20px; height: 20px; }
+.relay-name {
+    grid-area: name;
+    font-size: var(--title-medium-size); line-height: var(--title-medium-line);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+    overflow-wrap: anywhere;
+}
+.relay-sub {
+    grid-area: sub;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+.relay-state {
+    grid-area: state;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
+}
+/* Версия — тише статуса: моно-чип нейтрального тона, высота как у chip */
+.relay-ver {
+    font-family: var(--mono);
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+    background: var(--surface-container);
+    border-radius: var(--shape-full);
+    padding: 4px 9px;
+    white-space: nowrap;
+}
+/* Нейтральный чип статуса в карточке: нейтральный текст на нейтральном фоне даёт
+   меньше 4.5:1 — берём цвет вторичного текста, он темнее. */
+.relay-state .chip--offline { color: var(--on-surface-variant); }
+
+/* ── Пересылки внутри карточки ────────────────────────────────────────────── */
+.relay-binds {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-top: 1px solid var(--outline-variant);
+    padding-top: 10px;
+    min-width: 0;
+}
+.relay-binds-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+.relay-binds-title {
+    font-size: var(--label-large-size); line-height: var(--label-large-line);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.relay-binds-count {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.relay-bind-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.relay-bind {
+    display: grid;
+    grid-template-columns: 78px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 4px 0;
+}
+.relay-bind + .relay-bind { border-top: 0.5px solid var(--outline-variant); }
+.relay-kind {
     font-size: var(--body-small-size); line-height: var(--body-small-line);
     font-weight: var(--weight-medium);
-    letter-spacing: 0.06em; text-transform: uppercase;
-    max-width: 100%;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.flow-chip .chip-info {
-    font-size: 11px; line-height: 1.45;
-    color: color-mix(in srgb, currentColor 75%, transparent);
+    color: var(--on-secondary-container);
+    background: var(--secondary-container);
+    border-radius: var(--shape-full);
+    padding: 2px 9px;
+    width: 100%;
     text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
-/* «+N серверов» — заметнее остальной инфы: полная сила цвета, а не 75%. */
-.flow-more { color: var(--success-text); font-weight: var(--weight-medium); }
-.flow-targets { display: flex; flex-direction: column; gap: 2px; }
-.flow-link {
-    display: flex; align-items: center;
-    padding: 0 2px;
+.relay-bind-target {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-width: 0;
 }
-.flow-arr { font-size: 13px; line-height: 1.2; color: var(--neutral-text); }
-.relay-flow--card .flow-arr { transform: rotate(90deg); }
+.relay-bind-name {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+.relay-bind-flag { padding: 1px 8px; }
+.relay-bind-port {
+    font-family: var(--mono);
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.relay-binds-empty {
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px dashed var(--outline);
+    border-radius: var(--shape-medium);
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+}
 
-@media (max-width: 839px) {
-    .relays-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
-    :is(.relays-count, .empty-cards) { grid-column: 1 / -1; }
+/* ── Действия карточки ────────────────────────────────────────────────────── */
+.relay-card-foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 2px;
+}
+.relay-card-del { margin-left: auto; }
+
+/* ── Загрузка / ошибка / пусто ────────────────────────────────────────────── */
+.relay-sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
 }
 
-@media (max-width: 720px) {
-    .bind-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-    .bind-row .field--listen { grid-column: 1 / -1; text-align: left; }
+.relay-card--skeleton { animation: none; }
+.relay-sk-head { display: flex; align-items: center; gap: 12px; }
+.relay-sk-stack { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.relay-sk {
+    display: block;
+    position: relative;
+    overflow: hidden;
+    height: 12px;
+    border-radius: var(--shape-small);
+    background: var(--surface-container);
+}
+.relay-sk::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, var(--surface-container-high), transparent);
+    transform: translateX(-100%);
+    animation: relay-sk 1.6s var(--ease-standard) infinite;
+}
+@keyframes relay-sk { to { transform: translateX(100%); } }
+.relay-sk-glyph { width: 40px; height: 40px; border-radius: var(--shape-full); flex-shrink: 0; }
+.relay-sk-line--name { height: 16px; width: 44%; }
+.relay-sk-line--meta { height: 10px; width: 28%; }
+.relay-sk-line--short { width: 64%; }
+
+.relay-state-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 12px;
+    padding: 40px 24px;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--shape-extra-large);
+}
+.relay-state-icon {
+    width: 48px; height: 48px;
+    border-radius: var(--shape-full);
+    background: var(--surface-container);
+    color: var(--on-surface-variant);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.relay-state-icon svg { width: 24px; height: 24px; }
+.relay-state-icon--error { background: var(--error-container); color: var(--on-error-container); }
+.relay-state-title {
+    font-size: var(--title-medium-size); line-height: var(--title-medium-line);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.relay-state-hint {
+    max-width: 52ch;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+}
+
+/* ── Модалки: одна ширина, заголовок, тело, футер ─────────────────────────── */
+.relay-modal { gap: 12px; }
+.relay-modal-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+.relay-modal-title { min-width: 0; overflow-wrap: anywhere; }
+.relay-modal-x { margin: -4px -4px 0 0; }
+.relay-modal-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+}
+.node-modal .relay-modal-foot { margin-top: 4px; }
+/* Подпись диалога — body-medium: в релейных диалогах это основной текст, а не сноска */
+.relay-modal .node-modal-hint {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+}
+.relay-form-error {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--error);
+    overflow-wrap: anywhere;
+}
+
+/* Поле в форме создания: подпись над полем, подсказка под ним */
+.relay-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.relay-field-label {
+    font-size: var(--title-small-size); line-height: var(--title-small-line);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.relay-field-hint {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+}
+
+/* Строка подключения: моно-плашка и копирование рядом, на телефоне — друг под другом */
+.relay-cmd-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    min-width: 0;
+}
+.relay-cmd {
+    flex: 1;
+    min-width: 0;
+    display: block;
+    font-family: var(--mono);
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface);
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--shape-medium);
+    padding: 10px 12px;
+    word-break: break-all;
+    user-select: all;
+}
+.relay-cmd-copy { align-self: center; }
+
+/* ── Редактор привязок ────────────────────────────────────────────────────── */
+.relay-editor { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.relay-editor-head,
+.relay-bind-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) 112px 36px;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+}
+.relay-editor-head {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+}
+.relay-editor-head > span:last-child { visibility: hidden; }
+.relay-bind-rows { display: flex; flex-direction: column; gap: 8px; }
+.relay-edit-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.relay-edit-label { display: none; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--on-surface-variant); }
+.relay-edit-static {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    padding: 0 16px;
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+    border: 1px dashed var(--outline);
+    border-radius: var(--shape-full);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.relay-editor-empty {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px dashed var(--outline);
+    border-radius: var(--shape-medium);
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+}
+.relay-editor-hint {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+}
+/* Удаление пересылки — тише «Сохранить»: нейтральная иконка в строке, не кнопка в футере */
+.relay-bind-del { justify-self: end; width: 36px; height: 36px; }
+.relay-add-bind { align-self: flex-start; }
+
+/* ── Телефон ─────────────────────────────────────────────────────────────── */
+@media (max-width: 599px) {
+    .relay-toolbar { align-items: stretch; }
+
+    /* Карточка: теснее по краям, действия — предсказуемо внизу */
+    .relay-card { padding: 14px; }
+    .relay-card-head {
+        grid-template-columns: 36px minmax(0, 1fr) auto;
+        grid-template-areas:
+            "glyph name state"
+            "sub   sub  sub";
+        align-items: center;
+        row-gap: 4px;
+    }
+    .relay-glyph { width: 36px; height: 36px; }
+    .relay-state { margin-left: 0; }
+    .relay-card-foot .btn--outline { order: 1; flex: 1; }
+    .relay-card-del { order: 2; margin-left: 0; }
+    .relay-card-foot .btn--tonal { order: 3; flex: 1 1 100%; }
+    /* на телефоне всё интерактивное — не меньше 44px, даже если мышь */
+    .relay-modal-x,
+    .relay-card-del,
+    .relay-bind-del { width: 44px; height: 44px; }
+
+    .relay-state-card { padding: 32px 20px; }
+
+    /* Диалог на всю высоту: шапка и футер на месте, прокручивается тело */
+    .relay-scrim { padding: 0; align-items: stretch; }
+    .relay-modal {
+        width: 100%;
+        max-width: none;
+        height: 100vh;
+        height: 100dvh;
+        max-height: 100dvh;
+        padding: 0;
+        gap: 0;
+        border-radius: 0;
+        overflow: hidden;
+    }
+    .relay-modal > .relay-modal-head {
+        flex-shrink: 0;
+        align-items: center;
+        padding: calc(10px + env(safe-area-inset-top)) 8px 10px 16px;
+        border-bottom: 1px solid var(--outline-variant);
+    }
+    .relay-modal-title {
+        font-size: var(--title-large-size); line-height: var(--title-large-line);
+    }
+    .relay-modal-x { margin: 0; }
+    .relay-modal > .relay-modal-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 16px;
+        gap: 14px;
+    }
+    .node-modal .relay-modal-foot,
+    .relay-modal > .relay-modal-foot {
+        flex-shrink: 0;
+        margin: 0;
+        padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--outline-variant);
+        flex-wrap: nowrap;
+    }
+    .relay-modal-foot .btn { flex: 1; height: 44px; }
+    .relay-cmd-row { flex-direction: column; }
+    .relay-cmd-copy { align-self: stretch; height: 44px; }
+
+    /* Привязки — мини-карточками: подписи у полей вместо шапки таблицы */
+    .relay-editor-head { display: none; }
+    .relay-bind-row {
+        grid-template-columns: minmax(0, 1fr) 44px;
+        gap: 8px;
+        padding: 12px;
+        background: var(--surface-container);
+        border-radius: var(--shape-large);
+    }
+    .relay-bind-row > .relay-edit-field:nth-child(1) { grid-column: 1; grid-row: 1; }
+    .relay-bind-row > .relay-edit-field:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+    .relay-bind-row > .relay-edit-field:nth-child(3) { grid-column: 1 / -1; grid-row: 3; }
+    .relay-bind-row > .relay-bind-del { grid-column: 2; grid-row: 1; align-self: end; }
+    .relay-edit-label { display: block; }
+}
+
+/* Тач-цели ≥ 44px */
+@media (pointer: coarse) {
+    .relay-modal-x,
+    .relay-card-del { width: 44px; height: 44px; }
+    .relay-bind-del { width: 44px; height: 44px; }
+}
+
+/* Меньше движения — без входа карточек и блика загрузки */
+@media (prefers-reduced-motion: reduce) {
+    .relay-card { animation: none; }
+    .relay-sk::after { animation: none; }
 }

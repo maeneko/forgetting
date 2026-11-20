@@ -105,15 +105,21 @@ func (l *limiter) allow(ip string) bool {
 // ── Строки реестра ──────────────────────────────────────────────────────────
 
 type masterRow struct {
-	ID          int64
-	UUID        string
-	Label       string
-	Secret      []byte
-	DeviceLimit int64
-	ServerID    int64
-	CreatedAt   int64
-	RevokedAt   sql.NullInt64
-	Devices     int64 // только у запросов со счётчиком
+	ID            int64
+	UUID          string
+	Label         string
+	Secret        []byte
+	DeviceLimit   int64
+	ServerID      int64
+	CreatedAt     int64
+	RevokedAt     sql.NullInt64
+	ExpiresAt     sql.NullInt64 // unix-время; NULL — без срока
+	TrafficLimit  sql.NullInt64 // байт; NULL — без лимита
+	UsedRx        int64
+	UsedTx        int64
+	BlockedAt     sql.NullInt64
+	BlockedReason sql.NullString // expired | traffic | manual | api
+	Devices       int64          // только у запросов со счётчиком
 }
 
 type deviceRow struct {
@@ -142,15 +148,27 @@ type linkRow struct {
 }
 
 const (
-	masterCols = "m.id, m.uuid, m.label, m.secret, m.device_limit, m.server_id, m.created_at, m.revoked_at"
+	masterCols = "m.id, m.uuid, m.label, m.secret, m.device_limit, m.server_id, m.created_at, m.revoked_at, " +
+		"m.expires_at, m.traffic_limit_bytes, m.used_rx, m.used_tx, m.blocked_at, m.blocked_reason"
 	deviceCols = "id, master_id, device_id, device_name, platform, pub_key, auth_pub, created_at, last_seen, rekey_requested, version"
 	linkCols   = "device_id, server_id, peer_pub, ip, psk, psk_pending"
+)
+
+// Причины блокировки мастер-ключа (master_keys.blocked_reason). expired и traffic — расчётные:
+// их ставит и снимает тик ограничений; manual ставится из панели, api — внешней системой через
+// /api/v1, и ни та, ни другая сама не снимается.
+const (
+	blockExpired = "expired"
+	blockTraffic = "traffic"
+	blockManual  = "manual"
+	blockAPI     = "api"
 )
 
 func scanMaster(row interface{ Scan(...any) error }, withCount bool) *masterRow {
 	m := &masterRow{}
 	var u sql.NullString
-	dst := []any{&m.ID, &u, &m.Label, &m.Secret, &m.DeviceLimit, &m.ServerID, &m.CreatedAt, &m.RevokedAt}
+	dst := []any{&m.ID, &u, &m.Label, &m.Secret, &m.DeviceLimit, &m.ServerID, &m.CreatedAt, &m.RevokedAt,
+		&m.ExpiresAt, &m.TrafficLimit, &m.UsedRx, &m.UsedTx, &m.BlockedAt, &m.BlockedReason}
 	if withCount {
 		dst = append(dst, &m.Devices)
 	}
@@ -159,6 +177,40 @@ func scanMaster(row interface{ Scan(...any) error }, withCount bool) *masterRow 
 	}
 	m.UUID = u.String
 	return m
+}
+
+// usedTotal — учтённый трафик ключа: сумма по всем его серверам и устройствам.
+func (m *masterRow) usedTotal() int64 { return m.UsedRx + m.UsedTx }
+
+// expired — срок вышел (по часам, не по заблокированности: ключ мог ещё не дождаться тика).
+func (m *masterRow) expired(t int64) bool { return m.ExpiresAt.Valid && m.ExpiresAt.Int64 <= t }
+
+// blockNow — действующее ограничение ключа. Ручная блокировка (manual) и блокировка по API
+// важнее расчётных и сами не снимаются; просрочка видна сразу по часам, квота — по последнему
+// полному замеру тика. Причина отдаётся как есть, без маппинга в manual.
+func (m *masterRow) blockNow(t int64) string {
+	if m.BlockedReason.Valid && (m.BlockedReason.String == blockManual || m.BlockedReason.String == blockAPI) {
+		return m.BlockedReason.String
+	}
+	if m.expired(t) {
+		return blockExpired
+	}
+	if m.BlockedReason.Valid {
+		return m.BlockedReason.String
+	}
+	return ""
+}
+
+// remaining — сколько байт осталось; nil — лимита нет.
+func (m *masterRow) remaining() any {
+	if !m.TrafficLimit.Valid {
+		return nil
+	}
+	left := m.TrafficLimit.Int64 - m.usedTotal()
+	if left < 0 {
+		left = 0
+	}
+	return left
 }
 
 func scanDevice(row interface{ Scan(...any) error }) *deviceRow {
@@ -193,6 +245,9 @@ type Sub struct {
 	seenSigs map[string]time.Time // подпись → когда забыть
 
 	registerLimit, failLimit *limiter
+
+	// ctrlFor — подмена реестра серверов в тестах (как ctrl у healthAPI/monitor); nil — s.a.nodes.
+	ctrlFor func(int) Ctrl
 
 	frozen atomic.Bool // идёт перенос панели (migrate.go): /sub/v1 отвечает «недоступна»
 
@@ -274,7 +329,16 @@ func (s *Sub) initSchema() error {
             device_limit INTEGER NOT NULL DEFAULT %d,
             server_id    INTEGER NOT NULL DEFAULT 0,
             created_at   INTEGER NOT NULL,
-            revoked_at   INTEGER
+            revoked_at   INTEGER,
+            -- Ограничения ключа: срок и трафик. NULL — без ограничения; used_* — учтённый
+            -- трафик (растёт, счётчики awg обнуляются при пересоздании пира), blocked_* —
+            -- действующая блокировка: expired | traffic | manual | api.
+            expires_at          INTEGER,
+            traffic_limit_bytes INTEGER,
+            used_rx             INTEGER NOT NULL DEFAULT 0,
+            used_tx             INTEGER NOT NULL DEFAULT 0,
+            blocked_at          INTEGER,
+            blocked_reason      TEXT
         );
         CREATE TABLE IF NOT EXISTS devices (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,6 +416,22 @@ func (s *Sub) initSchema() error {
 	}
 	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS master_keys_uuid ON master_keys (uuid)"); err != nil {
 		return err
+	}
+	// Ограничения мастер-ключа — добавлены позже: срок, лимит трафика, учтённый трафик и
+	// блокировка. Старые ключи получают NULL/0 — без ограничений, как раньше.
+	for _, c := range []struct{ name, decl string }{
+		{"expires_at", "INTEGER"},
+		{"traffic_limit_bytes", "INTEGER"},
+		{"used_rx", "INTEGER NOT NULL DEFAULT 0"},
+		{"used_tx", "INTEGER NOT NULL DEFAULT 0"},
+		{"blocked_at", "INTEGER"},
+		{"blocked_reason", "TEXT"},
+	} {
+		if !hasColumn(db, "master_keys", c.name) {
+			if _, err := db.Exec("ALTER TABLE master_keys ADD COLUMN " + c.name + " " + c.decl); err != nil {
+				return err
+			}
+		}
 	}
 	// Перенос со времени одного сервера (см. sub.ts).
 	if _, err := db.Exec(`
@@ -463,12 +543,25 @@ func (s *Sub) tombCount(id int) int64 {
 	return n
 }
 
+// masterAllowed — устройство принадлежит живому, не заблокированному ключу (просроченному —
+// тоже нет: срок проверяется по часам, не дожидаясь тика). Пиры заблокированных ключей
+// снимаются с серверов, сами ключи и устройства остаются в реестре.
+func masterAllowed(alias string) string {
+	return `EXISTS (SELECT 1 FROM master_keys m WHERE m.id = ` + alias + `.master_id
+            AND m.revoked_at IS NULL AND m.blocked_reason IS NULL
+            AND (m.expires_at IS NULL OR m.expires_at > ?))`
+}
+
 // keepOf — что панели нужно на сервере: текущий ключ каждого устройства и ключ, который там
-// стоит сейчас (расходится с текущим, пока смена ключа не догнала сервер).
+// стоит сейчас (расходится с текущим, пока смена ключа не догнала сервер). Устройства
+// заблокированных и просроченных ключей сюда не входят — sync снимает их пиры с сервера.
 func (s *Sub) keepOf(id int) []string {
+	t := now()
 	return strs(s.a.db, `
-            SELECT d.pub_key AS pub FROM device_peers l JOIN devices d ON d.id = l.device_id WHERE l.server_id = ?
-            UNION SELECT peer_pub FROM device_peers WHERE server_id = ? AND peer_pub IS NOT NULL`, id, id)
+            SELECT d.pub_key AS pub FROM device_peers l JOIN devices d ON d.id = l.device_id
+            WHERE l.server_id = ? AND `+masterAllowed("d")+`
+            UNION SELECT l.peer_pub FROM device_peers l JOIN devices d ON d.id = l.device_id
+            WHERE l.server_id = ? AND l.peer_pub IS NOT NULL AND `+masterAllowed("d"), id, t, id, t)
 }
 
 func ok2xx(st int) bool { return st >= 200 && st < 300 }
@@ -553,7 +646,7 @@ func (s *Sub) reconcileNow(id int) (err error) {
 	if !s.a.nodes.Exists(id) || !s.a.nodes.IsOnline(id) {
 		return nil
 	}
-	ctrl := s.a.nodes.CtrlFor(id)
+	ctrl := s.ctrl(id)
 	if ok, err := s.refreshProfile(id, ctrl); err != nil || !ok {
 		return err // сервер не отвечает — попробуем позже
 	}
@@ -702,6 +795,8 @@ func (s *Sub) syncPeers(id int, ctrl Ctrl) error {
 	}
 	if ok2xx(r.Status) {
 		// Самолечение: ключ считается стоящим, а его нет — забываем и ставим заново следующим проходом.
+		// Заблокированные ключи не трогаем: их пиры сняты намеренно, а ip/psk в device_peers —
+		// последний известный конфиг, который клиент ещё увидит вместе с причиной блокировки.
 		present := map[string]bool{}
 		for _, p := range arr(field(r.Data, "present")) {
 			if ps, ok := p.(string); ok {
@@ -710,7 +805,7 @@ func (s *Sub) syncPeers(id int, ctrl Ctrl) error {
 		}
 		rows, err := s.a.db.Query(`
             SELECT l.device_id, l.peer_pub FROM device_peers l JOIN devices d ON d.id = l.device_id
-            WHERE l.server_id = ? AND l.peer_pub = d.pub_key`, id)
+            WHERE l.server_id = ? AND l.peer_pub = d.pub_key AND `+masterAllowed("d"), id, now())
 		if err != nil {
 			return err
 		}
@@ -809,6 +904,8 @@ func (s *Sub) subHost(c *Ctx) string {
 
 // buildConfig — в servers[] только серверы, где уже стоит текущий ключ устройства и известны
 // ip/psk. rev меняется при любом изменении; клиент по нему решает, трогать ли туннель.
+// Ограничения ключа (срок, лимит, блокировка) — top-level: серверы остаются на месте, клиент
+// узнаёт причину отказа вместо 502 unavailable (его он считает временным).
 func (s *Sub) buildConfig(dev *deviceRow, c *Ctx) jsjson.Object {
 	list := []any{}
 	for _, l := range s.linksOf(s.a.db, dev.ID) {
@@ -838,8 +935,27 @@ func (s *Sub) buildConfig(dev *deviceRow, c *Ctx) jsjson.Object {
 		{Key: "endpoints", Val: []any{fmt.Sprintf("%s:%d", s.subHost(c), s.port)}},
 		{Key: "servers", Val: list},
 	}
+	// Поля ограничений — только у ключа с ограничением: у обычного ключа конфиг остаётся
+	// прежним байт в байт (и rev у уже выданных клиентов не меняется).
+	m := s.masterByID(s.a.db, dev.MasterID)
+	var used any
+	if m != nil {
+		if b := m.blockNow(now()); b != "" || m.ExpiresAt.Valid || m.TrafficLimit.Valid {
+			cfg = append(cfg,
+				jsjson.KV{Key: "expires_at", Val: nullInt(m.ExpiresAt)},
+				jsjson.KV{Key: "limit_bytes", Val: nullInt(m.TrafficLimit)},
+				jsjson.KV{Key: "blocked", Val: orNil(b)})
+			used = m.usedTotal()
+		}
+	}
 	sum := sha256.Sum256(jsjson.MustMarshal(cfg))
-	return append(jsjson.Object{{Key: "rev", Val: hex.EncodeToString(sum[:])[:16]}}, cfg...)
+	out := append(jsjson.Object{{Key: "rev", Val: hex.EncodeToString(sum[:])[:16]}}, cfg...)
+	// used_bytes — счётчик, в rev не входит: иначе он менялся бы при каждом опросе, пока идёт
+	// трафик, и клиент пересоздавал бы туннель. Блокировка в rev входит — она и должна дойти.
+	if used != nil {
+		out = append(out, jsjson.KV{Key: "used_bytes", Val: used})
+	}
+	return out
 }
 
 func configServers(cfg jsjson.Object) int { return len(arr(cfg.Get2("servers"))) }
@@ -870,6 +986,14 @@ func (s *Sub) key() ed25519.PrivateKey {
 	s.keyMu.RLock()
 	defer s.keyMu.RUnlock()
 	return s.signKey
+}
+
+// ctrl — контроллер сервера: реестр нод, в тестах — подмена.
+func (s *Sub) ctrl(id int) Ctrl {
+	if s.ctrlFor != nil {
+		return s.ctrlFor(id)
+	}
+	return s.a.nodes.CtrlFor(id)
 }
 
 // send — ответ подписан и несёт эхо запроса: device (X-Sen-Device) и ts (X-Sen-Ts). Поля
@@ -1265,9 +1389,12 @@ func (s *Sub) usedServers() []int {
 
 // Start — фоновое сведение, плановый аудит и публичный листенер /sub/v1.
 func (s *Sub) Start() {
-	// Сводим и без подписки: у ключей могут остаться хвосты на удаление.
+	// Сводим и без подписки: у ключей могут остаться хвосты на удаление. Перед сведением —
+	// ограничения мастер-ключей: заблокированные и просроченные остаются в реестре, но их пиры
+	// снимаются с серверов ближайшим проходом (keepOf их уже не отдаёт).
 	go func() {
 		for range time.Tick(syncEvery) {
+			s.enforceMasters()
 			s.reconcileAll(s.usedServers())
 		}
 	}()

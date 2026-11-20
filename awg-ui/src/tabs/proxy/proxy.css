@@ -3,43 +3,498 @@ Copyright (c) 2026 Ivan Vasilev
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 */
-/* Вкладка «Прокси» — две карточки: слева описание, справа управление.
-   Классы строк .ss-* и .chip — глобальные, из App.css. */
-.proxy-layout {
+/* Вкладка «Прокси»: статус сервиса, настройки, ссылка для клиентов и управление.
+   Общие элементы (btn, chip, field, qr-card) — в App.css; здесь только блоки .proxy-*.
+   Размеры на шаг компактнее общей шкалы: типографика и отступы считаются от токенов,
+   высоты кнопок не опускаются ниже 40 px на десктопе и 44 px на телефоне. */
+
+.proxy-page {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+/* Спокойное вступление: что это и зачем, без повторения заголовка вкладки */
+.proxy-lead {
+    max-width: 82ch;
+    font-size: calc(var(--body-medium-size) - 1px);
+    line-height: calc(var(--body-medium-line) - 1px);
+    color: var(--on-surface-variant);
+}
+
+/* ── Статус сервиса ────────────────────────────────────────────────────────── */
+.proxy-hero {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+    padding: 12px;
+    background: var(--surface-bright);
+    border: 1px solid var(--outline);
+    border-radius: var(--shape-extra-large);
+    min-width: 0;
+}
+.proxy-hero-glyph {
+    width: 44px; height: 44px;
+    border-radius: var(--shape-full);
+    background: var(--primary-container);
+    color: var(--on-primary-container);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.proxy-hero-glyph svg { width: 20px; height: 20px; }
+.proxy-hero-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    padding-top: 1px;
+}
+.proxy-hero-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+}
+.proxy-hero-title {
+    font-size: calc(var(--title-large-size) - 2px);
+    line-height: calc(var(--title-large-line) - 3px);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+    overflow-wrap: anywhere;
+}
+.proxy-hero-desc {
+    font-size: calc(var(--body-medium-size) - 1px);
+    line-height: calc(var(--body-medium-line) - 1px);
+    color: var(--on-surface-variant);
+    overflow-wrap: anywhere;
+}
+.proxy-state-chip { flex-shrink: 0; }
+/* Нейтральный чип: на нейтральном фоне нейтральный текст не дотягивает до 4.5:1 */
+.proxy-hero .chip--offline { color: var(--on-surface-variant); }
+.proxy-hero-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-top: 1px;
+}
+
+/* Журнал запуска: моно-блок фиксированной высоты со своей прокруткой */
+.proxy-log-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+    min-width: 0;
+}
+.proxy-log-label {
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface-variant);
+}
+.proxy-log {
+    margin: 0;
+    padding: 6px 8px;
+    max-height: 150px;
+    overflow: auto;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--outline);
+    border-radius: var(--shape-medium);
+    font-family: var(--mono);
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 2px);
+    color: var(--on-surface);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.proxy-log:focus-visible {
+    outline: 3px solid var(--secondary);
+    outline-offset: 2px;
+}
+
+/* Ошибка действия — рядом с кнопками статуса, текстом сервера */
+.proxy-alert {
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--error-container);
+    color: var(--on-error-container);
+    border-radius: var(--shape-medium);
+    font-size: calc(var(--body-medium-size) - 1px);
+    line-height: calc(var(--body-medium-line) - 1px);
+    overflow-wrap: anywhere;
+}
+
+/* Загрузка: скелетон той же формы, что и готовая шапка */
+.proxy-hero--loading { grid-template-columns: 44px minmax(0, 1fr); }
+.proxy-skel {
+    display: block;
+    position: relative;
+    overflow: hidden;
+    height: 12px;
+    border-radius: var(--shape-small);
+    background: var(--surface-container);
+}
+.proxy-skel::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, var(--surface-container-high), transparent);
+    transform: translateX(-100%);
+    animation: proxy-skel 1.6s var(--ease-standard) infinite;
+}
+@keyframes proxy-skel { to { transform: translateX(100%); } }
+.proxy-skel--glyph { width: 44px; height: 44px; border-radius: var(--shape-full); }
+.proxy-skel--title { width: 170px; height: 20px; margin: 2px 0 6px; }
+.proxy-skel--line { width: min(400px, 76%); }
+
+/* ── Карточки ─────────────────────────────────────────────────────────────── */
+.proxy-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 16px;
-    align-items: stretch;
+    gap: 10px;
+    min-width: 0;
 }
 .proxy-card {
-    display: flex; flex-direction: column; gap: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+    padding: 12px;
     background: var(--surface-container);
     border-radius: var(--shape-large);
-    padding: 16px;
 }
-.proxy-card .ss-section { margin: 0; }
-.proxy-card .ss-status { background: var(--surface-container-lowest); }
-.proxy-card .st-hint { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); overflow-wrap: anywhere; }
-/* Заголовок правой карточки; справа — статус и кнопка включения одной группой. */
-.proxy-card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-.proxy-card-power { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.proxy-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.proxy-card-head {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+.proxy-card-title {
+    font-size: calc(var(--title-medium-size) - 1px);
+    line-height: calc(var(--title-medium-line) - 2px);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.proxy-card-sub {
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
 
-/* Состояние компонентов прокси: mtg и systemd-сервис. Кнопки — справа, чтобы
-   «Удалить» не стояла рядом с включением и не нажималась случайно. */
-.proxy-components { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid var(--outline-variant); }
-.proxy-component { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.proxy-component-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.proxy-component-text .st-hint { overflow-wrap: anywhere; }
-.proxy-component .btn { flex: none; }
+/* ── Настройки ────────────────────────────────────────────────────────────── */
+.proxy-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+}
+.proxy-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.proxy-field-label {
+    font-size: calc(var(--title-small-size) - 1px);
+    line-height: calc(var(--title-small-line) - 2px);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.proxy-port-input {
+    max-width: 176px;
+    font-variant-numeric: tabular-nums;
+}
+.proxy-host-input { max-width: 380px; }
+.proxy-field-hint {
+    max-width: 64ch;
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
+.proxy-field-error {
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--error);
+}
 
-/* Средняя и компактная ширина: карточки друг под другом, описание сверху. */
-@media (max-width: 839px) {
-    .proxy-layout { grid-template-columns: minmax(0, 1fr); }
+/* Предупреждение фаервола — у порта, а не отдельной строкой в общем потоке */
+.proxy-fw {
+    display: flex;
+    gap: 8px;
+    margin-top: 2px;
+    padding: 8px 10px;
+    background: var(--tertiary-container);
+    color: var(--on-tertiary-container);
+    border-radius: var(--shape-medium);
+}
+.proxy-fw-glyph {
+    flex-shrink: 0;
+    display: inline-flex;
+    padding-top: 1px;
+}
+.proxy-fw-glyph svg { width: 16px; height: 16px; }
+.proxy-fw-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+.proxy-fw-title {
+    font-size: calc(var(--body-medium-size) - 1px);
+    line-height: calc(var(--body-medium-line) - 2px);
+    font-weight: var(--weight-medium);
+}
+.proxy-fw-desc {
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    overflow-wrap: anywhere;
+}
+
+.proxy-form-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    margin-top: auto;
+    padding-top: 6px;
+    border-top: 1px solid var(--outline-variant);
+}
+.proxy-form-note {
+    flex: 1 1 200px;
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
+
+/* ── Ссылка для клиентов ──────────────────────────────────────────────────── */
+.proxy-link {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    flex: 1;
+    gap: 12px;
+    min-width: 0;
+}
+.proxy-link-main {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+.proxy-link-value {
+    display: block;
+    padding: 8px 10px;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--outline);
+    border-radius: var(--shape-medium);
+    font-family: var(--mono);
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface);
+    word-break: break-all;
+    user-select: all;
+}
+.proxy-link-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.proxy-link-hint {
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
+.proxy-qr {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+/* Картинка QR всегда светлая (её рисует lib/qr.ts фиксированными цветами):
+   в тёмной теме не перекрашивается и не меняет размер */
+.proxy-qr-img {
+    display: block;
+    width: 132px; height: 132px;
+    border-radius: var(--shape-small);
+    border: 1px solid var(--outline);
+    background: var(--surface-container-lowest);
+}
+.proxy-qr-cap {
+    max-width: 160px;
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+    text-align: center;
+}
+.proxy-qr-fail {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 132px; height: 132px;
+    padding: 10px;
+    border: 1px dashed var(--outline);
+    border-radius: var(--shape-small);
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+    text-align: center;
+}
+
+.proxy-link-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 6px;
+    padding: 14px 10px;
+    text-align: center;
+}
+.proxy-link-empty-glyph {
+    width: 40px; height: 40px;
+    border-radius: var(--shape-full);
+    background: var(--surface-container-high);
+    color: var(--on-surface-variant);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.proxy-link-empty-glyph svg { width: 18px; height: 18px; }
+.proxy-link-empty-title {
+    font-size: calc(var(--title-small-size) - 1px);
+    line-height: calc(var(--title-small-line) - 2px);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.proxy-link-empty-desc {
+    max-width: 46ch;
+    font-size: calc(var(--body-medium-size) - 1px);
+    line-height: calc(var(--body-medium-line) - 1px);
+    color: var(--on-surface-variant);
+}
+.proxy-link-empty-reason {
+    margin-top: 2px;
+    padding: 2px 9px;
+    background: var(--surface-container-high);
+    border-radius: var(--shape-full);
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
+
+/* ── Управление ───────────────────────────────────────────────────────────── */
+.proxy-card--control { gap: 4px; }
+.proxy-rows { display: flex; flex-direction: column; }
+.proxy-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 6px 0;
+}
+.proxy-row + .proxy-row { border-top: 1px solid var(--outline-variant); }
+.proxy-row:last-child { padding-bottom: 0; }
+.proxy-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1 1 260px;
+    min-width: 0;
+}
+.proxy-row-name {
+    font-size: calc(var(--body-medium-size) - 1px);
+    line-height: calc(var(--body-medium-line) - 2px);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.proxy-row-hint,
+.proxy-row-note {
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
+.proxy-row .btn { flex-shrink: 0; }
+
+/* ── Кнопки и поля: на шаг компактнее, но с прежней областью нажатия ─────── */
+.proxy-page .btn {
+    height: 40px;
+    font-size: calc(var(--label-large-size) - 1px);
+}
+.proxy-page .btn:not(.btn--text):not(.btn--sq) { padding-inline: 18px; }
+.proxy-page .field {
+    height: 38px;
+    font-size: calc(var(--body-medium-size) - 1px);
+}
+
+/* ── QR в диалоге ─────────────────────────────────────────────────────────── */
+.proxy-qr-dialog {
+    width: 320px;
+    max-width: calc(100vw - 32px);
+    padding: 20px;
+    gap: 12px;
+}
+.proxy-qr-dialog .qr-img { width: 232px; height: 232px; }
+.proxy-qr-dialog .qr-hint {
+    max-width: 280px;
+    font-size: var(--body-small-size); line-height: calc(var(--body-small-line) - 1px);
+    color: var(--on-surface-variant);
+}
+.proxy-qr-shot {
+    display: block;
+    padding: 0;
+    border: 0;
+    background: none;
+    border-radius: var(--shape-medium);
+    cursor: pointer;
+}
+.proxy-qr-shot:focus-visible {
+    outline: 3px solid var(--secondary);
+    outline-offset: 4px;
+}
+.proxy-qr-shot .qr-img { display: block; }
+
+.proxy-sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ── Адаптивность ─────────────────────────────────────────────────────────── */
+/* До 1280 — одна колонка: карточкам хватает ширины, ссылка и QR не сжимаются. */
+@media (max-width: 1279px) {
+    .proxy-grid { grid-template-columns: minmax(0, 1fr); }
+}
+/* Средняя ширина: статус и действие друг под другом */
+@media (max-width: 760px) {
+    .proxy-hero { grid-template-columns: 40px minmax(0, 1fr); gap: 10px; padding: 14px; }
+    .proxy-hero-glyph { width: 40px; height: 40px; }
+    .proxy-hero-glyph svg { width: 18px; height: 18px; }
+    .proxy-hero-actions { grid-column: 1 / -1; }
+    .proxy-hero-actions .btn { width: 100%; }
+    .proxy-hero--loading { grid-template-columns: 40px minmax(0, 1fr); }
+    .proxy-skel--glyph { width: 40px; height: 40px; }
 }
 @media (max-width: 599px) {
-    .proxy-card-power { width: 100%; }
-    .proxy-card-power .btn { flex: 1; }
-    .proxy-component { align-items: stretch; }
-    .proxy-component .btn { width: 100%; }
+    .proxy-card { padding: 14px; }
+    .proxy-port-input,
+    .proxy-host-input { max-width: none; }
+    /* тач-цели остаются 44 px независимо от уменьшенной типографики */
+    .proxy-page .btn { height: 44px; }
+    .proxy-page .field { height: 44px; }
+    .proxy-form-foot { flex-direction: column; align-items: stretch; }
+    .proxy-form-note { flex: none; }
+    .proxy-form-foot .btn { width: 100%; }
+    .proxy-link { grid-template-columns: minmax(0, 1fr); }
+    .proxy-link-actions .btn { flex: 1; }
+    .proxy-qr { justify-self: center; }
+    .proxy-qr-img,
+    .proxy-qr-fail { width: 148px; height: 148px; }
+    .proxy-qr-cap { max-width: 200px; }
+    .proxy-row { align-items: stretch; }
+    .proxy-row .btn { width: 100%; }
+    .proxy-qr-dialog { width: calc(100vw - 32px); max-width: 344px; padding: 16px; }
+    .proxy-qr-dialog .qr-img { width: 100%; height: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .proxy-skel::after { animation: none; }
 }

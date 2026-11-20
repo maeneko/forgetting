@@ -79,6 +79,71 @@ LICENSE file in the root directory of this source tree.
     :is(.apikey-count, .apikey-empty) { grid-column: 1 / -1; }
 }
 
+/* Шапка раздела: «Ключи внешнего API /api/v1» слева, «Создать ключ» справа */
+.apikey-toolbar { justify-content: space-between; }
+.apikey-toolbar > .apikey-tools-hint { margin: 0; }
+
+/* ───── Доступ к серверам: строка «все серверы» / «изменить…» ─────
+   Ограничение — вторичное действие, поэтому по умолчанию видна только строка с чипом,
+   а галочки серверов раскрываются ссылкой. Один и тот же блок в диалоге создания
+   и в настройках ключа. */
+.apikey-access { display: flex; flex-direction: column; gap: 10px; }
+.apikey-access-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.apikey-access-name {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--on-surface-variant);
+}
+.apikey-link {
+    background: none; border: none;
+    padding: 4px 8px;
+    border-radius: var(--shape-full);
+    font-family: var(--font);
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--primary);
+    text-decoration: underline; text-underline-offset: 2px;
+    cursor: pointer;
+    transition: background var(--duration-short3) var(--ease-standard);
+}
+.apikey-link:hover { background: var(--primary-container); text-decoration: none; }
+.apikey-link:focus-visible { outline: 3px solid var(--secondary); outline-offset: 2px; }
+.apikey-picker { display: flex; flex-direction: column; gap: 6px; }
+/* На узком экране имя, IP и поколение сервера переносятся, а не вылезают за диалог */
+.apikey-picker .server-pick { flex-wrap: wrap; row-gap: 4px; }
+
+/* Поле «Метка» в диалоге создания */
+.apikey-field { display: flex; flex-direction: column; gap: 6px; }
+.apikey-field-name {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+}
+/* Ошибка в диалоге — по левому краю, в отличие от .login-error по центру */
+.apikey-err {
+    margin: 0;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--error);
+}
+
+/* Серверы ключа в строке таблицы и карточке: чипы ограниченного набора, у сервера
+   по умолчанию для /api/v1/users — точка (полный текст — в подсказке). */
+.apikey-srv-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.apikey-srv { max-width: 100%; }
+.apikey-def-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor; opacity: 0.6;
+    flex-shrink: 0;
+}
+.apikey-never, .apikey-all-empty { color: var(--neutral-text); }
+/* Текст только для скринридеров («по умолчанию» у точки) */
+.apikey-sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 /* Настройки ключа: какие серверы он видит */
 .apikey-tr-tools td { padding-top: 0; }
 .apikey-tools {
@@ -92,6 +157,13 @@ LICENSE file in the root directory of this source tree.
 .apikey-tools-title { margin: 0; font-size: var(--title-small-size); line-height: var(--title-small-line); font-weight: var(--weight-medium); color: var(--on-surface-variant); }
 .apikey-tools-hint { margin: 0; font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
 .apikey-card-btns { display: flex; gap: 8px; flex-shrink: 0; }
-.apikey-card-servers { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.apikey-card-servers {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+}
 
-.apikey-new-servers { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 16px; }
+/* Диалоги вкладки (создание ключа, потеря мастер-ключей) — шире узкой карточки,
+   но уже общей модалки добавления сервера */
+.apikey-modal { max-width: 480px; }
+

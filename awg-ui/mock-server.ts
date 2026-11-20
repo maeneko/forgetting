@@ -15,24 +15,87 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.7";
+const MOCK_VERSION = "0.5.8";
+const GB = 1024 ** 3, TB = 1024 ** 4;
+
+// ── лимиты времени и трафика: одно состояние на пользователя и на мастер-ключ ──
+// В хранилище — «сырые» поля, наружу отдаётся вычисленный вид (expiresAt/blocked/…),
+// как у awg-ctrl: blocked и blockReason зависят и от срока, и от трафика, и от ручной блокировки.
+type BlockReason = "expired" | "traffic" | "manual" | "api";
+interface RawLimits {
+    expires_at?: number | null;
+    traffic_limit_bytes?: number | null;
+    used_bytes?: number;
+    manual_block?: boolean;
+    api_block?: boolean;
+    // Старый awg-ctrl: срок уже считает (expired), а blocked/blockReason ещё не отдаёт.
+    // Панель обязана показывать блокировку и в этом случае — фикстура для проверки.
+    expired_only?: boolean;
+}
+const limitView = (s: RawLimits) => {
+    const expires = s.expires_at ?? null, traffic = s.traffic_limit_bytes ?? null;
+    const used = s.used_bytes ?? 0, manual = !!s.manual_block, apiBlock = !!s.api_block;
+    const expired = expires !== null && expires <= now();
+    const over = traffic !== null && used >= traffic;
+    const blockReason: BlockReason | null = apiBlock ? "api" : manual ? "manual" : over ? "traffic" : expired ? "expired" : null;
+    return {
+        expiresAt: expires, trafficLimitBytes: traffic, usedBytes: used,
+        remainingBytes: traffic !== null ? Math.max(0, traffic - used) : null,
+        blocked: s.expired_only ? false : !!blockReason,
+        blockReason: s.expired_only ? null : blockReason,
+        expired,
+    };
+};
+// Проверка тела PUT /api/users/:name/limits и PATCH /ui/masterkeys/:id: поля необязательные,
+// null/undefined — «без ограничения». Ошибки — по полям, как ждёт панель.
+const parseLimits = (b: Record<string, unknown>) => {
+    const errors: Record<string, string> = {};
+    let expires = null as number | null, traffic = null as number | null;
+    if (b.expires_at !== undefined && b.expires_at !== null) {
+        const v = Number(b.expires_at);
+        if (!Number.isInteger(v) || v <= 0 || v > 4102444800) errors.expires_at = "Срок: unix-время в секундах или пусто";
+        else expires = v;
+    }
+    if (b.traffic_limit_bytes !== undefined && b.traffic_limit_bytes !== null) {
+        const v = Number(b.traffic_limit_bytes);
+        if (!Number.isInteger(v) || v < 1024 ** 2 || v > 1024 * TB) errors.traffic_limit_bytes = "Лимит: от 1 МБ до 1024 ТБ или пусто";
+        else traffic = v;
+    }
+    return { errors, expires, traffic };
+};
 
 // ── пользователи (vpn://) ──
-interface U { name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number }
-const users: U[] = ["alice", "bob", "laptop-ivan"].map((name, i) => ({
+interface U extends RawLimits {
+    name: string; ip: string; pub_key: string; vpn_key: string; key_gen: string; online: boolean; lastHandshake: number; rx: number; tx: number;
+}
+const mUser = (name: string, i: number, extra: Partial<U> = {}): U => ({
     name, ip: `10.9.0.${i + 2}`, pub_key: b64(32), vpn_key: "vpn://" + crypto.randomBytes(48).toString("base64url"),
     key_gen: GEN, online: i !== 1, lastHandshake: now() - rnd(600), rx: rnd(5e8), tx: rnd(2e8),
-}));
+    expires_at: null, traffic_limit_bytes: null, used_bytes: 0, manual_block: false, api_block: false, ...extra,
+});
+// По состоянию на каждый чип: без лимитов · почти исчерпан · срок истёк · заблокирован вручную · трафик исчерпан · только срок
+const users: U[] = [
+    mUser("alice", 0),
+    mUser("bob", 1, { traffic_limit_bytes: 500 * GB, used_bytes: 470 * GB }),
+    mUser("laptop-ivan", 2, { expires_at: now() - 3 * 86400 }),
+    mUser("anna", 3, { manual_block: true, traffic_limit_bytes: 200 * GB, used_bytes: 12 * GB }),
+    mUser("sergey", 4, { traffic_limit_bytes: 100 * GB, used_bytes: 104 * GB, online: false }),
+    mUser("pavel", 5, { expires_at: now() + 12 * 86400 + 3600 }),
+    mUser("olga", 6, { expires_at: now() - 2 * 86400, expired_only: true }),
+    mUser("tyler", 7, { api_block: true, traffic_limit_bytes: 100 * GB, used_bytes: 5 * GB }),   // заблокирован по API: чип «заблокирован: по API»
+];
 
 // ── серверы: core (id 0), нода в сети и нода, ещё не подключавшаяся ──
 // Пользователи хранятся по серверам; X-Server-Id выбирает набор, как в настоящей панели.
 const usersOf: Record<number, U[]> = {
     0: users,
-    1: ["dave", "erin"].map((name, i) => ({
-        name, ip: `10.9.0.${i + 2}`, pub_key: b64(32), vpn_key: "vpn://" + crypto.randomBytes(48).toString("base64url"),
-        key_gen: "2", online: i === 0, lastHandshake: now() - rnd(600), rx: rnd(5e8), tx: rnd(2e8),
-    })),
+    1: [mUser("dave", 0, { key_gen: "2" }), mUser("erin", 1, { key_gen: "2", traffic_limit_bytes: 50 * GB, used_bytes: 50 * GB })],
 };
+const userOut = (u: U) => {
+    const { expires_at, traffic_limit_bytes, used_bytes, manual_block, ...rest } = u;
+    return { ...rest, ...limitView(u) };
+};
+
 const srv = (q: express.Request) => { const n = Number(q.headers["x-server-id"]); return Number.isInteger(n) && usersOf[n] ? n : 0; };
 const U_ = (q: express.Request) => usersOf[srv(q)];
 interface MNode { id: number; name: string; ip: string; gen: string; online: boolean; pending: boolean; version: string | null }
@@ -40,7 +103,7 @@ const mnodes: MNode[] = [
     { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
     { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
-    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.8" },   // новее панели — жёлтый чип
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.9" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
@@ -90,14 +153,18 @@ let apiId = 1;
 
 // ── мастер-ключи sen:// ──
 interface Dev { id: number; device_id: string; device_name: string; platform: string; version: string; created_at: number; last_seen: number | null; rekey_requested: boolean; online: boolean; lastHandshake: number; rx: number; tx: number }
-interface MK { id: number; uuid: string; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
+interface MK extends RawLimits { id: number; uuid: string; label: string; device_limit: number; created_at: number; secret: Buffer; devs: Dev[]; servers: number[]; deleting?: number[] }
 let mkId = 1, devId = 1;
 const dev = (name: string, platform: string, online: boolean, version = "0.6.5"): Dev => ({ id: devId++, device_id: crypto.randomUUID(), device_name: name, platform, version, created_at: now() - 86400, last_seen: now() - rnd(900), rekey_requested: false, online, lastHandshake: now() - rnd(300), rx: rnd(9e8), tx: rnd(3e8) });
-const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 2, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1, 2] },   // все места заняты; Tokyo (2) ещё не получил устройства
-    { id: mkId++, uuid: crypto.randomUUID(), label: "Офис", device_limit: 5, created_at: now() - 86400, secret: crypto.randomBytes(16), devs: [], servers: [0, 1] },   // «все серверы»
-    { id: mkId++, uuid: crypto.randomUUID(), label: "Друзья", device_limit: 3, created_at: now() - 3600, secret: crypto.randomBytes(16), devs: [], servers: [1] }];
+const masters: MK[] = [{ id: mkId++, uuid: crypto.randomUUID(), label: "Семья", device_limit: 2, created_at: now() - 86400 * 2, secret: crypto.randomBytes(16), devs: [dev("MacBook Ивана", "macOS", true), dev("Windows-ПК", "Windows", false, "0.6.2")], servers: [0, 1, 2], traffic_limit_bytes: 1 * TB, used_bytes: 940 * GB },   // все места заняты; трафик почти исчерпан; Tokyo (2) ещё не получил устройства
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Офис", device_limit: 5, created_at: now() - 86400, secret: crypto.randomBytes(16), devs: [dev("Роутер дачи", "Linux", true)], servers: [0, 1], expires_at: now() - 2 * 86400 },   // срок истёк: устройства не подключаются
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Друзья", device_limit: 3, created_at: now() - 3600, secret: crypto.randomBytes(16), devs: [dev("Телефон Оли", "Android", true), dev("Ноутбук Оли", "Windows", false)], servers: [1], manual_block: true },   // заблокирован вручную; устройства под ним
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Родители", device_limit: 3, created_at: now() - 600, secret: crypto.randomBytes(16), devs: [], servers: [0] },   // без лимитов
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Подрядчики", device_limit: 2, created_at: now() - 300, secret: crypto.randomBytes(16), devs: [], servers: [0, 1], expires_at: now() + 30 * 86400, traffic_limit_bytes: 500 * GB, used_bytes: 120 * GB },   // в пределах лимита, срок действует
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Партнёры", device_limit: 2, created_at: now() - 900, secret: crypto.randomBytes(16), devs: [], servers: [0, 1], api_block: true },   // заблокирован по API
+    { id: mkId++, uuid: crypto.randomUUID(), label: "Склад", device_limit: 4, created_at: now() - 120, secret: crypto.randomBytes(16), devs: [], servers: [0], traffic_limit_bytes: 250 * GB, used_bytes: 250 * GB }];   // трафик исчерпан: чип «закрыт по трафику», пока не сбросить счётчик
 const signPub = crypto.randomBytes(32);
-const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...(m.deleting ? { deleting: m.deleting } : {}) });
+const mkOut = (m: MK) => ({ id: m.id, uuid: m.uuid, label: m.label, device_limit: m.device_limit, devices: m.devs.length, servers: m.servers, created_at: m.created_at, ...limitView(m), ...(m.deleting ? { deleting: m.deleting } : {}) });
 // Мок: устройство «догнано» на всех серверах ключа, кроме Tokyo (id 2 — ещё не подключалась).
 const devTorrent = (d: Dev) => !!torrentOf[0]?.enabled && d.id === masters[0]?.devs[1]?.id;
 const devOut = (m: MK, d: Dev) => ({ ...d,
@@ -539,23 +606,52 @@ app.get("/ui/connlog", (q, r) => {
   ];
   r.json({ events, peers, since: now - 3 * 86400, keep_days: 30 });
 });
-app.get("/api/users", (q, r) => r.json({ users: U_(q) }));
+app.get("/api/users", (q, r) => r.json({ users: U_(q).map(userOut) }));
 // Приоритет в моке: пока на сервере 0 включено деление канала, первый пользователь «фоновый».
 // С меткой «торренты» — тоже фоновый (пока включено деление канала).
 const prioOf = (q: express.Request, ip: string) =>
     (srv(q) === 0 && shapingOf[0]?.enabled && (ip === "10.9.0.2" || torrentSeenIp(tsid(q), ip)) ? "background" : "normal");
-app.get("/api/users/stats", (q, r) => r.json({ users: U_(q).map(({ vpn_key, pub_key, ...u }) => ({ ...u, priority: prioOf(q, u.ip), torrent: torrentSeenIp(tsid(q), u.ip) })) }));
+app.get("/api/users/stats", (q, r) => r.json({ users: U_(q).map(u => {
+    const { vpn_key, pub_key, ...rest } = userOut(u);
+    return { ...rest, priority: prioOf(q, u.ip), torrent: torrentSeenIp(tsid(q), u.ip) };
+}) }));
 app.post("/api/users/reissue", (q, r) => r.json({ total: U_(q).length, reissued: U_(q).length, regenerated: [], backup: "" }));
 app.post("/api/users", (q, r) => {
     const users = U_(q);
     const name = String(q.body.name ?? "");
     if (!/^[a-zA-Z0-9_-]{1,32}$/.test(name)) return r.status(400).json({ error: "Имя: буквы, цифры, _ и -, до 32 символов" });
     if (users.some(u => u.name === name)) return r.status(409).json({ error: "Пользователь уже существует" });
-    const u: U = { name, ip: `10.9.0.${users.length + 2}`, pub_key: b64(32), vpn_key: "vpn://" + crypto.randomBytes(48).toString("base64url"), key_gen: GEN, online: false, lastHandshake: 0, rx: 0, tx: 0 };
-    users.push(u); r.status(201).json(u);
+    const u: U = mUser(name, users.length, { online: false, lastHandshake: 0, rx: 0, tx: 0 });
+    users.push(u); r.status(201).json(userOut(u));
 });
-app.post("/api/users/:name", (q, r) => { const u = U_(q).find(x => x.name === q.params.name); u ? r.json(u) : r.status(404).json({ error: "Пользователь не найден" }); });
+app.post("/api/users/:name", (q, r) => { const u = U_(q).find(x => x.name === q.params.name); u ? r.json(userOut(u)) : r.status(404).json({ error: "Пользователь не найден" }); });
 app.delete("/api/users/:name", (q, r) => { const users = U_(q); const i = users.findIndex(x => x.name === q.params.name); if (i >= 0) users.splice(i, 1); r.json({ success: true }); });
+// Лимиты пользователя: срок и трафик; блокировка и сброс счётчика — отдельными действиями,
+// как в контракте (PUT /api/users/:name/limits, POST …/block|unblock|usage/reset).
+const userOf = (q: express.Request) => U_(q).find(x => x.name === q.params.name);
+app.put("/api/users/:name/limits", (q, r) => {
+    const u = userOf(q);
+    if (!u) return r.status(404).json({ error: "Пользователь не найден" });
+    const { errors, expires, traffic } = parseLimits(q.body ?? {});
+    if (Object.keys(errors).length) return r.status(400).json({ error: "Проверьте поля лимитов", errors });
+    u.expires_at = expires; u.traffic_limit_bytes = traffic;
+    r.json(userOut(u));
+});
+app.post("/api/users/:name/block", (q, r) => {
+    const u = userOf(q);
+    if (!u) return r.status(404).json({ error: "Пользователь не найден" });
+    u.manual_block = true; r.json(userOut(u));
+});
+app.post("/api/users/:name/unblock", (q, r) => {
+    const u = userOf(q);
+    if (!u) return r.status(404).json({ error: "Пользователь не найден" });
+    u.manual_block = false; r.json(userOut(u));
+});
+app.post("/api/users/:name/usage/reset", (q, r) => {
+    const u = userOf(q);
+    if (!u) return r.status(404).json({ error: "Пользователь не найден" });
+    u.used_bytes = 0; r.json(userOut(u));
+});
 
 app.get("/ui/apikeys", (_q, r) => r.json({ keys: apiKeys }));
 app.post("/ui/apikeys", (q, r) => { const sid = Number(q.body.server_id ?? 0); const k = { id: ++apiId, label: q.body.label, prefix: "awgk_" + crypto.randomBytes(4).toString("hex") + "…", server_id: sid, servers: q.body.servers ?? [sid], created_at: now(), last_used: null }; apiKeys.push(k); r.status(201).json({ ...k, key: "awgk_" + crypto.randomBytes(24).toString("base64url") }); });
@@ -605,12 +701,34 @@ app.patch("/ui/masterkeys/:id", (q, r) => {
     const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
     if (q.body.servers !== undefined) { if (!Array.isArray(q.body.servers) || !q.body.servers.length) return r.status(400).json({ error: "Нужен хотя бы один сервер" }); m.servers = [...q.body.servers].sort(); }
     if (q.body.label) m.label = q.body.label; if (q.body.device_limit) m.device_limit = q.body.device_limit;
+    // Срок и лимит трафика — те же поля, что у пользователя; применяются только присланные.
+    if (q.body.expires_at !== undefined || q.body.traffic_limit_bytes !== undefined) {
+        const { errors, expires, traffic } = parseLimits(q.body);
+        if (Object.keys(errors).length) return r.status(400).json({ error: "Проверьте поля лимитов", errors });
+        if (q.body.expires_at !== undefined) m.expires_at = expires;
+        if (q.body.traffic_limit_bytes !== undefined) m.traffic_limit_bytes = traffic;
+    }
     // Как sub.ts: лишние устройства сверх лимита — отвязать, начиная с подключившихся последними.
     const unbound = [...m.devs].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, Math.max(0, m.devs.length - m.device_limit)).map(d => d.id);
     m.devs = m.devs.filter(d => !unbound.includes(d.id));
     r.json({ ...mkOut(m), unbound });
 });
 app.post("/ui/masterkeys/:id/rotate", (q, r) => { const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" }); m.secret = crypto.randomBytes(16); r.json({ id: m.id }); });
+// Лимиты мастер-ключа: ручная блокировка и сброс счётчика — сразу, без сохранения формы.
+app.post("/ui/masterkeys/:id/block", (q, r) => {
+    const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
+    m.manual_block = true; r.json(mkOut(m));
+});
+app.post("/ui/masterkeys/:id/unblock", (q, r) => {
+    const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
+    m.manual_block = false; r.json(mkOut(m));
+});
+app.post("/ui/masterkeys/:id/usage/reset", (q, r) => {
+    const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });
+    // Как бэкенд: обнуляем только счётчик. blockReason не хранится — он вычисляется в limitView,
+    // поэтому причина «traffic» снимается сама, а manual_block и истёкший срок остаются.
+    m.used_bytes = 0; r.json(mkOut(m));
+});
 app.post("/ui/masterkeys/:id/rekey", (q, r) => { const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" }); m.devs.forEach(d => d.rekey_requested = true); r.json({ id: m.id }); });
 app.delete("/ui/masterkeys/:id", (q, r) => {
     const m = find(q.params.id); if (!m) return r.status(404).json({ error: "Не найден" });

@@ -64,6 +64,7 @@ type Server struct {
 	shaping *Shaping
 	torrent *Torrent
 	connlog *ConnLog
+	usage   *Usage
 	metrics metricsCache
 	monitor monitorJob
 	cliPath string
@@ -196,6 +197,7 @@ func New() (*Server, error) {
 	s.shaping = newShaping(s)
 	s.torrent = newTorrent(s)
 	s.connlog = newConnLog(s)
+	s.usage = newUsage(s)
 	return s, nil
 }
 
@@ -225,5 +227,6 @@ func (s *Server) Run() error {
 	s.shaping.Start()
 	go s.torrent.Apply() // nft-таблицы после перезагрузки нет — ставим заново
 	s.connlog.Start()
+	s.usage.Start() // учёт трафика и проверка лимитов, тот же шаг 30 с
 	return <-errc
 }

@@ -8,12 +8,13 @@ import './prometheus.css';
 
 // Установка встроенного Prometheus (раздел «Prometheus» вкладки «Настройки»; графики — во вкладке «Монитор»).
 // Кнопка просит awg-ctrl сервера поставить его (`awg-ctrl monitor install`, root; сама панель пакетов
-// не ставит). У панели без VPN он ставится на ноду, и панель читает его через её агента — на сервер,
-// выбранный в шапке (при смене сервера вкладка перемонтируется). У панели со своим VPN цель всегда
-// «этот сервер».
+// не ставит). Prometheus у панели один: у панели без VPN он стоит на ноде, и панель читает его через
+// её агента. В шапке при этом может быть выбран другой сервер (при смене сервера вкладка
+// перемонтируется), поэтому host в ответе — машина, где Prometheus реально работает, и текст обязан
+// называть её, а не «этот сервер».
 export interface MonitorStatus {
     ready: boolean; can_install: boolean; command: string;
-    host: { id: number; name: string } | null;   // Prometheus на ноде (или будет поставлен туда); null — на этом сервере
+    host: { id: number; name: string } | null;   // где Prometheus работает (или будет поставлен); null/id 0 — сервер панели
     job: { action: 'install' | 'remove'; running: boolean; exit: number | null; log: string } | null;   // последняя операция
     on_node?: boolean;   // панель на ноде другой панели: Prometheus этой машины ставит и читает та
 }
@@ -43,7 +44,8 @@ function JobProgress({ job, starting }: { job: MonitorStatus['job']; starting: b
 }
 
 export default function PrometheusInstall({ token, showMsg }: PageProps) {
-    const target = getServerId() ?? 0;   // куда ставить (панель без VPN) — сервер из шапки
+    const sel      = getServerId();       // выбранный в шапке сервер; null — ещё не знаем
+    const target   = sel ?? 0;            // куда ставить (панель без VPN) — сервер из шапки
     const [status, setStatus]   = useState<MonitorStatus | null>(null);
     const [pending, setPending] = useState<'install' | 'remove' | null>(null);     // операция запущена отсюда
     const alive = useRef(true);
@@ -98,9 +100,20 @@ export default function PrometheusInstall({ token, showMsg }: PageProps) {
     const doing    = pending ?? (job?.running ? job.action : null);
     const showJob  = !!pending || (!!job && (job.running || job.exit !== null));
     const failed   = !!job && job.exit !== null && job.exit !== 0;
-    // «Этот сервер» путал: в шапке может быть выбрана нода, а Prometheus у панели один и стоит не там
-    const where    = status.host ? <>на сервере <b>{status.host.name}</b></> : 'на сервере панели';
-    const command  = status.ready ? 'awg-ctrl monitor remove' : status.command;
+    // Prometheus один на панель, и в шапке может быть выбрана не та машина, где он стоит.
+    // host = где он физически (null — сервер панели); совпал с выбранным — «этот сервер»,
+    // иначе называем хост и предупреждаем, что это не выбранный сервер.
+    const hostName  = status.host?.name ?? '';
+    const sameHost  = !!status.host && sel !== null && status.host.id === sel;
+    const otherHost = !!status.host && !sameHost && status.host.id !== 0;
+    const place     = sameHost ? <>на этом сервере</>
+        : otherHost ? <>на <b>{hostName}</b> — не на выбранном сервере</>
+        : <>на сервере панели</>;
+    // «поставит на …» без приписки про выбранный сервер: у непоставленного host — цель установки
+    const installAt = sameHost ? <>на этом сервере</>
+        : otherHost ? <>на <b>{hostName}</b>, не на выбранном сервере,</>
+        : <>на сервере панели</>;
+    const command   = status.ready ? 'awg-ctrl monitor remove' : status.command;
 
     return (
         <section className="st-section">
@@ -109,8 +122,8 @@ export default function PrometheusInstall({ token, showMsg }: PageProps) {
                     <span className="st-row-name">Встроенный Prometheus</span>
                     <span className="st-hint">
                         {status.ready
-                            ? <>Один на всю панель, собирает метрики всех серверов. Стоит {where}{status.host && ' (панель читает его через агента ноды)'}, слушает только 127.0.0.1:9090, графики хранит 31 день.</>
-                            : <>Один на всю панель, соберёт метрики всех серверов. Панель поставит его {where} и сама подключит к своим метрикам: графики «Монитора» появятся через минуту-две. Наружу он не открывается.</>}
+                            ? <>Общий для всех серверов, физически {place}. Слушает только 127.0.0.1:9090, графики хранит 31 день{otherHost && <>; панель читает его через агента ноды</>}.</>
+                            : <>Общий для всех серверов, ещё не установлен. Панель поставит его {installAt} и подключит к метрикам: графики «Монитора» появятся через минуту-две, наружу он не открывается.</>}
                     </span>
                 </span>
                 <span className="st-row-ctl">

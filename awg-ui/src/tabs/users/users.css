@@ -35,16 +35,23 @@ LICENSE file in the root directory of this source tree.
     align-items: baseline;
     gap: 8px;
     min-width: 0;
+    flex: 1 1 auto;
 }
 .user-card-num  { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-dot); flex-shrink: 0; }
 .user-card-name {
     font-size: var(--title-medium-size); line-height: var(--title-medium-line);
     font-weight: var(--weight-medium);
     color: var(--on-surface);
+    min-width: 0;
+    flex: 0 1 auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* чип статуса в шапке карточки не сжимается, имя забирает остаток ширины */
+.user-card-header > .chip { flex: none; }
+.user-card-title > .chip { flex: none; }
+.user-card-title > .lim-when { flex: none; }
 .user-card-ip {
     display: flex;
     flex-wrap: wrap;
@@ -83,6 +90,43 @@ LICENSE file in the root directory of this source tree.
     /* счётчик и «пусто» — на всю строку сетки */
     :is(.users-count, .empty-cards) { grid-column: 1 / -1; }
 }
+
+/* Диапазон rail (840–1199): восемь колонок в ~770–1060px не помещаются как есть, поэтому
+   в таблице пользователей поджаты отступы ячеек, имя уступает место цифрам (ellipsis),
+   а при узкой рабочей зоне — ещё и колонка приоритета: её чипы есть в карточках (<840px).
+   Ширина колонки имени считается от свободного места, иначе карточка таблицы
+   прокручивалась бы вбок. */
+@media (min-width: 840px) and (max-width: 1199px) {
+    .users-table :is(thead th, tbody td) { padding-left: 8px; padding-right: 8px; }
+    .users-table :is(thead th, tbody td):first-child { padding-left: 16px; }
+    .users-table :is(thead th, tbody td):last-child { padding-right: 8px; }
+    .users-table .lim-usage { max-width: 148px; }
+    /* «405.1 MB» не переносится на две строки: колонка уступает место имени, а не цифрам */
+    .users-table :is(thead th, tbody td) { white-space: nowrap; }
+    .users-table tbody .empty { white-space: normal; }
+}
+/* Узкая рабочая зона: рейл 80px до 1023 и полный сайдбар 240px на 1200–1279 оставляют
+   таблице меньше места, чем на 1024–1199. Приоритет здесь уступает имени — его чипы
+   видны в карточках (<840) и сразу после 1024. */
+@media (min-width: 840px) and (max-width: 1023px), (min-width: 1200px) and (max-width: 1279px) {
+    .users-table thead th:nth-child(3),
+    .users-table tbody td:nth-child(3) { display: none; }
+}
+@media (min-width: 840px) and (max-width: 1023px) {
+    .users-table .user-name-cell { max-width: clamp(120px, calc(100vw - 720px), 264px); }
+}
+@media (min-width: 1024px) and (max-width: 1199px) {
+    .users-table .user-name-cell { max-width: clamp(120px, calc(100vw - 821px), 264px); }
+}
+@media (min-width: 1200px) and (max-width: 1279px) {
+    .users-table :is(thead th, tbody td) { padding-left: 10px; padding-right: 10px; }
+    .users-table .user-name-cell { max-width: min(264px, calc(100vw - 955px)); }
+}
+/* Широкий экран: имя не раздувается сверх меры. Колонка ограничена ещё и остатком
+   карточки — длинное имя со шкалой трафика и капсулой иначе выводит таблицу за край. */
+@media (min-width: 1280px) {
+    .users-table .user-name-cell { max-width: min(264px, calc(100vw - 1083px)); }
+}
 @media (max-width: 599px) {
     /* .tip-wrap на мобильной растягивается на всю ширину — метке это не нужно. */
     .user-gen { width: auto; }
@@ -90,3 +134,317 @@ LICENSE file in the root directory of this source tree.
 
 /* Чипы приоритета и торрентов в одной ячейке */
 .user-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+
+/* ── Лимиты (строка под именем пользователя и диалог) ───────────────────────
+   Состояние доступа видно сразу: красный чип блокировки, полоска
+   израсходованного трафика, «до 12.03» или тихое «без лимитов». */
+/* Имя и капсула срока — одной строкой: имя уходит в ellipsis, капсула остаётся справа
+   и не переносится. Ширина колонки ограничена, иначе длинное имя растягивает таблицу. */
+.user-name-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; max-width: 264px; }
+.user-name-line { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.user-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-name-line > .lim-when { flex: none; }
+.lim-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+}
+.lim-usage { display: flex; flex-direction: column; gap: 4px; width: 100%; max-width: 168px; }
+.lim-usage-text { font-size: var(--body-small-size); line-height: var(--body-small-line); font-variant-numeric: tabular-nums; }
+.lim-used  { color: var(--on-surface); font-weight: var(--weight-medium); }
+.lim-used--over { color: var(--error); }
+.lim-of    { color: var(--neutral-text); }
+.lim-bar {
+    display: block;
+    height: 4px;
+    border-radius: var(--shape-full);
+    background: var(--outline-variant);
+    overflow: hidden;
+}
+.lim-bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--primary);
+    transition: width var(--duration-medium1) var(--ease-standard);
+}
+.lim-bar-fill--warn { background: var(--warn-dot); }   /* почти исчерпан */
+.lim-bar-fill--over { background: var(--error-dot); }
+.lim-when {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+    background: var(--surface-container-high);
+    border-radius: var(--shape-full);
+    padding: 2px 10px;
+    white-space: nowrap;
+    flex: none;
+}
+.lim-none { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-dot); }
+
+/* Диалог: две строки полей, состояние доступа, быстрые действия */
+.lim-dialog { max-width: 440px; }
+.lim-field { display: flex; flex-direction: column; gap: 6px; }
+.lim-label { font-size: var(--title-small-size); line-height: var(--title-small-line); font-weight: var(--weight-medium); color: var(--on-surface); }
+.lim-traffic { display: flex; gap: 8px; }
+.lim-amount { flex: 1; min-width: 0; }
+.lim-unit {
+    width: 84px;
+    flex-shrink: 0;
+    padding-right: 12px;
+    cursor: pointer;
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 18px) 19px, calc(100% - 13px) 19px;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    color: var(--on-surface);
+}
+.lim-hint { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.lim-hint--warm { color: var(--tertiary); }
+.lim-err  { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--error); }
+.lim-err--general { margin: 0; }
+.lim-now {
+    display: flex; flex-direction: column; gap: 2px;
+    background: var(--surface-container-lowest);
+    border-radius: var(--shape-large);
+    padding: 12px 14px;
+}
+.lim-now-title { font-size: var(--body-medium-size); line-height: var(--body-medium-line); color: var(--on-surface); font-variant-numeric: tabular-nums; }
+.lim-now-sub   { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.lim-quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lim-note { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); flex: 1; min-width: 160px; }
+@media (max-width: 599px) {
+    .lim-cell { min-width: 0; }
+    .lim-quick .btn { flex: 1; }
+    .lim-note { flex-basis: 100%; }
+}
+
+/* ── Дата окончания: поле и свой календарь ─────────────────────────────────
+   Вместо нативного datetime-local (системный пикер Chrome с двумя спиннерами
+   не вписывается в панель): кнопка с датой и поповер со своей сеткой.
+   Значение — «дд.мм.гггг чч:мм»; пусто — «Бессрочно». */
+.dt-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    height: 40px;
+    padding: 0 12px 0 16px;
+    border: 1.5px solid var(--outline);
+    border-radius: var(--shape-full);
+    background: var(--surface-bright);
+    color: var(--on-surface);
+    font-family: var(--font);
+    font-size: var(--body-medium-size);
+    line-height: var(--body-medium-line);
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--duration-short3) var(--ease-standard);
+}
+.dt-field-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-field svg { flex: none; color: var(--primary); }
+.dt-field:hover { border-color: var(--on-surface-variant); }
+.dt-field:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.dt-field--empty .dt-field-text { color: var(--neutral-dot); }
+.dt-field--invalid { border-color: var(--error); }
+
+/* поповер: портал в body, поэтому fixed и координаты из полей вьюпорта */
+.dt-sheet-scrim { display: none; }
+.dt-pop {
+    position: fixed;
+    top: var(--dt-top, 0px);
+    left: var(--dt-left, 0px);
+    z-index: 460;
+    width: 328px;
+    max-width: calc(100vw - 16px);
+    max-height: var(--dt-max-h, none);   /* тесный вьюпорт: середина прокручивается */
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background: var(--surface-container-high);
+    border-radius: var(--shape-extra-large);
+    box-shadow: var(--elevation-3);
+    color: var(--on-surface);
+    transform-origin: top left;
+    animation: dt-pop-in var(--duration-short4) var(--ease-emphasized-decelerate);
+}
+@keyframes dt-pop-in { from { opacity: 0; scale: .96; } }
+
+.dt-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-left: 6px;
+}
+.dt-month {
+    font-size: var(--title-small-size); line-height: var(--title-small-line);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+.dt-nav-group { display: inline-flex; gap: 2px; }
+.dt-nav {
+    width: 32px; height: 32px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--on-surface-variant);
+    cursor: pointer;
+    transition: background var(--duration-short2) var(--ease-standard), color var(--duration-short2) var(--ease-standard);
+}
+.dt-nav:hover:not(:disabled) { background: var(--surface-container-highest); color: var(--on-surface); }
+.dt-nav:disabled { color: var(--disabled-content); cursor: default; }
+.dt-nav:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+.dt-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; }
+
+.dt-cal { display: flex; flex-direction: column; gap: 2px; }
+.dt-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.dt-wd {
+    text-align: center;
+    padding-bottom: 4px;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+}
+.dt-cell { display: flex; min-width: 0; }
+.dt-day {
+    flex: 1;
+    height: 34px;
+    border: none;
+    border-radius: var(--shape-full);
+    background: transparent;
+    color: var(--on-surface);
+    font-family: var(--font);
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: background var(--duration-short2) var(--ease-standard);
+}
+.dt-day:hover:not(:disabled) { background: var(--surface-container-highest); }
+.dt-day--out { color: var(--neutral-dot); }
+/* сегодня — тонкое кольцо, выбранный день — заливка: они не спорят друг с другом */
+.dt-day--today { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--primary) 45%, transparent); }
+.dt-day:disabled { color: var(--disabled-content); cursor: default; }
+.dt-day--sel {
+    background: var(--primary);
+    color: var(--on-primary);
+    font-weight: var(--weight-medium);
+    box-shadow: none;
+}
+.dt-day--sel:hover:not(:disabled) { background: var(--primary); }
+.dt-day:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.dt-day--sel:focus-visible { outline-color: var(--on-primary); }
+
+.dt-time {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--outline-variant);
+}
+.dt-time-label { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.dt-time-ctl { display: inline-flex; align-items: center; gap: 4px; }
+.dt-colon { color: var(--on-surface-variant); }
+.dt-select {
+    appearance: none;
+    height: 34px;
+    min-width: 60px;
+    padding: 0 24px 0 10px;
+    border: 1px solid var(--outline);
+    border-radius: var(--shape-small);
+    background: var(--surface-bright);
+    /* стрелка — как у селекта единиц в поле трафика */
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 13px) center, calc(100% - 9px) center;
+    background-size: 4px 4px, 4px 4px;
+    background-repeat: no-repeat;
+    color: var(--on-surface);
+    font-family: var(--font);
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    cursor: pointer;
+}
+.dt-select:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.dt-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.dt-preset {
+    height: 32px;
+    padding: 0 10px;
+    border: none;
+    border-radius: var(--shape-full);
+    background: var(--surface-container);
+    color: var(--on-surface);
+    font-family: var(--font);
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    transition: background var(--duration-short2) var(--ease-standard);
+}
+.dt-preset:hover { background: var(--surface-container-highest); }
+.dt-preset:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.dt-foot { display: flex; justify-content: flex-end; gap: 8px; }
+.dt-foot .btn { height: 36px; padding: 0 16px; }
+
+/* Телефон: поповер — нижняя панель во всю ширину, шапка и кнопки закреплены,
+   середина (календарь, время, пресеты) прокручивается. Тач-цели ≥44px. */
+@media (max-width: 599px) {
+    .dt-sheet-scrim {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 455;
+        background: var(--scrim);
+        animation: backdrop-in var(--duration-short4) var(--ease-standard);
+    }
+    .dt-pop {
+        top: auto;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: auto;
+        max-width: none;
+        max-height: 92vh;
+        gap: 0;
+        padding: 0;
+        border-radius: var(--shape-extra-large) var(--shape-extra-large) 0 0;
+        transform-origin: bottom center;
+        animation: dt-sheet-in var(--duration-medium2) var(--ease-emphasized-decelerate);
+    }
+    @keyframes dt-sheet-in { from { transform: translateY(100%); } }
+    .dt-head {
+        flex: none;
+        padding: 8px 8px 4px 16px;
+        border-bottom: 1px solid var(--outline-variant);
+    }
+    .dt-month { font-size: var(--title-medium-size); line-height: var(--title-medium-line); }
+    .dt-nav { width: 44px; height: 44px; }
+    /* тело забирает всё, что осталось от 92vh: прокрутка появляется только при нехватке места */
+    .dt-body { padding: 12px 12px 0; }
+    .dt-wd { padding: 4px 0 8px; }
+    .dt-day { height: 44px; border-radius: var(--shape-medium); }
+    .dt-time { padding-top: 12px; }
+    .dt-select { height: 44px; }
+    .dt-preset { height: 44px; }
+    .dt-foot {
+        flex: none;
+        justify-content: stretch;
+        gap: 8px;
+        padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--outline-variant);
+    }
+    .dt-foot .btn { flex: 1; height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .dt-pop, .dt-sheet-scrim { animation: none; }
+}

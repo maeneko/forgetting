@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"database/sql"
 	"math"
 	"strconv"
 	"strings"
@@ -30,6 +31,37 @@ func bodyHost(c *rctx) (string, error) {
 		return "", httpErr(400, "host: строка")
 	}
 	return h, nil
+}
+
+// bodyLimitInt — необязательное поле-лимит в PUT /api/users/:name/limits: ключа нет —
+// present=false (не трогаем), null — present=true и значение nil (снять ограничение),
+// целое ≥ 0 — значение. Строки, дроби и отрицательные — 400.
+func bodyLimitInt(c *rctx, key string) (val *int64, present bool, err error) {
+	v, ok := c.obj().Get(key)
+	if !ok {
+		return nil, false, nil
+	}
+	if v == nil {
+		return nil, true, nil
+	}
+	f, isNum := v.(float64)
+	if !isNum || math.IsNaN(f) || f != math.Trunc(f) || f < 0 || f > math.MaxInt64 {
+		return nil, true, httpErr(400, key+": целое число ≥ 0 или null")
+	}
+	n := int64(f)
+	return &n, true, nil
+}
+
+// userResult — пользователь для ответа или 404.
+func (s *Server) userResult(name string) (result, error) {
+	u, err := s.userGet(name)
+	if err != nil {
+		return result{}, err
+	}
+	if u == nil {
+		return result{}, httpErr(404, "Пользователь не найден")
+	}
+	return ok(u)
 }
 
 func (s *Server) routes() []route {
@@ -76,7 +108,7 @@ func (s *Server) routes() []route {
 		}),
 
 		R("GET", "/api/users", true, a, func(c *rctx) (result, error) {
-			rows, err := s.db.Query("SELECT name, ip, pub_key, vpn_key, key_gen FROM users WHERE vpn_key != ''")
+			rows, err := s.db.Query("SELECT name, ip, pub_key, vpn_key, key_gen, blocked_at FROM users WHERE vpn_key != ''")
 			if err != nil {
 				return result{}, err
 			}
@@ -84,13 +116,14 @@ func (s *Server) routes() []route {
 			list := []any{}
 			for rows.Next() {
 				var n, ip, pub, vk, kg string
-				if err := rows.Scan(&n, &ip, &pub, &vk, &kg); err != nil {
+				var blockedAt sql.NullInt64
+				if err := rows.Scan(&n, &ip, &pub, &vk, &kg, &blockedAt); err != nil {
 					rows.Close()
 					return result{}, err
 				}
 				ps := stats[pub]
 				list = append(list, ob{{"name", n}, {"ip", ip}, {"pub_key", pub}, {"vpn_key", vk}, {"key_gen", kg},
-					{"online", ps.Online}, {"lastHandshake", ps.LastHandshake}})
+					{"online", ps.Online}, {"lastHandshake", ps.LastHandshake}, {"blocked", blockedAt.Valid}})
 			}
 			rows.Close()
 			return ok(ob{{"users", list}})
@@ -98,22 +131,43 @@ func (s *Server) routes() []route {
 
 		R("GET", "/api/users/stats", true, a, func(c *rctx) (result, error) {
 			torrent := s.torrent.SeenSet()
-			rows, err := s.db.Query("SELECT name, ip, pub_key, key_gen FROM users WHERE vpn_key != ''")
+			rows, err := s.db.Query("SELECT name, ip, pub_key, key_gen, expires_at, traffic_limit_bytes, " +
+				"used_rx, used_tx, blocked_at, blocked_reason FROM users WHERE vpn_key != ''")
 			if err != nil {
 				return result{}, err
 			}
 			stats := s.getPeersData()
+			now := time.Now().Unix()
 			list := []any{}
 			for rows.Next() {
 				var n, ip, pub, kg string
-				if err := rows.Scan(&n, &ip, &pub, &kg); err != nil {
+				var usedRx, usedTx int64
+				var expires, limit, blockedAt sql.NullInt64
+				var blockReason sql.NullString
+				if err := rows.Scan(&n, &ip, &pub, &kg, &expires, &limit,
+					&usedRx, &usedTx, &blockedAt, &blockReason); err != nil {
 					rows.Close()
 					return result{}, err
 				}
 				ps := stats[pub]
+				// nil → null: «ограничения нет» и «остатка нет» — разные вещи.
+				var expiresAt, limitBytes, remaining, reason any
+				if expires.Valid {
+					expiresAt = expires.Int64
+				}
+				used := usedRx + usedTx
+				if limit.Valid {
+					limitBytes = limit.Int64
+					remaining = max(int64(0), limit.Int64-used)
+				}
+				if blockReason.Valid {
+					reason = blockReason.String
+				}
 				list = append(list, ob{{"name", n}, {"ip", ip}, {"key_gen", kg}, {"online", ps.Online},
 					{"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx}, {"priority", s.shaping.PriorityOf(ip)},
-					{"torrent", torrent[ip]}})
+					{"torrent", torrent[ip]}, {"expiresAt", expiresAt}, {"trafficLimitBytes", limitBytes},
+					{"usedBytes", used}, {"remainingBytes", remaining}, {"blocked", blockedAt.Valid},
+					{"blockReason", reason}, {"expired", expires.Valid && expires.Int64 <= now}})
 			}
 			rows.Close()
 			return ok(ob{{"users", list}})
@@ -126,6 +180,64 @@ func (s *Server) routes() []route {
 				return result{}, err
 			}
 			return ok(r)
+		}),
+
+		// Лимиты обычного пользователя: срок и объём трафика. Поля необязательные, null
+		// снимает ограничение; отсутствующее поле не трогаем. Блокировка — отдельными
+		// маршрутами ниже, чтобы «поменять лимит» не означало «разблокировать».
+		// ⚠️ Объявлено до «/api/users/:name» — как и /reissue.
+		R("PUT", "/api/users/:name/limits", true, an, func(c *rctx) (result, error) {
+			expires, expiresSet, err := bodyLimitInt(c, "expires_at")
+			if err != nil {
+				return result{}, err
+			}
+			limit, limitSet, err := bodyLimitInt(c, "traffic_limit_bytes")
+			if err != nil {
+				return result{}, err
+			}
+			if !expiresSet && !limitSet {
+				return result{}, httpErr(400, "Укажите expires_at и/или traffic_limit_bytes")
+			}
+			if _, err := s.setUserLimits(c.params["name"], expires, expiresSet, limit, limitSet); err != nil {
+				return result{}, err
+			}
+			return s.userResult(c.params["name"])
+		}),
+
+		// reason: manual (оператор), api (внешняя система), expired/traffic (тик ограничений).
+		R("POST", "/api/users/:name/block", true, an, func(c *rctx) (result, error) {
+			reason := "manual"
+			if v, ok := c.obj().Get("reason"); ok && v != nil {
+				r, isStr := v.(string)
+				if !isStr || !blockReasons[r] {
+					return result{}, httpErr(400, "reason: manual, expired, traffic или api")
+				}
+				reason = r
+			}
+			if err := s.blockUser(c.params["name"], reason); err != nil {
+				return result{}, err
+			}
+			return s.userResult(c.params["name"])
+		}),
+
+		R("POST", "/api/users/:name/unblock", true, an, func(c *rctx) (result, error) {
+			if u, err := s.userGet(c.params["name"]); err != nil {
+				return result{}, err
+			} else if u == nil {
+				return result{}, httpErr(404, "Пользователь не найден")
+			}
+			if err := s.unblockUser(c.params["name"]); err != nil {
+				return result{}, err
+			}
+			return s.userResult(c.params["name"])
+		}),
+
+		// Сброс израсходованного трафика. Блокировку не снимает — для этого /unblock.
+		R("POST", "/api/users/:name/usage/reset", true, an, func(c *rctx) (result, error) {
+			if err := s.resetUsage(c.params["name"]); err != nil {
+				return result{}, err
+			}
+			return s.userResult(c.params["name"])
 		}),
 
 		R("POST", "/api/users/:name", true, an, func(c *rctx) (result, error) {

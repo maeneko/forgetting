@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -44,7 +45,10 @@ var b64 = base64.RawURLEncoding
 
 const (
 	handshakeTimeout = 10 * time.Second
-	deadAfter        = 60 * time.Second // core пингует чаще; тишина дольше — соединение мёртвое
+	// core пингует каждые 20 с; агент шлёт свой keepalive чаще, а «тишина» дольше
+	// defaultDeadAfter рвёт соединение — полуоткрытый сокет виден раньше, чем по пингу хаба.
+	defaultKeepalive = 22 * time.Second
+	defaultDeadAfter = 55 * time.Second
 	maxPayload       = 4 * 1024 * 1024
 	ctrlTimeout      = 110 * time.Second
 	maxBackoff       = 60 * time.Second
@@ -137,6 +141,24 @@ type Agent struct {
 
 	http *http.Client
 	prom *http.Client
+
+	// Интервалы соединения; 0 — значения по умолчанию. Тесты подменяют их напрямую.
+	keepalive time.Duration
+	deadAfter time.Duration
+}
+
+func (a *Agent) keepaliveInterval() time.Duration {
+	if a.keepalive > 0 {
+		return a.keepalive
+	}
+	return defaultKeepalive
+}
+
+func (a *Agent) deadTimeout() time.Duration {
+	if a.deadAfter > 0 {
+		return a.deadAfter
+	}
+	return defaultDeadAfter
 }
 
 // coreLink — запросы ноды к core (пока один: метрики панели для Prometheus ноды).
@@ -473,19 +495,27 @@ func (a *Agent) secret() string {
 }
 
 // connectOnce держит одно соединение до его закрытия. authFailed — core закрыл с 4003.
-func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed bool) {
+// drop — причина потери уже установленного соединения ("" — соединение не установилось или
+// это штатная остановка): её Run пишет в журнал вместе с паузой до переподключения.
+func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed bool, drop string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Сторож тишины: Read ждёт кадров, поэтому полуоткрытый сокет иначе висел бы до TCP-таймаута.
+	// Взводится заново на каждый прочитанный кадр (включая ping от core) — это и есть read deadline.
 	var dead *time.Timer
 	var deadMu sync.Mutex
+	var deadHit atomic.Bool
 	armDead := func() {
 		deadMu.Lock()
 		defer deadMu.Unlock()
 		if dead != nil {
 			dead.Stop()
 		}
-		dead = time.AfterFunc(deadAfter, cancel)
+		dead = time.AfterFunc(a.deadTimeout(), func() {
+			deadHit.Store(true)
+			cancel()
+		})
 	}
 	defer func() {
 		deadMu.Lock()
@@ -509,14 +539,14 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 		// как отказ в auth, переподключение — не чаще раза в минуту.
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			a.c.Errorf("agent: core отклонил ноду до подключения (неверный ключ, просроченная или использованная ссылка, часы ноды сильно расходятся)")
-			return true
+			return true, ""
 		}
 		if errors.Is(err, errPin) {
 			a.c.Errorf("agent: %v", errPin)
 		} else {
 			a.c.Errorf("agent: %v", err)
 		}
-		return false
+		return false, ""
 	}
 	defer ws.CloseNow()
 	defer a.setLink(nil)
@@ -538,15 +568,30 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 			}
 			if code == closeAuthFailed {
 				a.c.Errorf("agent: core отклонил ноду (неверный ключ, просроченная или использованная ссылка)")
+				return true, ""
 			}
 			if code == 4026 {
 				a.c.Errorf("agent: панель требует обновить ноду (install.sh → «Обновить»): %v", err)
+				return false, ""
 			}
-			return code == closeAuthFailed
+			if !ready {
+				return false, ""
+			}
+			switch {
+			case deadHit.Load():
+				return false, fmt.Sprintf("core не отвечает %s (нет ни пингов, ни ответов)", a.deadTimeout())
+			case ctx.Err() != nil:
+				return false, "" // штатная остановка, а не потеря связи
+			default:
+				return false, err.Error()
+			}
+		}
+		if ready {
+			armDead() // любой кадр = сокет жив
 		}
 		v, err := jsjson.Decode(raw)
 		if err != nil {
-			return false
+			return false, ""
 		}
 		m, _ := v.(jsjson.Object)
 		switch t, _ := m.Get2("t").(string); {
@@ -577,12 +622,27 @@ func (a *Agent) connectOnce(ctx context.Context, onReady func()) (authFailed boo
 				a.forgetJoinSecret()
 				a.c.Logf("agent: нода привязана к core")
 			}
-			a.c.Logf("agent: подключено к core (%s)", a.addr())
+			// Свой keepalive: хаб пингует раз в 20 с, но его пинг может потеряться вместе с
+			// полуоткрытым сокетом — тогда молчащий агент выглядел бы живым.
+			go func() {
+				t := time.NewTicker(a.keepaliveInterval())
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						send(jsjson.Object{{Key: "t", Val: "ping"}})
+					}
+				}
+			}()
 			// Подтверждение — только когда адрес уже на диске: по нему панель решает, что
 			// старый сервер можно выключать.
 			if core, ok := m.Get2("core").(string); ok && a.learnCore(core) {
 				send(jsjson.Object{{Key: "t", Val: "core_ok"}, {Key: "core", Val: core}})
 			}
+		case t == "pong", t == "ping":
+			// keepalive второй стороны: сам факт кадра уже взвёл сторож тишины
 		case t == "metrics_res" && ready:
 			a.deliver(m)
 		case t == "req" && ready:
@@ -743,9 +803,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		go a.serveMetrics(ctx)
 	}
 	backoff := time.Second
+	hadConn := false
 	for {
 		ready := false
-		authFailed := a.connectOnce(ctx, func() { backoff, ready = time.Second, true })
+		authFailed, drop := a.connectOnce(ctx, func() {
+			backoff, ready = time.Second, true
+			if hadConn {
+				a.c.Logf("agent: связь с core восстановлена (%s)", a.addr())
+			} else {
+				a.c.Logf("agent: подключено к core (%s)", a.addr())
+			}
+			hadConn = true
+		})
 		if !ready {
 			a.next()
 		}
@@ -754,6 +823,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			wait = maxBackoff
 		}
 		backoff = min(backoff*2, maxBackoff)
+		if drop != "" {
+			a.c.Logf("agent: соединение с core потеряно: %s, переподключение через %d с", drop, int(wait.Seconds()))
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

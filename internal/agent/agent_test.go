@@ -187,7 +187,7 @@ func TestHandshakeAndRequests(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if a.connectOnce(ctx, nil) {
+	if ok, _ := a.connectOnce(ctx, nil); ok {
 		t.Fatal("authFailed on a good handshake")
 	}
 
@@ -230,7 +230,7 @@ func TestWrongPinSendsNothing(t *testing.T) {
 	a, _ := newAgent(t, c, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "http://127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if a.connectOnce(ctx, nil) {
+	if ok, _ := a.connectOnce(ctx, nil); ok {
 		t.Fatal("pin mismatch reported as auth failure")
 	}
 	select {
@@ -249,7 +249,7 @@ func TestAuthRejected(t *testing.T) {
 	a, envFile := newAgent(t, c, c.pin(t), "http://127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if !a.connectOnce(ctx, nil) {
+	if ok, _ := a.connectOnce(ctx, nil); !ok {
 		t.Fatal("4003 not reported as auth failure")
 	}
 	if raw, _ := os.ReadFile(envFile); !strings.Contains(string(raw), "JOIN_SECRET=s3cret") {

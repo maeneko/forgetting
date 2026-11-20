@@ -219,8 +219,10 @@ func trimEndJS(s string) string { return strings.TrimRightFunc(s, unicode.IsSpac
 
 // rebuildConf пересобирает [Peer]-секции из БД; [Interface] сохраняется как есть.
 // Пиры устройств идут после users; без записей в peers вывод байт-в-байт прежний.
+// Заблокированные (лимит/срок, см. usage.go) пользователи в conf не попадают — именно
+// пересборка вынимает их из ядра при syncPeers.
 func (s *Server) rebuildConf() error {
-	users, err := s.db.Query("SELECT name, ip, pub_key, psk_key FROM users")
+	users, err := s.db.Query("SELECT name, ip, pub_key, psk_key FROM users WHERE blocked_at IS NULL")
 	if err != nil {
 		return err
 	}

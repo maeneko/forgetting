@@ -207,7 +207,7 @@ func addMonitorNode(t *testing.T, a *App, id int, name string) {
 
 func addMonitorKey(t *testing.T, a *App, id int64, token string, servers ...int) {
 	t.Helper()
-	if _, err := a.db.Exec("INSERT INTO api_keys (id, label, key_hash, prefix, created_at) VALUES (?, 'mon', ?, 'awgk_…', 1)", id, hashKey(token)); err != nil {
+	if _, err := a.db.Exec("INSERT INTO api_keys (id, label, key_hash, prefix, created_at, all_servers) VALUES (?, 'mon', ?, 'awgk_…', 1, 0)", id, hashKey(token)); err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range servers {

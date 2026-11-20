@@ -30,19 +30,30 @@ LICENSE file in the root directory of this source tree.
 .mk-limit-input { width: 88px !important; }
 
 /* ── таблица (десктоп) ── */
+/* Фиксированные колонки: имя забирает остаток ширины, поэтому подпись обрезается
+   ровно тогда, когда места правда не хватает, а таблица никогда не едет вбок. */
+.mk-table { table-layout: fixed; }
 .mk-table td, .mk-table th { white-space: nowrap; }
-.mk-table .td-actions { width: 80px; }   /* QR и «⋮» */
-.mk-table th, .mk-table td { padding-left: 10px; padding-right: 10px; }
+.mk-table th:nth-child(2), .mk-table td:nth-child(2) { width: 200px; }   /* Статус: только состояние устройств */
+.mk-table th:nth-child(3), .mk-table td:nth-child(3) { width: 132px; }   /* Устройства: полоска слотов */
+.mk-table th:nth-child(4), .mk-table td:nth-child(4) { width: 124px; }   /* QR, шестерёнка и «⋮» */
+/* статус — чипы в строку, но при нехватке места переносятся, а не наезжают на соседей */
+.mk-table td:nth-child(2) .user-chips { flex-wrap: wrap; white-space: normal; }
+.mk-table th, .mk-table td { padding-left: 8px; padding-right: 8px; }
 .mk-table th:first-child, .mk-table td:first-child { padding-left: 20px; }
-.mk-table th:last-child, .mk-table td:last-child { padding-right: 16px; }
+.mk-table th:last-child, .mk-table td:last-child { padding-right: 12px; }
 .mk-tr-master td { background: var(--surface-container); font-weight: var(--weight-medium); padding-top: 6px; padding-bottom: 6px; }
 .mk-tr-master:hover td { background: var(--surface-container); }
-.mk-name { display: inline-flex; align-items: center; gap: 8px; color: var(--primary); }
+.mk-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--primary); }
 .mk-name .mk-caret { margin-left: -8px; }
+/* Чип стоит сразу за именем: он не сжимается, а имя рядом с ним обрезается. */
+.mk-name > .chip { flex: none; font-weight: var(--weight-regular); }
+.mk-name > .name-stack { min-width: 0; }
+/* Длинная метка обрезается многоточием по фактической ширине: в таблице её задаёт
+   колонка, в карточке — flex строки. */
+.name-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mk-tr-master .mk-name { color: var(--on-surface); }
 .mk-tr-master .mk-name svg { color: var(--primary); }
-.mk-tr-tools td { background: var(--surface-container); padding-top: 4px; padding-bottom: 12px; }  /* слева/справа — общие отступы колонок таблицы: блок стоит под заголовком «Имя» */
-.mk-tr-tools:hover { background: transparent; }
 .mk-tr-device td { padding-top: 10px; padding-bottom: 10px; }
 .mk-flag { color: var(--neutral-text); font-size: var(--body-small-size); line-height: var(--body-small-line); }
 .mk-id-line { display: inline-flex; align-items: baseline; gap: 6px; }
@@ -81,17 +92,21 @@ LICENSE file in the root directory of this source tree.
 }
 
 /* шапка ключа: стрелка, ключ, метка с коротким UUID, полоска устройств */
-.mk-master { display: flex; align-items: center; gap: 10px; color: var(--primary); min-height: 42px; }
+.mk-master { display: flex; align-items: flex-start; gap: 10px; color: var(--primary); min-height: 42px; }
+/* шапка карточки: имя с чипом, UUID под ним и лимиты — одной левой колонкой */
 .mk-master-label {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
     font-size: var(--title-medium-size); line-height: var(--title-medium-line);
     font-weight: var(--weight-medium);
     color: var(--on-surface);
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
+.mk-master > svg { margin-top: 4px; }   /* иконка ключа — по центру строки имени */
+/* имя и чип статуса — одной строкой; имя обрезается, чип не сжимается */
+.name-line { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.name-line > .chip { flex: none; }
+.name-line > .name-text { min-width: 0; }
 .mk-caret {
     width: 28px; height: 28px;
     border: 0; border-radius: 50%;
@@ -103,6 +118,8 @@ LICENSE file in the root directory of this source tree.
     transition: transform var(--duration-short3) var(--ease-standard);
 }
 .mk-caret--folded { transform: rotate(-90deg); }
+.mk-master-label > .name-stack { min-width: 0; max-width: 100%; }
+.mk-master-label .name-text { max-width: 100%; }
 .mk-caret-gap { width: 28px; flex-shrink: 0; }   /* ключ без устройств: место стрелки */
 .mk-name .mk-caret-gap { margin-left: -8px; }
 
@@ -130,13 +147,143 @@ LICENSE file in the root directory of this source tree.
 @media (pointer: coarse) { .mk-menu-item { min-height: 48px; } }
 @media (prefers-reduced-motion: reduce) { .mk-menu { animation: none; } }
 
-.mk-tools {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 12px;
-    align-items: stretch;
-    margin: 6px 0 8px;
+/* ── Модалка настроек ключа ────────────────────────────────────────────────
+   Тот же набор, что раньше жил в раскрытии строки. Тело прокручивается, шапка и футер
+   стоят на месте; на телефоне окно занимает весь экран. */
+.mk-modal {
+    width: 100%;
+    max-width: 560px;
+    max-height: calc(100dvh - 32px);
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
 }
+.mk-modal-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+    flex-shrink: 0;
+    padding: 20px 24px 12px;
+}
+.mk-modal-title {
+    margin: 0;
+    font-size: var(--headline-small-size); line-height: var(--headline-small-line);
+    font-weight: var(--weight-regular); color: var(--on-surface);
+    min-width: 0; overflow-wrap: anywhere;
+}
+.mk-modal-x { margin: -4px -6px 0 0; }
+.mk-modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 24px 8px;
+    display: flex; flex-direction: column; gap: 12px;
+}
+.mk-modal-foot {
+    flex-shrink: 0;
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 12px 24px 16px;
+    border-top: 1px solid var(--outline-variant);
+}
+.mk-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mk-modal-err { margin: 0; }
+.mk-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* Подписи под именем: серверы и суммарный трафик ключа — бывшие колонки IP/Платформа/rx/tx.
+   Переносим их строками, чтобы таблица из четырёх колонок влезала по ширине. */
+.mk-key-meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+    margin-top: 4px;
+    padding-left: 36px;
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+    white-space: normal;
+}
+.mk-key-meta .chip { font-weight: var(--weight-regular); }
+/* в таблице у подписи устройства та же роль: платформа, IP и трафик вместо колонок */
+.mk-tr-device .mk-dev-meta { white-space: normal; }
+.mk-tr-device .mk-dev-meta .mk-ip { white-space: nowrap; }
+
+/* ── Лимиты срока и трафика ────────────────────────────────────────────────
+   Чип состояния + «до 12.03» + «940 ГБ из 1 ТБ» со шкалой: одна строка под именем
+   ключа в таблице и в сводке карточки на телефоне. */
+/* Ячейка «Имя»: слева имя с UUID и подписью, справа — лимиты. Обе части и колонка
+   «Статус» центрируются по одной вертикали (align-items: center + vertical-align: middle). */
+.mk-name-cell { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.mk-name-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+/* имя, чип и лимиты — в одну строку; имя обрезается, чип и лимиты не сжимаются */
+.mk-name-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mk-name-row > .mk-name { flex: 1 1 auto; min-width: 0; }
+.mk-name-row > .chip { flex: none; font-weight: var(--weight-regular); }
+/* Лимиты — одной строкой справа: капсула срока, число и шкала. Сжимается только шкала
+   (до 40px), подпись не рвётся и не обрезается, переносов нет. */
+.mk-lim.mk-lim--side {
+    display: flex; flex-direction: row; align-items: center; flex-wrap: nowrap;
+    gap: 10px; flex: 0 1 auto;
+}
+.mk-lim--side .mk-lim-usage {
+    display: inline-flex; flex-direction: row; align-items: center; gap: 6px;
+    width: auto; min-width: 0;
+}
+.mk-lim--side .mk-lim-text { white-space: nowrap; }
+/* шкала сжимается первой, число и капсула — нет */
+.mk-lim--side .mk-lim-bar { flex: 0 1 76px; width: 76px; min-width: 40px; }
+@media (max-width: 1439px) { .mk-lim--side .mk-lim-bar { flex-basis: 60px; width: 60px; } }
+/* лимиты в карточке — часть шапки, поэтому отдельного отступа сверху не нужно */
+.mk-master-label > .mk-lim--side { max-width: 100%; }
+.mk-lim { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.mk-lim .chip { font-weight: var(--weight-regular); }
+.mk-lim-when {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--on-surface-variant);
+    background: var(--surface-container-high);
+    border-radius: var(--shape-full);
+    padding: 2px 10px;
+    white-space: nowrap;
+}
+.mk-lim-usage { display: inline-flex; flex-direction: column; gap: 3px; min-width: 112px; }
+.mk-lim-text { font-size: var(--body-small-size); line-height: var(--body-small-line); font-variant-numeric: tabular-nums; color: var(--on-surface); white-space: nowrap; }
+.mk-lim-text--over { color: var(--error); }
+.mk-lim-bar {
+    display: block;
+    height: 4px;
+    width: 100%;
+    border-radius: var(--shape-full);
+    background: var(--outline-variant);
+    overflow: hidden;
+}
+.mk-lim-bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--primary);
+    transition: width var(--duration-medium1) var(--ease-standard);
+}
+.mk-lim-bar-fill--warn { background: var(--warn-dot); }   /* почти исчерпан */
+.mk-lim-bar-fill--over { background: var(--error-dot); }
+
+/* Поля срока и трафика в тулбоксе: мини-форма на всю ширину блока — дата строкой,
+   под ней «число + единица + Сохранить», подсказки под своими полями. */
+.mk-setting.mk-setting--wide { flex-direction: column; align-items: stretch; gap: 8px; }
+/* специфичность выше .mk-setting-ctl из App.css: она грузится позже и иначе центрирует поля */
+.mk-setting-ctl.mk-lim-ctl { flex-direction: column; align-items: stretch; gap: 6px; width: 100%; min-width: 0; }
+.mk-lim-pair { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.mk-date-input { width: 100%; min-width: 0; max-width: 260px; font-size: var(--body-small-size); }
+.mk-lim-pair .mk-traffic-input { flex: 1 1 auto; min-width: 0; text-align: left; }
+.mk-unit {
+    width: 76px; height: 36px;
+    flex-shrink: 0;
+    padding: 0 26px 0 12px;
+    font-size: var(--body-small-size);
+    cursor: pointer;
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 16px) 17px, calc(100% - 11px) 17px;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+}
+.mk-lim-hint { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.mk-lim-hint--warm { color: var(--tertiary); }
+.mk-lim-err { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--error); }
+.mk-lim-ctl .btn { height: 36px; padding: 0 16px; font-size: var(--label-large-size); line-height: var(--label-large-line); }
 /* два одинаковых блока: слева настройки ключа, справа серверы */
 .mk-box {
     display: flex; flex-direction: column; gap: 10px;
@@ -170,7 +317,7 @@ LICENSE file in the root directory of this source tree.
    не осталось (тёплый: это повод присмотреться, а не ошибка).
    Текст дублируется: тёмный на дорожке, светлый поверх заливки (обрезается ею). */
 .mk-meter {
-    --mk-w: 136px;
+    --mk-w: 112px;
     --meter-fill: var(--primary);
     --meter-on: var(--on-primary);      /* цвет числа поверх заливки */
     position: relative;
@@ -201,12 +348,27 @@ LICENSE file in the root directory of this source tree.
 .mk-meter--full { --meter-fill: var(--warn-dot); --meter-on: #2a2118; }   /* все места заняты */
 
 .mk-box .tip-wrap { width: 100%; }
+/* кнопки в строке настройки — по содержимому, иначе обёртка подсказки растягивает контрол */
+.mk-box .mk-setting-ctl .tip-wrap { width: auto; }
 
 /* сводка (статус, серверы) и действия ключа */
-.mk-master-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.mk-master-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; }
 .mk-master-sum:empty { display: none; }
-.mk-master-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.mk-master-actions .btn { flex: 1; }
+/* действия — одна сетка: две кнопки одного веса и две иконки той же высоты */
+.mk-master-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+}
+.mk-master-actions .btn { height: 40px; padding: 0 12px; min-width: 0; }
+.mk-master-actions .btn-icon {
+    width: 40px; height: 40px;
+    background: var(--surface-container);
+    color: var(--on-surface-variant);
+}
+.mk-master-actions .btn-icon:hover { color: var(--on-surface); }
 .mk-tree .mk-more { width: 40px; height: 40px; }
 /* на телефоне .tip-wrap по умолчанию во всю ширину — здесь чипы и ID идут в строку */
 .mk-tree .tip-wrap { width: auto; }
@@ -230,18 +392,45 @@ LICENSE file in the root directory of this source tree.
 .mk-dev-traffic { font-family: var(--mono); white-space: pre; }
 
 /* ── телефон и планшет (design.md, часть IV): карточка на ключ, устройства строками, тач-цели ≥ 44px ── */
-/* compact и medium (< 840px): карточки вместо таблицы */
+/* Таблица из четырёх колонок влезает не везде: ниже 1280 — карточки (на планшете
+   в две колонки), прокрутки вбок нет ни там, ни там. */
+@media (max-width: 1279px) {
+    .table-card.mk-table-card { display: none; }
+    .mk-tree { display: flex; }
+}
+@media (min-width: 900px) and (max-width: 1279px) {
+    .mk-tree { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+}
 @media (max-width: 839px) {
     .mk-warn { flex-wrap: wrap; padding: 12px 12px 12px 16px; }
     .mk-warn-text { flex-basis: 100%; }
     .mk-warn .btn { margin-left: auto; }
-    .mk-tree { display: flex; }
 }
 @media (pointer: coarse) {
     .mk-tree .mk-more { width: 44px; height: 44px; }
+    .mk-master-actions .btn { height: 44px; }   /* тач-цель ≥44, как у иконок */
+    .mk-master-actions .btn-icon { width: 44px; height: 44px; }
 }
 @media (max-width: 599px) {
     .mk-limit-input { width: 100% !important; }
+
+    /* модалка настроек — на весь экран, шапка и футер на месте, прокручивается тело */
+    .mk-scrim { padding: 0; align-items: stretch; }
+    .mk-modal {
+        width: 100%; max-width: none;
+        height: 100vh; height: 100dvh; max-height: 100dvh;
+        border-radius: 0;
+    }
+    .mk-modal > .mk-modal-head {
+        align-items: center;
+        padding: calc(10px + env(safe-area-inset-top)) 8px 10px 16px;
+        border-bottom: 1px solid var(--outline-variant);
+    }
+    .mk-modal-title { font-size: var(--title-large-size); line-height: var(--title-large-line); }
+    .mk-modal-x { margin: 0; width: 44px; height: 44px; }
+    .mk-modal > .mk-modal-body { padding: 12px 16px; gap: 12px; }
+    .mk-modal > .mk-modal-foot { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+    .mk-modal-foot .btn { flex: 1; height: 44px; }
 
     .mk-root { padding: 12px; }
     .mk-devs { margin: 12px -12px -12px; }
@@ -251,13 +440,22 @@ LICENSE file in the root directory of this source tree.
     .mk-caret-gap { width: 44px; margin-left: -8px; }
     .mk-meter { --mk-w: 112px; height: 24px; }
 
-    /* настройки узла: поля и кнопки на всю ширину */
-    .mk-tools { grid-template-columns: minmax(0, 1fr); margin: 8px 0 4px; }
+    /* настройки в модалке: поля и кнопки на всю ширину */
     .mk-setting { flex-direction: column; align-items: stretch; gap: 8px; }
     .mk-setting-ctl { width: 100%; }
     .mk-setting-ctl .btn { flex: 1; height: 44px; }
+    /* кнопка в обёртке подсказки не видит flex: 1 — растягиваем её, как соседние
+       (селектор с .mk-box перебивает width: auto выше) */
+    .mk-box .mk-setting-ctl .tip-wrap { width: 100%; }
+    .mk-setting-ctl .tip-wrap .btn { width: 100%; }
     .mk-setting-ctl .mk-limit-input { width: 100% !important; flex: 1; height: 44px; }
-    .mk-tools .btn { width: 100%; height: 44px; justify-content: center; }
+    /* срок и трафик: поля и подсказки на всю ширину */
+    .mk-setting-ctl.mk-lim-ctl { max-width: none; align-items: stretch; }
+    .mk-date-input { height: 44px; }
+    .mk-unit { width: 88px; height: 44px; }
+    .mk-lim-hint, .mk-lim-err { text-align: left; }
+    .mk-lim-pair .btn { flex: 1; }
+    .mk-lim-usage { min-width: 96px; }
 }
 
 /* «Серверы для всех» (BulkServersModal) */

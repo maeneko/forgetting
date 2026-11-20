@@ -23,7 +23,7 @@ func TestBulkServers(t *testing.T) {
 		"INSERT INTO master_servers (master_id, server_id) VALUES (1, 1), (2, 1), (2, 2), (3, 2), (4, 1)",
 		"INSERT INTO devices (id, master_id, device_id, pub_key, auth_pub, created_at) VALUES (5, 2, 'd', 'W', 'A', 1)",
 		"INSERT INTO device_peers (device_id, server_id, peer_pub, ip, psk) VALUES (5, 1, 'P1', '10.0.0.2', 'K'), (5, 2, 'P2', '10.0.1.2', 'K')",
-		"INSERT INTO api_keys (id, label, key_hash, prefix, created_at) VALUES (1, 'Бот', 'h1', 'p1', 1), (2, 'Всё', 'h2', 'p2', 1)",
+		"INSERT INTO api_keys (id, label, key_hash, prefix, created_at, all_servers) VALUES (1, 'Бот', 'h1', 'p1', 1, 0), (2, 'Всё', 'h2', 'p2', 1, 0)",
 		"INSERT INTO api_key_servers (key_id, server_id) VALUES (1, 1), (1, 2), (2, 1), (2, 2), (2, 3)",
 	} {
 		if _, err := db.Exec(q); err != nil {

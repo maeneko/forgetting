@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,44 @@ func limitOK(v any) (int64, bool) {
 	return int64(f), ok && f == float64(int64(f)) && f >= 1 && f <= 100
 }
 
+// unixOK — срок ключа: целое unix-время ≥ 0. null/отсутствие — без срока (см. bodyTime).
+func unixOK(v any) (int64, bool) {
+	f, ok := v.(float64)
+	return int64(f), ok && isSafeInt(f) && f >= 0
+}
+
+// bytesOK — лимит трафика: целое ≥ 0 байт. null/отсутствие — без лимита (см. bodyBytes).
+func bytesOK(v any) (int64, bool) {
+	f, ok := v.(float64)
+	return int64(f), ok && isSafeInt(f) && f >= 0
+}
+
+// bodyTime/bodyBytes — необязательное поле из тела: nil — ограничение снимается (NULL),
+// числа проверяются валидатором рядом с limitOK.
+func bodyTime(b jsjson.Object, key string) (any, error) {
+	v, has := b.Get(key)
+	if !has || v == nil {
+		return nil, nil
+	}
+	n, ok := unixOK(v)
+	if !ok {
+		return nil, fail(400, key+": unix-время, целое ≥ 0 или null")
+	}
+	return n, nil
+}
+
+func bodyBytes(b jsjson.Object, key string) (any, error) {
+	v, has := b.Get(key)
+	if !has || v == nil {
+		return nil, nil
+	}
+	n, ok := bytesOK(v)
+	if !ok {
+		return nil, fail(400, key+": байты, целое ≥ 0 или null")
+	}
+	return n, nil
+}
+
 func (s *Sub) visible(masterID int64, scope []int) bool {
 	if scope == nil {
 		return true
@@ -159,10 +198,15 @@ func (s *Sub) parseServers(v any, scope []int) ([]int, error) {
 }
 
 // masterOut — deleting: ключ удалён, но эти серверы ещё не подтвердили, что сняли его пиров.
+// Ограничения отдаются именами панели (camelCase): срок, лимит, учтённый трафик и блокировка.
 func (s *Sub) masterOut(m *masterRow) jsjson.Object {
 	srv := intsJSON(s.serverIDsOf(s.a.db, m.ID))
+	b := m.blockNow(now())
 	o := jsjson.Object{{Key: "id", Val: m.ID}, {Key: "uuid", Val: m.UUID}, {Key: "label", Val: m.Label}, {Key: "device_limit", Val: m.DeviceLimit},
-		{Key: "devices", Val: m.Devices}, {Key: "servers", Val: srv}, {Key: "created_at", Val: m.CreatedAt}}
+		{Key: "devices", Val: m.Devices}, {Key: "servers", Val: srv}, {Key: "created_at", Val: m.CreatedAt},
+		{Key: "expiresAt", Val: nullInt(m.ExpiresAt)}, {Key: "trafficLimitBytes", Val: nullInt(m.TrafficLimit)},
+		{Key: "usedBytes", Val: m.usedTotal()}, {Key: "remainingBytes", Val: m.remaining()},
+		{Key: "blocked", Val: b != ""}, {Key: "blockReason", Val: orNil(b)}, {Key: "expired", Val: m.expired(now())}}
 	if m.RevokedAt.Valid {
 		o = append(o, jsjson.KV{Key: "deleting", Val: srv})
 	}
@@ -207,6 +251,14 @@ func (s *Sub) createMaster(body any, scope []int) (jsjson.Object, error) {
 			return nil, fail(400, "Лимит устройств: от 1 до 100")
 		}
 	}
+	expires, err := bodyTime(b, "expires_at")
+	if err != nil {
+		return nil, err
+	}
+	traffic, err := bodyBytes(b, "traffic_limit_bytes")
+	if err != nil {
+		return nil, err
+	}
 	wanted, hasWanted := b.Get("servers")
 	src := wanted
 	if src == nil {
@@ -237,8 +289,8 @@ func (s *Sub) createMaster(body any, scope []int) (jsjson.Object, error) {
 	rand.Read(secret)
 	var id int64
 	err = s.a.tx(func(tx *sql.Tx) error {
-		r, err := tx.Exec("INSERT INTO master_keys (uuid, label, secret, device_limit, server_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			uuid.NewString(), label, secret, limit, ids[0], now())
+		r, err := tx.Exec("INSERT INTO master_keys (uuid, label, secret, device_limit, server_id, created_at, expires_at, traffic_limit_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			uuid.NewString(), label, secret, limit, ids[0], now(), expires, traffic)
 		if err != nil {
 			return err
 		}
@@ -274,6 +326,29 @@ func (s *Sub) updateMaster(m *masterRow, body any, scope []int) (jsjson.Object, 
 	if !ok {
 		return nil, fail(400, "Лимит устройств: от 1 до 100")
 	}
+	// Срок и лимит трафика: null очищает ограничение, отсутствие поля — не трогает.
+	expires, err := bodyTime(b, "expires_at")
+	if err != nil {
+		return nil, err
+	}
+	traffic, err := bodyBytes(b, "traffic_limit_bytes")
+	if err != nil {
+		return nil, err
+	}
+	_, hasExpires := b.Get("expires_at")
+	_, hasTraffic := b.Get("traffic_limit_bytes")
+	// unblock — снять ручную блокировку может только панель (у внешнего API для этого нет
+	// причины: он не должен возвращать доступ в обход ограничений владельца).
+	unblock := false
+	if scope == nil {
+		if v, has := b.Get("unblock"); has {
+			uv, isBool := v.(bool)
+			if !isBool {
+				return nil, fail(400, "unblock: true или false")
+			}
+			unblock = uv
+		}
+	}
 
 	ids := s.serverIDsOf(s.a.db, m.ID)
 	var affected []int
@@ -297,9 +372,14 @@ func (s *Sub) updateMaster(m *masterRow, body any, scope []int) (jsjson.Object, 
 			return nil, err
 		}
 		affected = append(append(affected, added...), removed...)
-		ids = next
 	}
 	s.a.db.Exec("UPDATE master_keys SET label = ?, device_limit = ? WHERE id = ?", nl, nd, m.ID)
+	if hasExpires {
+		s.a.db.Exec("UPDATE master_keys SET expires_at = ? WHERE id = ?", expires, m.ID)
+	}
+	if hasTraffic {
+		s.a.db.Exec("UPDATE master_keys SET traffic_limit_bytes = ? WHERE id = ?", traffic, m.ID)
+	}
 	// Лимит стал меньше, чем устройств: лишние отвязываются, начиная с подключившихся последними.
 	unbound := []any{}
 	devices := s.devicesOf(s.a.db, m.ID)
@@ -317,8 +397,118 @@ func (s *Sub) updateMaster(m *masterRow, body any, scope []int) (jsjson.Object, 
 		}
 	}
 	s.reconcileAll(affected)
-	return jsjson.Object{{Key: "id", Val: m.ID}, {Key: "label", Val: nl}, {Key: "device_limit", Val: nd},
-		{Key: "servers", Val: intsJSON(ids)}, {Key: "unbound", Val: unbound}}, nil
+	// Ручное снятие блокировки — здесь же; иначе срок/лимит могли поднять, и расчётная
+	// блокировка должна сняться сразу, не дожидаясь тика ограничений.
+	switch {
+	case unblock:
+		s.clearBlock(m.ID)
+	case hasExpires || hasTraffic:
+		s.relaxBlock(m.ID)
+	}
+	return merge(s.masterOutByID(m.ID), jsjson.Object{{Key: "unbound", Val: unbound},
+		{Key: "servers", Val: intsJSON(s.serverIDsOf(s.a.db, m.ID))}}), nil
+}
+
+// clearBlock — снять блокировку и вернуть пиров: они были сняты с серверов, а device_peers
+// помнит последний известный ключ, поэтому links обнуляются — reconcile поставит пиров заново.
+func (s *Sub) clearBlock(masterID int64) {
+	var blocked int
+	s.a.db.QueryRow("SELECT COUNT(*) FROM master_keys WHERE id = ? AND blocked_reason IS NOT NULL", masterID).Scan(&blocked)
+	s.a.db.Exec("UPDATE master_keys SET blocked_at = NULL, blocked_reason = NULL WHERE id = ?", masterID)
+	if blocked == 0 {
+		return // блокировки не было — пиров не трогаем
+	}
+	s.a.db.Exec(`UPDATE device_peers SET peer_pub = NULL, ip = NULL, psk = NULL, psk_pending = 0
+		WHERE device_id IN (SELECT id FROM devices WHERE master_id = ?)`, masterID)
+	s.reconcileAll(s.serverIDsOf(s.a.db, masterID))
+}
+
+// relaxBlock — расчётную блокировку снимаем, если причина исчезла (срок продлили, лимит подняли
+// или сняли). manual и api не трогаем: их снимает только панель/внешняя система.
+func (s *Sub) relaxBlock(masterID int64) {
+	m := s.masterByID(s.a.db, masterID)
+	if m == nil || !m.BlockedReason.Valid || m.BlockedReason.String == blockManual || m.BlockedReason.String == blockAPI {
+		return
+	}
+	if !m.expired(now()) && (!m.TrafficLimit.Valid || m.usedTotal() < m.TrafficLimit.Int64) {
+		s.clearBlock(masterID)
+	}
+}
+
+// blockMaster — блокировка из панели (по умолчанию manual) или внешней системой (api): пиры
+// снимутся ближайшим сведением, ключ и устройства остаются в реестре (GET покажет blocked: true).
+func (s *Sub) blockMaster(m *masterRow, reason string) (jsjson.Object, error) {
+	switch reason {
+	case "":
+		reason = blockManual
+	case blockManual, blockExpired, blockTraffic, blockAPI:
+	default:
+		return nil, fail(400, "Причина: expired, traffic, manual или api")
+	}
+	if _, err := s.a.db.Exec("UPDATE master_keys SET blocked_at = ?, blocked_reason = ? WHERE id = ?", now(), reason, m.ID); err != nil {
+		return nil, err
+	}
+	s.reconcileAll(s.serverIDsOf(s.a.db, m.ID))
+	return s.masterOutByID(m.ID), nil
+}
+
+// apiBlockReason — причина блокировки из тела внешнего API: только manual или api, по умолчанию
+// api (блокировка «по API»). expired/traffic ставит расчётный тик, а не клиент.
+func apiBlockReason(body any) (string, error) {
+	o, _ := body.(jsjson.Object)
+	v, has := o.Get("reason")
+	if !has || v == nil {
+		return blockAPI, nil
+	}
+	r, isStr := v.(string)
+	if !isStr || (r != blockManual && r != blockAPI) {
+		return "", fail(400, "reason: manual или api")
+	}
+	return r, nil
+}
+
+// unblockMaster — ручное снятие: чистится только блокировка, срок и лимит остаются как были.
+func (s *Sub) unblockMaster(m *masterRow) jsjson.Object {
+	s.clearBlock(m.ID)
+	return s.masterOutByID(m.ID)
+}
+
+// ── Сброс счётчика трафика ─────────────────────────────────────────────────
+
+// usageBaseKey — ключ поправки в sub_meta: показания awg-ctrl на момент сброса расхода.
+func usageBaseKey(masterID int64) string {
+	return "master_usage_base:" + strconv.FormatInt(masterID, 10)
+}
+
+// usageBase — сколько байт тик вычитает из показаний awg-ctrl (0/0 — сбросов не было).
+func (s *Sub) usageBase(masterID int64) (rx, tx int64) {
+	o, _ := s.metaGet(usageBaseKey(masterID)).(jsjson.Object)
+	return int64(numOr(o.Get2("rx"), 0)), int64(numOr(o.Get2("tx"), 0))
+}
+
+func (s *Sub) setUsageBase(masterID, rx, tx int64) {
+	if rx == 0 && tx == 0 {
+		s.a.db.Exec("DELETE FROM sub_meta WHERE key = ?", usageBaseKey(masterID))
+		return
+	}
+	s.metaSet(usageBaseKey(masterID), jsjson.Object{{Key: "rx", Val: rx}, {Key: "tx", Val: tx}})
+}
+
+// resetMasterUsage — учтённый трафик ключа снова с нуля: продление подписки во внешней
+// системе учёта или ручной сброс в панели. Прежние used_rx/used_tx не теряются, а становятся
+// поправкой (usageBase): тик сравнивает показания awg-ctrl с накопленным итогом и без неё
+// вернул бы старый трафик на первом же замере. Блокировку по трафику снимаем — счётчик снова
+// под лимитом, ключ получает пиров обратно; expired и manual не трогаем (их снимает срок или
+// оператор), как и в ручном unblock.
+func (s *Sub) resetMasterUsage(m *masterRow) (jsjson.Object, error) {
+	if _, err := s.a.db.Exec("UPDATE master_keys SET used_rx = 0, used_tx = 0 WHERE id = ?", m.ID); err != nil {
+		return nil, err
+	}
+	s.setUsageBase(m.ID, m.UsedRx, m.UsedTx)
+	if m.BlockedReason.Valid && m.BlockedReason.String == blockTraffic {
+		s.clearBlock(m.ID)
+	}
+	return jsjson.Object{{Key: "success", Val: true}, {Key: "id", Val: m.ID}, {Key: "used_bytes", Val: int64(0)}}, nil
 }
 
 // moveServersTx — ключ получает серверы added и теряет removed: пиры его устройств на снятых
@@ -619,7 +809,7 @@ func (s *Sub) peersOf(id int) ([]any, error) {
 	s.peerCalls[id] = c
 	s.peersMu.Unlock()
 
-	r, err := s.a.nodes.CtrlFor(id)("GET", "/api/peers", nil)
+	r, err := s.ctrl(id)("GET", "/api/peers", nil)
 	switch {
 	case err != nil:
 		c.err = err
@@ -708,6 +898,123 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, []int) {
 		})
 	}
 	return out, unreachable
+}
+
+// masterUsage — трафик ключа по всем его серверам. rx/tx берутся у пира, который сейчас стоит
+// на сервере (device_peers.peer_pub), и складываются по устройству этого ключа, а не по ключу
+// пира: peer_pub меняется при перевыпуске и смене PSK, привязка к devices.id это переживает.
+// complete=false — хотя бы один сервер не в сети или не ответил: по таким данным квоту не
+// решаем (иначе обрыв связи выглядел бы как нулевой трафик).
+func (s *Sub) masterUsage(m *masterRow) (rx, tx int64, complete bool) {
+	servers := s.serverIDsOf(s.a.db, m.ID)
+	if len(servers) == 0 {
+		return 0, 0, false
+	}
+	links := map[int][]string{} // сервер → ключи, которые там стоят (по device_peers)
+	rows, err := s.a.db.Query(`SELECT l.server_id, l.peer_pub FROM device_peers l JOIN devices d ON d.id = l.device_id
+        WHERE d.master_id = ? AND l.peer_pub IS NOT NULL`, m.ID)
+	if err != nil {
+		return 0, 0, false
+	}
+	for rows.Next() {
+		var sid int
+		var pub string
+		if rows.Scan(&sid, &pub) == nil {
+			links[sid] = append(links[sid], pub)
+		}
+	}
+	rows.Close()
+
+	complete = true
+	for _, id := range servers {
+		if !s.a.nodes.IsOnline(id) {
+			complete = false
+			continue
+		}
+		peers, err := s.peersOf(id)
+		if err != nil {
+			complete = false
+			continue
+		}
+		stat := map[string][2]float64{}
+		for _, p := range peers {
+			pub, ok := field(p, "pub_key").(string)
+			if !ok {
+				continue
+			}
+			stat[pub] = [2]float64{numOr(field(p, "rx"), 0), numOr(field(p, "tx"), 0)}
+		}
+		for _, pub := range links[id] {
+			if st, ok := stat[pub]; ok {
+				rx += int64(st[0])
+				tx += int64(st[1])
+			}
+		}
+	}
+	return rx, tx, complete
+}
+
+// enforceMasters — тик ограничений мастер-ключей: просрочка и квота трафика. Просрочка —
+// по часам и применяется всегда; квота — только по полным данным (сервер не в сети → решение
+// откладывается этим тиком). Учтённый трафик только растёт: счётчики awg-ctrl обнуляются при
+// пересоздании пира, а заблокированный ключ пиров не имеет — иначе блокировка снималась бы
+// сама собой на первом же тике. Сброс расхода (resetMasterUsage) сдвигает начало отсчёта:
+// показания awg-ctrl уменьшаются на usageBase, поэтому прежний трафик не возвращается.
+// Ручную блокировку тик не трогает.
+func (s *Sub) enforceMasters() {
+	rows, err := s.a.db.Query("SELECT " + masterCols + " FROM master_keys m WHERE m.revoked_at IS NULL ORDER BY id")
+	if err != nil {
+		warnf("sub: ограничения ключей: %v", err)
+		return
+	}
+	var list []*masterRow
+	for rows.Next() {
+		if m := scanMaster(rows, false); m != nil {
+			list = append(list, m)
+		}
+	}
+	rows.Close()
+	t := now()
+	for _, m := range list {
+		rx, tx, complete := s.masterUsage(m)
+		if complete {
+			// Счётчики awg-ctrl уменьшились (перезапуск интерфейса, пересоздание пира) —
+			// поправка устарела: считаем заново с текущих показаний, как usage.accrue.
+			brx, btx := s.usageBase(m.ID)
+			if rx < brx || tx < btx {
+				brx, btx = rx, tx
+				s.setUsageBase(m.ID, brx, btx)
+			}
+			rx, tx = rx-brx, tx-btx
+		}
+		if complete && rx+tx > m.usedTotal() {
+			m.UsedRx, m.UsedTx = rx, tx
+			s.a.db.Exec("UPDATE master_keys SET used_rx = ?, used_tx = ? WHERE id = ?", rx, tx, m.ID)
+		}
+		if m.BlockedReason.Valid && (m.BlockedReason.String == blockManual || m.BlockedReason.String == blockAPI) {
+			continue
+		}
+		want := ""
+		if m.expired(t) {
+			want = blockExpired
+		} else if m.TrafficLimit.Valid && complete && m.usedTotal() >= m.TrafficLimit.Int64 {
+			want = blockTraffic
+		}
+		cur := ""
+		if m.BlockedReason.Valid {
+			cur = m.BlockedReason.String
+		}
+		if want == cur {
+			continue
+		}
+		if want == "" {
+			s.a.db.Exec("UPDATE master_keys SET blocked_at = NULL, blocked_reason = NULL WHERE id = ?", m.ID)
+			logf("sub: мастер-ключ «%s» разблокирован: ограничение снято", m.Label)
+			continue
+		}
+		s.a.db.Exec("UPDATE master_keys SET blocked_at = ?, blocked_reason = ? WHERE id = ?", t, want, m.ID)
+		logf("sub: мастер-ключ «%s» заблокирован: %s", m.Label, want)
+	}
 }
 
 func (s *Sub) deleteDevice(d *deviceRow) jsjson.Object {
@@ -827,6 +1134,18 @@ func (s *Sub) masterKeysRouter() *Router {
 		out, err := s.createMaster(c.Body, nil)
 		return 201, out, err
 	}))
+	// Сброс счётчика трафика — до /:id: подпуть не должен зависеть от порядка объявления
+	// (роутер сверяет пути целиком, но держим это правило, как в остальных местах репозитория).
+	rt.Post("/:id/usage/reset", aw(func(c *Ctx) (int, any, error) {
+		m, err := master(c)
+		if err != nil {
+			return 0, nil, err
+		}
+		if _, err := s.resetMasterUsage(m); err != nil {
+			return 0, nil, err
+		}
+		return 200, s.masterOutByID(m.ID), nil // как block/unblock: панель получает ключ целиком
+	}))
 	rt.Patch("/:id", aw(func(c *Ctx) (int, any, error) {
 		m, err := master(c)
 		if err != nil {
@@ -850,6 +1169,23 @@ func (s *Sub) masterKeysRouter() *Router {
 		}
 		s.rekeyMaster(m)
 		return 200, idObj(m.ID), nil
+	}))
+	// Ручная блокировка/разблокировка: пиры снимаются и возвращаются сведением, ключ остаётся.
+	rt.Post("/:id/block", aw(func(c *Ctx) (int, any, error) {
+		m, err := master(c)
+		if err != nil {
+			return 0, nil, err
+		}
+		reason, _ := c.Obj().Get2("reason").(string)
+		out, err := s.blockMaster(m, reason)
+		return 200, out, err
+	}))
+	rt.Post("/:id/unblock", aw(func(c *Ctx) (int, any, error) {
+		m, err := master(c)
+		if err != nil {
+			return 0, nil, err
+		}
+		return 200, s.unblockMaster(m), nil
 	}))
 	rt.Delete("/:id", aw(func(c *Ctx) (int, any, error) {
 		m, err := master(c)
@@ -949,6 +1285,38 @@ func (s *Sub) apiRouter(scopeOf func(c *Ctx) []int) *Router {
 		}
 		res, err := withLink(c, m, out)
 		return 201, res, err
+	}))
+	// Сброс счётчика трафика: биллинг обнуляет расход при продлении подписки. Ответ — без
+	// остальных полей ключа: внешней системе нужен только факт и новый счётчик. Объявлен до
+	// /:id — подпуть не должен зависеть от порядка маршрутов.
+	rt.Post("/:id/usage/reset", aw(func(c *Ctx) (int, any, error) {
+		m, err := master(c)
+		if err != nil {
+			return 0, nil, err
+		}
+		out, err := s.resetMasterUsage(m)
+		return 200, out, err
+	}))
+	// Блокировка/разблокировка — до /:id, как сброс счётчика. Ответ — тот же masterOut, что у
+	// PATCH: клиент сразу видит blocked/blockReason. Причина по умолчанию — api.
+	rt.Post("/:id/block", aw(func(c *Ctx) (int, any, error) {
+		m, err := master(c)
+		if err != nil {
+			return 0, nil, err
+		}
+		reason, err := apiBlockReason(c.Body)
+		if err != nil {
+			return 0, nil, err
+		}
+		out, err := s.blockMaster(m, reason)
+		return 200, out, err
+	}))
+	rt.Post("/:id/unblock", aw(func(c *Ctx) (int, any, error) {
+		m, err := master(c)
+		if err != nil {
+			return 0, nil, err
+		}
+		return 200, s.unblockMaster(m), nil
 	}))
 	rt.Get("/:id", aw(func(c *Ctx) (int, any, error) {
 		m, err := master(c)

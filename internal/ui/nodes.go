@@ -113,14 +113,58 @@ type pending struct {
 
 type nodeConn struct {
 	ws      *websocket.Conn
-	mu      sync.Mutex // seq, pending, alive
+	mu      sync.Mutex // seq, pending, alive, reason
 	seq     int64
 	alive   bool
 	pending map[int64]*pending
 	closed  bool
+	// reason — первая причина закрытия: её пишет тот, кто закрывает (пинг, замена, shutdown),
+	// иначе цикл чтения ставит «read error». reported — строка о закрытии уже записана.
+	reason   string
+	reported bool
+
+	name        string // имя ноды на момент подключения — для журнала и без запроса в БД
+	connectedAt time.Time
+	lastPong    time.Time
+
 	// Запрос метрик от ноды (Prometheus на ней): идёт ли сейчас и когда начат последний.
 	metricsBusy bool
 	metricsAt   time.Time
+}
+
+// fail — запомнить причину закрытия (первая важнее: её ставит инициатор).
+func (c *nodeConn) fail(reason string) {
+	c.mu.Lock()
+	if c.reason == "" {
+		c.reason = reason
+	}
+	c.mu.Unlock()
+}
+
+func (c *nodeConn) failure() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reason
+}
+
+// takeClose — true ровно один раз: кто первый, тот и пишет строку о закрытии.
+func (c *nodeConn) takeClose() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.reported {
+		return false
+	}
+	c.reported = true
+	return true
+}
+
+// nodeState — что помнит панель о ноде между соединениями: время текущего подключения,
+// когда оно оборвалось и почему. Живёт в памяти, как и conns: после перезапуска хаба
+// last_error пуст, а last_seen берётся из nodes.last_seen.
+type nodeState struct {
+	connectedAt time.Time
+	lastSeen    time.Time
+	lastError   string
 }
 
 type deleteVeto struct {
@@ -137,12 +181,18 @@ type Nodes struct {
 	mu       sync.Mutex
 	conns    map[int64]*nodeConn
 	health   map[int64]*health
+	state    map[int64]*nodeState
 	failHits map[string]*rateEntry
 
-	hmu           sync.Mutex
-	onlineHandler []func(id int)
-	beforeDelete  []func(id int, force bool) *deleteVeto
-	afterDelete   []func(id int)
+	closed    chan struct{}
+	closeOnce sync.Once
+	hubSrv    *http.Server // текущий слушатель (под mu) — Stop закрывает и его
+
+	hmu            sync.Mutex
+	onlineHandler  []func(id int)
+	offlineHandler []func(id int, reason string)
+	beforeDelete   []func(id int, force bool) *deleteVeto
+	afterDelete    []func(id int)
 }
 
 var offline = &CtrlResp{502, errObj("Сервер недоступен")}
@@ -151,7 +201,8 @@ func newNodes(a *App) (*Nodes, error) {
 	n := &Nodes{
 		a: a, port: envNum("NODE_PORT"),
 		local: strings.ToLower(envOr("LOCAL_NODE", "on")) != "off",
-		conns: map[int64]*nodeConn{}, health: map[int64]*health{}, failHits: map[string]*rateEntry{},
+		conns: map[int64]*nodeConn{}, health: map[int64]*health{}, state: map[int64]*nodeState{},
+		failHits: map[string]*rateEntry{}, closed: make(chan struct{}),
 	}
 	file := func(env, name string) string {
 		if v := os.Getenv(env); v != "" {
@@ -162,36 +213,14 @@ func newNodes(a *App) (*Nodes, error) {
 	// TLS: самоподписанный сертификат, pin которого зашит в join-строки. Имя в нём случайное:
 	// одинаковое у всех серверов было бы сигнатурой для сканера (pin — по ключу, не по имени). Живёт столько же,
 	// сколько core: пересоздать = переподключить все ноды.
+	//
+	// Новая идентичность создаётся только когда нет ОБОИХ файлов, и об этом громко пишется в
+	// журнал: молчаливая замена ломает pin у всех нод, и они навсегда остаются «нет связи»
+	// (TLS-рукопожатие рвётся до первого кадра, хаб при этом не пишет ничего).
 	if n.port != 0 {
 		keyF, crtF := file("NODE_TLS_KEY_FILE", "node_tls.key"), file("NODE_TLS_CERT_FILE", "node_tls.crt")
-		if err := func() error {
-			if !exists(keyF) && !exists(crtF) {
-				cmd := exec.Command("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
-					"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN="+randomCN())
-				if err := cmd.Run(); err != nil {
-					return err
-				}
-				os.Chmod(keyF, 0o600)
-				os.Chmod(crtF, 0o600)
-				logf("nodes: создан самоподписанный сертификат %s", crtF)
-			}
-			crt, err := os.ReadFile(crtF)
-			if err != nil {
-				return err
-			}
-			cert, err := tls.LoadX509KeyPair(crtF, keyF)
-			if err != nil {
-				return err
-			}
-			pin, err := spkiPin(crt)
-			if err != nil {
-				return err
-			}
-			n.tls = &tls.Config{Certificates: []tls.Certificate{cert}}
-			n.pin = pin
-			return nil
-		}(); err != nil {
-			warnf("nodes: сертификат хаба недоступен (%s) — приём нод отключён", crtF)
+		if err := n.loadHubTLS(keyF, crtF); err != nil {
+			hubWarnf("nodes: идентичность хаба не загружена: %v — приём нод отключён, ноды останутся offline", err)
 			n.tls, n.pin = nil, nil
 		}
 	}
@@ -246,6 +275,52 @@ func newNodes(a *App) (*Nodes, error) {
 func exists(f string) bool {
 	_, err := os.Stat(f)
 	return err == nil
+}
+
+// журнал хаба: переменные, а не logf напрямую, — тесты проверяют текст сообщений.
+var (
+	hubLogf  = logf
+	hubWarnf = warnf
+)
+
+// loadHubTLS — идентичность хаба из node_tls.*. Ничего не перезаписывает: новые файлы
+// создаются, только когда нет обоих. Один файл без второго — ошибка: достроить пару нельзя,
+// не сломав pin у уже подключённых нод.
+func (n *Nodes) loadHubTLS(keyF, crtF string) error {
+	keyOK, crtOK := exists(keyF), exists(crtF)
+	switch {
+	case !keyOK && !crtOK:
+		hubWarnf("nodes: сертификат хаба отсутствует — создаётся новая идентичность, все ноды нужно переприсоединить")
+		cmd := exec.Command("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+			"-keyout", keyF, "-out", crtF, "-days", "3650", "-subj", "/CN="+randomCN())
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("openssl не создал %s: %w", crtF, err)
+		}
+		os.Chmod(keyF, 0o600)
+		os.Chmod(crtF, 0o600)
+		hubLogf("nodes: создан самоподписанный сертификат %s", crtF)
+	case !keyOK || !crtOK:
+		missing := crtF
+		if !keyOK {
+			missing = keyF
+		}
+		return fmt.Errorf("есть только один файл идентичности, нет %s (второй не пересоздаю: pin у нод сломается)", missing)
+	}
+	crt, err := os.ReadFile(crtF)
+	if err != nil {
+		return err
+	}
+	cert, err := tls.LoadX509KeyPair(crtF, keyF)
+	if err != nil {
+		return fmt.Errorf("пара %s / %s не читается: %w", crtF, keyF, err)
+	}
+	pin, err := spkiPin(crt)
+	if err != nil {
+		return err
+	}
+	n.tls = &tls.Config{Certificates: []tls.Certificate{cert}}
+	n.pin = pin
+	return nil
 }
 
 func hasColumn(db queryer, table, col string) bool {
@@ -389,6 +464,14 @@ func (n *Nodes) OnOnline(cb func(id int)) {
 	n.hmu.Unlock()
 }
 
+// OnOffline — подписчики на «связь с сервером потеряна»; reason — та же строка, что ушла в
+// журнал и в last_error (read error, ping timeout, …). Заменённое соединение сюда не попадает.
+func (n *Nodes) OnOffline(cb func(id int, reason string)) {
+	n.hmu.Lock()
+	n.offlineHandler = append(n.offlineHandler, cb)
+	n.hmu.Unlock()
+}
+
 // BeforeDelete — проверка перед удалением сервера: может запретить (forcible — запрет
 // снимается подтверждением оператора). AfterDelete — уборка ссылок на уже удалённый сервер.
 func (n *Nodes) BeforeDelete(cb func(id int, force bool) *deleteVeto) {
@@ -411,6 +494,18 @@ func (n *Nodes) fireOnline(id int) {
 		func() {
 			defer func() { recover() }() // подписчик сам разберётся
 			cb(id)
+		}()
+	}
+}
+
+func (n *Nodes) fireOffline(id int, reason string) {
+	n.hmu.Lock()
+	hs := append([]func(int, string){}, n.offlineHandler...)
+	n.hmu.Unlock()
+	for _, cb := range hs {
+		func() {
+			defer func() { recover() }() // подписчик сам разберётся
+			cb(id, reason)
 		}()
 	}
 }
@@ -457,8 +552,20 @@ func (n *Nodes) refreshHealth(id int64) {
 			Server: server, IP: or(field(d, "ip"), ""), Gen: or(field(d, "gen"), "2"), Peers: or(field(d, "awg", "peers"), 0.0),
 			AwgUp: field(d, "awg", "status") == "ok", Module: or(field(d, "awg", "module"), ""), Tools: or(field(d, "awg", "tools"), ""),
 		}
+		if st := n.state[id]; st != nil {
+			st.lastError = ""
+		}
 	} else {
 		delete(n.health, id)
+		// У локального сервера нет соединения хаба: «нет связи» объясняется только здесь.
+		if id == 0 && n.local {
+			st := n.state[id]
+			if st == nil {
+				st = &nodeState{}
+				n.state[id] = st
+			}
+			st.lastError = "локальный awg-ctrl не отвечает"
+		}
 	}
 }
 
@@ -484,8 +591,8 @@ func (n *Nodes) blocked(ip string) bool {
 }
 
 // dropConn — все ждущие запросы получают «недоступен»; из реестра соединений — только если
-// там всё ещё это соединение.
-func (n *Nodes) dropConn(id int64, c *nodeConn) {
+// там всё ещё это соединение. true — это соединение было текущим (нода стала offline).
+func (n *Nodes) dropConn(id int64, c *nodeConn) bool {
 	c.mu.Lock()
 	c.closed = true
 	ps := c.pending
@@ -497,11 +604,67 @@ func (n *Nodes) dropConn(id int64, c *nodeConn) {
 		}
 	}
 	n.mu.Lock()
-	if n.conns[id] == c {
+	current := n.conns[id] == c
+	if current {
 		delete(n.conns, id)
 		delete(n.health, id)
 	}
 	n.mu.Unlock()
+	return current
+}
+
+// noteError — запомнить причину «нет связи» для ноды, которая сейчас не подключена
+// (отказ до WebSocket, устаревшая версия). У подключённой ноды last_error всегда пуст.
+func (n *Nodes) noteError(id int64, reason string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.conns[id] != nil {
+		return
+	}
+	st := n.state[id]
+	if st == nil {
+		st = &nodeState{}
+		n.state[id] = st
+	}
+	st.lastError = reason
+}
+
+// closeConn — единственная точка закрытия: снять соединение, один раз записать строку в
+// журнал, сохранить причину для GET /ui/nodes и позвать OnOffline (только если нода правда
+// осталась без связи: заменённое соединение offline не делает).
+func (n *Nodes) closeConn(id int64, c *nodeConn, reason string) {
+	c.fail(reason)
+	current := n.dropConn(id, c)
+	if !c.takeClose() {
+		return
+	}
+	reason = c.failure()
+	if reason == "" {
+		reason = "read error"
+	}
+	on := time.Duration(0)
+	if !c.connectedAt.IsZero() {
+		on = time.Since(c.connectedAt).Round(time.Second)
+	}
+	name := c.name
+	if name == "" {
+		if row := n.row(id); row != nil {
+			name = row.Name
+		}
+	}
+	hubLogf("nodes: «%s» (#%d) отключена: %s (на связи %s)", name, id, reason, on)
+	if !current {
+		return
+	}
+	n.mu.Lock()
+	st := n.state[id]
+	if st == nil {
+		st = &nodeState{}
+		n.state[id] = st
+	}
+	st.lastError, st.lastSeen = reason, time.Now()
+	n.mu.Unlock()
+	go n.fireOffline(int(id), reason)
 }
 
 // MinNodeVersion — самая старая версия ноды, с которой работает панель (в UI — MIN_NODE_VERSION).
@@ -550,6 +713,16 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 	pre, present := n.preauth(r)
 	if present && pre == nil {
 		n.failed(ip)
+		// Нода с заголовками, но без верной подписи: ключ не тот, часы разошлись больше чем
+		// на сутки, ссылка просрочена. Раньше это был молчаливый 404 — и нода вечно «нет связи».
+		if id, err := strconv.ParseInt(r.Header.Get("X-Node-Id"), 10, 64); err == nil && id >= 0 {
+			hubWarnf("nodes: нода #%d не принята до WebSocket (ключ, подпись или часы) — 404", id)
+			if n.row(id) != nil {
+				n.noteError(id, "preauth 404")
+			}
+		} else {
+			hubWarnf("nodes: подключение с %s не принято до WebSocket (подпись без номера ноды) — 404", ip)
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -570,17 +743,23 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 	var nodeID int64
 	authTimer := time.AfterFunc(authTimeout, func() { closeWS(ws, 4001, "auth_timeout") })
 	defer authTimer.Stop()
-	deny := func() { n.failed(ip); closeWS(ws, 4003, "unauthorized") }
+	// deny — отказ до ready: соединения в реестре ещё нет, поэтому причина только в журнале.
+	deny := func(why string) {
+		n.failed(ip)
+		hubWarnf("nodes: %s — соединение отклонено", why)
+		closeWS(ws, 4003, "unauthorized")
+	}
 
 	authenticate := func(m jsjson.Object) {
 		sig, sigOK := m.Get2("sig").(string)
 		if m.Get2("t") != "auth" || !isInt(m.Get2("node_id")) || !sigOK {
-			deny()
+			deny("кадр auth не разобран")
 			return
 		}
-		row := n.row(int64(m.Get2("node_id").(float64)))
+		id := int64(m.Get2("node_id").(float64))
+		row := n.row(id)
 		if row == nil || pre != nil && pre.ID != row.ID {
-			deny()
+			deny(fmt.Sprintf("нода #%d не найдена или подпись заголовка от другой ноды", id))
 			return
 		}
 		pubB64 := row.Pub.String
@@ -589,14 +768,16 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			secret, _ := field(m, "join", "secret").(string)
 			pub, pOK := field(m, "join", "pub").(string)
 			if !pOK || !joinOK(row, secret) {
-				deny()
+				n.noteError(row.ID, "auth failed: секрет привязки неверен или просрочен")
+				deny(fmt.Sprintf("нода «%s» (#%d): секрет привязки неверен или просрочен", row.Name, row.ID))
 				return
 			}
 			pubB64 = pub
 		}
 		key := fromB64url(pubB64)
 		if len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, authMsg(nonce, row.ID), fromB64url(sig)) {
-			deny()
+			n.noteError(row.ID, "bad signature")
+			deny(fmt.Sprintf("нода «%s» (#%d): подпись неверна (ключ pub или часы)", row.Name, row.ID))
 			return
 		}
 		authTimer.Stop()
@@ -612,7 +793,8 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		// Нода старше MinNodeVersion (или без версии — агент старше 0.3.4) с этой панелью не работает:
 		// соединение не принимаем, для панели она «нет связи», пока её не обновят (агент переподключится сам).
 		if v, _ := version.(string); v == "" || cmpVersion(v, MinNodeVersion) < 0 {
-			logf("nodes: «%s» (#%d) — версия %q, нужна не ниже %s: соединение отклонено", row.Name, row.ID, v, MinNodeVersion)
+			hubLogf("nodes: «%s» (#%d) — версия %q, нужна не ниже %s: соединение отклонено", row.Name, row.ID, v, MinNodeVersion)
+			n.noteError(row.ID, "outdated 4026: нужна версия "+MinNodeVersion)
 			closeWS(ws, closeOutdated, "outdated "+MinNodeVersion)
 			return
 		}
@@ -620,14 +802,20 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 			n.a.db.Exec("UPDATE nodes SET preauth = 1 WHERE id = ?", row.ID)
 		}
 
-		conn = &nodeConn{ws: ws, alive: true, pending: map[int64]*pending{}}
+		conn = &nodeConn{ws: ws, alive: true, pending: map[int64]*pending{}, name: row.Name, connectedAt: time.Now(), lastPong: time.Now()}
 		nodeID = row.ID
 		n.mu.Lock()
 		old := n.conns[row.ID]
 		n.conns[row.ID] = conn
+		if st := n.state[row.ID]; st != nil {
+			st.connectedAt, st.lastError = conn.connectedAt, ""
+		} else {
+			n.state[row.ID] = &nodeState{connectedAt: conn.connectedAt}
+		}
 		n.mu.Unlock()
 		if old != nil {
-			n.dropConn(row.ID, old)
+			old.fail("replaced by new connection")
+			n.closeConn(row.ID, old, "replaced by new connection")
 			closeWS(old.ws, 4000, "replaced")
 		}
 		ready := jsjson.Object{{Key: "t", Val: "ready"}}
@@ -661,6 +849,12 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
+		if conn != nil {
+			// Любой кадр (в том числе keepalive агента) — доказательство, что сокет жив.
+			conn.mu.Lock()
+			conn.alive, conn.lastPong = true, time.Now()
+			conn.mu.Unlock()
+		}
 		v, err := jsjson.Decode(raw)
 		if err != nil {
 			closeWS(ws, 4002, "bad_frame")
@@ -669,6 +863,11 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		m, _ := v.(jsjson.Object)
 		if conn == nil {
 			authenticate(m)
+			continue
+		}
+		if m.Get2("t") == "ping" {
+			// Keepalive агента: ответ нужен, чтобы он тоже видел полуоткрытый сокет.
+			go conn.ws.Write(context.Background(), websocket.MessageText, jsjson.MustMarshal(jsjson.Object{{Key: "t", Val: "pong"}}))
 			continue
 		}
 		if m.Get2("t") == "core_ok" {
@@ -699,8 +898,11 @@ func (n *Nodes) serveWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if conn != nil {
-		n.dropConn(nodeID, conn)
-		logf("nodes: #%d отключена", nodeID)
+		reason := conn.failure()
+		if reason == "" {
+			reason = "read error"
+		}
+		n.closeConn(nodeID, conn, reason)
 	}
 }
 
@@ -733,66 +935,153 @@ func (n *Nodes) Start() {
 		go n.refreshHealth(0)
 		go n.fireOnline(0)
 	}
-	if n.port == 0 || n.tls == nil {
+	if n.port == 0 {
+		hubLogf("nodes: hub выключен: NODE_PORT не задан")
+		return
+	}
+	if n.tls == nil {
+		hubWarnf("nodes: hub выключен: нет идентичности хаба (node_tls.*) — ноды будут offline до её восстановления")
 		return
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/node/v1", n.serveWS)
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", n.port), Handler: mux, TLSConfig: n.tls, ReadHeaderTimeout: 15 * time.Second,
-		ErrorLog: quietLog()}
-	go func() {
-		ln, err := listen(n.port)
-		if err != nil {
-			warnf("nodes: хаб не запущен: %v", err)
-			return
-		}
-		logf("nodes: hub on :%d (wss)", n.port)
-		srv.ServeTLS(ln, "", "")
-	}()
+	go n.serveHub(mux)
+	go n.keepalive()
+	go n.healthLoop()
+}
 
-	go func() {
-		for range time.Tick(pingEvery) {
+// Stop — остановка хаба: слушатель больше не поднимается, соединения нод закрываются с
+// причиной «hub shutdown» (панель показывает их offline, OnOffline получает причину).
+func (n *Nodes) Stop() {
+	n.closeOnce.Do(func() { close(n.closed) })
+	n.mu.Lock()
+	srv := n.hubSrv
+	n.hubSrv = nil
+	conns := map[int64]*nodeConn{}
+	for id, c := range n.conns {
+		conns[id] = c
+	}
+	n.mu.Unlock()
+	if srv != nil {
+		srv.Close()
+	}
+	for id, c := range conns {
+		c.fail("hub shutdown")
+		c.ws.CloseNow()
+		n.closeConn(id, c, "hub shutdown")
+	}
+}
+
+// serveHub держит хаб поднятым: занятый порт или разовый сбой TLS не выключают приём нод до
+// перезапуска панели — повтор с паузой 1 → 2 → … → 30 с. Ошибка ServeTLS больше не теряется.
+func (n *Nodes) serveHub(h http.Handler) {
+	wait := time.Second
+	for {
+		select {
+		case <-n.closed:
+			return
+		default:
+		}
+		started := time.Now()
+		ln, err := listen(n.port)
+		if err == nil {
+			srv := &http.Server{Addr: fmt.Sprintf(":%d", n.port), Handler: h, TLSConfig: n.tls, ReadHeaderTimeout: 15 * time.Second,
+				ErrorLog: quietLog()}
 			n.mu.Lock()
-			conns := map[int64]*nodeConn{}
-			for id, c := range n.conns {
-				conns[id] = c
+			n.hubSrv = srv
+			n.mu.Unlock()
+			hubLogf("nodes: hub on :%d (wss)", n.port)
+			err = srv.ServeTLS(ln, "", "")
+			ln.Close()
+			n.mu.Lock()
+			if n.hubSrv == srv {
+				n.hubSrv = nil
 			}
 			n.mu.Unlock()
-			for id, c := range conns {
-				c.mu.Lock()
-				alive := c.alive
-				c.alive = false
-				c.mu.Unlock()
-				if !alive {
-					c.ws.CloseNow()
-					n.dropConn(id, c)
-					continue
+			if time.Since(started) > 30*time.Second {
+				wait = time.Second // хаб поработал — следующая пауза снова короткая
+			}
+		}
+		select {
+		case <-n.closed:
+			return
+		default:
+		}
+		hubWarnf("nodes: хаб не слушает :%d: %v — повтор через %s", n.port, err, wait)
+		select {
+		case <-n.closed:
+			return
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, 30*time.Second)
+	}
+}
+
+// keepalive — пинг нодам: полная тишина сокета дольше двух периодов — «ping timeout», а не
+// вечное «онлайн». Любой кадр от агента (у него свой keepalive) тоже считается ответом.
+func (n *Nodes) keepalive() {
+	t := time.NewTicker(pingEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-n.closed:
+			return
+		case <-t.C:
+		}
+		n.mu.Lock()
+		conns := map[int64]*nodeConn{}
+		for id, c := range n.conns {
+			conns[id] = c
+		}
+		n.mu.Unlock()
+		for id, c := range conns {
+			c.mu.Lock()
+			alive := c.alive
+			c.alive = false
+			c.mu.Unlock()
+			if !alive {
+				c.fail("ping timeout")
+				c.ws.CloseNow()
+				n.closeConn(id, c, "ping timeout")
+				continue
+			}
+			go func(c *nodeConn) {
+				ctx, cancel := context.WithTimeout(context.Background(), pingEvery)
+				defer cancel()
+				if c.ws.Ping(ctx) == nil {
+					c.mu.Lock()
+					c.alive, c.lastPong = true, time.Now()
+					c.mu.Unlock()
 				}
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), pingEvery)
-					defer cancel()
-					if c.ws.Ping(ctx) == nil {
-						c.mu.Lock()
-						c.alive = true
-						c.mu.Unlock()
-					}
-				}()
-			}
+			}(c)
 		}
-	}()
-	go func() {
-		for range time.Tick(healthEvery) {
-			n.mu.Lock()
-			var ids []int64
-			for id := range n.conns {
-				ids = append(ids, id)
-			}
-			n.mu.Unlock()
-			for _, id := range ids {
-				go n.refreshHealth(id)
-			}
+	}
+}
+
+// healthLoop — сводка /health в кэш: подключённые ноды и локальный awg-ctrl (у него нет
+// соединения хаба, но /ui/nodes показывает его online по этой сводке).
+func (n *Nodes) healthLoop() {
+	t := time.NewTicker(healthEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-n.closed:
+			return
+		case <-t.C:
 		}
-	}()
+		n.mu.Lock()
+		var ids []int64
+		for id := range n.conns {
+			ids = append(ids, id)
+		}
+		n.mu.Unlock()
+		if n.local {
+			ids = append(ids, 0)
+		}
+		for _, id := range ids {
+			go n.refreshHealth(id)
+		}
+	}
 }
 
 // ── Роуты панели (/ui/nodes, за JWT) ────────────────────────────────────────
@@ -847,9 +1136,13 @@ func (n *Nodes) List() []serverInfo {
 	for k, v := range n.health {
 		hs[k] = v
 	}
-	online := map[int64]bool{}
-	for k := range n.conns {
-		online[k] = true
+	online := map[int64]*nodeConn{}
+	for k, c := range n.conns {
+		online[k] = c
+	}
+	st := map[int64]nodeState{}
+	for k, v := range n.state {
+		st[k] = *v
 	}
 	n.mu.Unlock()
 	if n.local {
@@ -858,15 +1151,26 @@ func (n *Nodes) List() []serverInfo {
 		if h != nil {
 			name = h.Server
 		}
-		out = append(out, serverInfo{ID: 0, Name: name, Local: true, Online: h != nil, Version: orNil(n.a.version), Health: h})
+		si := serverInfo{ID: 0, Name: name, Local: true, Online: h != nil, Version: orNil(n.a.version), Health: h}
+		if s := st[0]; s.lastError != "" {
+			si.LastError = s.lastError
+		}
+		out = append(out, si)
 	}
 	for _, r := range n.all() {
 		if r.isRelay() {
 			continue // релеи идут списком /ui/relays, серверами они не являются
 		}
-		out = append(out, serverInfo{ID: int(r.ID), Name: r.Name, Online: online[r.ID], Pending: !r.Pub.Valid,
+		si := serverInfo{ID: int(r.ID), Name: r.Name, Online: online[r.ID] != nil, Pending: !r.Pub.Valid,
 			LastSeen: nullInt(r.LastSeen), Version: nullStr(r.Version), Health: hs[r.ID],
-			Outdated: r.Pub.Valid && (!r.Version.Valid || cmpVersion(r.Version.String, MinNodeVersion) < 0)})
+			Outdated: r.Pub.Valid && (!r.Version.Valid || cmpVersion(r.Version.String, MinNodeVersion) < 0)}
+		if c := online[r.ID]; c != nil {
+			si.ConnectedAt = c.connectedAt.Unix()
+		}
+		if s := st[r.ID]; s.lastError != "" && online[r.ID] == nil {
+			si.LastError = s.lastError
+		}
+		out = append(out, si)
 	}
 	return out
 }
@@ -902,20 +1206,23 @@ func (n *Nodes) RelayList() []jsjson.Object {
 }
 
 type serverInfo struct {
-	ID       int
-	Name     string
-	Local    bool
-	Online   bool
-	Pending  bool
-	LastSeen any
-	Version  any
-	Health   *health
-	Outdated bool // старше MinNodeVersion: хаб её не подключает, пока не обновят
+	ID          int
+	Name        string
+	Local       bool
+	Online      bool
+	Pending     bool
+	LastSeen    any
+	ConnectedAt any // unix-время текущего подключения ноды; null — не на связи
+	LastError   any // почему «нет связи» (последняя причина закрытия); null — причина неизвестна
+	Version     any
+	Health      *health
+	Outdated    bool // старше MinNodeVersion: хаб её не подключает, пока не обновят
 }
 
 func (s serverInfo) json() jsjson.Object {
 	return jsjson.Object{{Key: "id", Val: s.ID}, {Key: "name", Val: s.Name}, {Key: "local", Val: s.Local}, {Key: "online", Val: s.Online},
-		{Key: "pending", Val: s.Pending}, {Key: "last_seen", Val: s.LastSeen}, {Key: "version", Val: s.Version}, {Key: "health", Val: s.Health.json()}, {Key: "outdated", Val: s.Outdated}}
+		{Key: "pending", Val: s.Pending}, {Key: "last_seen", Val: s.LastSeen}, {Key: "connected_at", Val: s.ConnectedAt},
+		{Key: "last_error", Val: s.LastError}, {Key: "version", Val: s.Version}, {Key: "health", Val: s.Health.json()}, {Key: "outdated", Val: s.Outdated}}
 }
 
 func (n *Nodes) idOf(c *Ctx) (int64, bool) {
@@ -926,9 +1233,8 @@ func (n *Nodes) idOf(c *Ctx) (int64, bool) {
 func (n *Nodes) router() *Router {
 	rt := newRouter()
 	rt.Get("/", func(c *Ctx) bool {
-		if n.local {
-			n.refreshHealth(0)
-		}
+		// health — из кэша: мёртвый локальный awg-ctrl не должен держать список (и его таймаут).
+		// Кэш локального сервера обновляет healthLoop в Start.
 		list := []any{}
 		for _, s := range n.List() {
 			list = append(list, s.json())
@@ -1023,14 +1329,22 @@ func (n *Nodes) router() *Router {
 		if n.row(id) == nil {
 			return c.Error(404, "Не найден")
 		}
+		// Удаление — не потеря связи: снимаем соединение с реестра до закрытия, чтобы
+		// OnOffline не сработал для сервера, которого больше нет.
 		n.mu.Lock()
 		conn := n.conns[id]
+		delete(n.conns, id)
 		n.mu.Unlock()
 		if conn != nil {
-			n.dropConn(id, conn)
+			conn.fail("removed")
+			n.closeConn(id, conn, "removed")
 			closeWS(conn.ws, 4004, "removed")
 		}
 		n.a.db.Exec("DELETE FROM nodes WHERE id = ?", id)
+		n.mu.Lock()
+		delete(n.health, id)
+		delete(n.state, id)
+		n.mu.Unlock()
 		// Хвосты подписки для этого сервера больше некому доделать.
 		for _, t := range []string{"peer_tombstones", "server_profiles"} {
 			n.a.db.Exec("DELETE FROM "+t+" WHERE server_id = ?", id)
