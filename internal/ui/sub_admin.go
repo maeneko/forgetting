@@ -199,13 +199,18 @@ func (s *Sub) parseServers(v any, scope []int) ([]int, error) {
 
 // masterOut — deleting: ключ удалён, но эти серверы ещё не подтвердили, что сняли его пиров.
 // Ограничения отдаются именами панели (camelCase): срок, лимит, учтённый трафик и блокировка.
+// partial/unreachable — по последнему замеру (enforceMasters): usedBytes неполон, если какой-то
+// сервер не ответил; панель показывает по unreachable «нет связи». Замеров ещё не было —
+// partial=false, unreachable=[]: счётчик 0 тогда не «неполный», а просто не измеренный.
 func (s *Sub) masterOut(m *masterRow) jsjson.Object {
 	srv := intsJSON(s.serverIDsOf(s.a.db, m.ID))
+	snap := s.usageSnapshotOf(m.ID)
 	b := m.blockNow(now())
 	o := jsjson.Object{{Key: "id", Val: m.ID}, {Key: "uuid", Val: m.UUID}, {Key: "label", Val: m.Label}, {Key: "device_limit", Val: m.DeviceLimit},
 		{Key: "devices", Val: m.Devices}, {Key: "servers", Val: srv}, {Key: "created_at", Val: m.CreatedAt},
 		{Key: "expiresAt", Val: nullInt(m.ExpiresAt)}, {Key: "trafficLimitBytes", Val: nullInt(m.TrafficLimit)},
 		{Key: "usedBytes", Val: m.usedTotal()}, {Key: "remainingBytes", Val: m.remaining()},
+		{Key: "partial", Val: snap.known && !snap.complete}, {Key: "unreachable", Val: intsJSON(snap.unreachable)},
 		{Key: "blocked", Val: b != ""}, {Key: "blockReason", Val: orNil(b)}, {Key: "expired", Val: m.expired(now())}}
 	if m.RevokedAt.Valid {
 		o = append(o, jsjson.KV{Key: "deleting", Val: srv})
@@ -519,6 +524,11 @@ func (s *Sub) moveServersTx(tx *sql.Tx, masterID int64, added, removed []int) er
 		if _, err := tx.Exec("DELETE FROM master_servers WHERE master_id = ? AND server_id = ?", masterID, sid); err != nil {
 			return err
 		}
+		// Последнее показание снятого сервера больше не часть ключа: если его вернут, старый
+		// расход с него не должен всплыть.
+		if _, err := tx.Exec("DELETE FROM master_server_usage WHERE master_id = ? AND server_id = ?", masterID, sid); err != nil {
+			return err
+		}
 		for _, d := range devices {
 			for _, l := range s.linksOf(tx, d.ID) {
 				if l.ServerID == sid && l.PeerPub.Valid {
@@ -825,8 +835,8 @@ func (s *Sub) peersOf(id int) ([]any, error) {
 
 // masterDevices — статистика устройства по всем серверам ключа: онлайн, если есть свежий
 // handshake хоть на одном; трафик суммируется. servers_ok — где уже стоит его текущий ключ.
-// Сервер, который не ответил, не рушит список: его статистики просто нет, а id возвращается
-// вторым значением — панель покажет, что данные неполные.
+// Сервер, который не в сети или не ответил, не рушит список: его статистики просто нет, а id
+// возвращается вторым значением — панель покажет «нет связи».
 func (s *Sub) masterDevices(m *masterRow) ([]any, []int) {
 	stats := map[string]*devStat{}
 	var mu sync.Mutex
@@ -834,6 +844,9 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, []int) {
 	unreachable := []int{}
 	for _, id := range s.serverIDsOf(s.a.db, m.ID) {
 		if !s.a.nodes.IsOnline(id) {
+			mu.Lock()
+			unreachable = append(unreachable, id)
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)
@@ -900,20 +913,72 @@ func (s *Sub) masterDevices(m *masterRow) ([]any, []int) {
 	return out, unreachable
 }
 
-// masterUsage — трафик ключа по всем его серверам. rx/tx берутся у пира, который сейчас стоит
-// на сервере (device_peers.peer_pub), и складываются по устройству этого ключа, а не по ключу
-// пира: peer_pub меняется при перевыпуске и смене PSK, привязка к devices.id это переживает.
-// complete=false — хотя бы один сервер не в сети или не ответил: по таким данным квоту не
-// решаем (иначе обрыв связи выглядел бы как нулевой трафик).
+// usageSnapshot — итог последнего замера трафика ключа (masterUsage). known — замер вообще был;
+// complete — ответили все серверы; unreachable — кто не ответил (id). Хранится в памяти: список
+// ключей показывает неполноту, не опрашивая серверы на каждый запрос.
+type usageSnapshot struct {
+	known       bool
+	complete    bool
+	unreachable []int
+}
+
+func (s *Sub) setUsageSnapshot(masterID int64, unreachable []int, complete bool) {
+	s.usageMu.Lock()
+	if s.usageSnap == nil {
+		s.usageSnap = map[int64]usageSnapshot{}
+	}
+	s.usageSnap[masterID] = usageSnapshot{known: true, complete: complete, unreachable: append([]int{}, unreachable...)}
+	s.usageMu.Unlock()
+}
+
+func (s *Sub) usageSnapshotOf(masterID int64) usageSnapshot {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	return s.usageSnap[masterID]
+}
+
+// serverUsage — последние известные показания awg-ctrl по ключу на каждом его сервере (сырые
+// счётчики пиров, без поправки usageBase). Нет записи — сервер ещё ни разу не ответил.
+func (s *Sub) serverUsage(masterID int64) map[int][2]int64 {
+	out := map[int][2]int64{}
+	rows, err := s.a.db.Query("SELECT server_id, rx, tx FROM master_server_usage WHERE master_id = ?", masterID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var rx, tx int64
+		if rows.Scan(&id, &rx, &tx) == nil {
+			out[id] = [2]int64{rx, tx}
+		}
+	}
+	return out
+}
+
+func (s *Sub) setServerUsage(masterID int64, serverID int, rx, tx int64) {
+	s.a.db.Exec(`INSERT INTO master_server_usage (master_id, server_id, rx, tx) VALUES (?, ?, ?, ?)
+        ON CONFLICT(master_id, server_id) DO UPDATE SET rx = excluded.rx, tx = excluded.tx`, masterID, serverID, rx, tx)
+}
+
+// masterUsage — известный трафик ключа по всем его серверам. rx/tx берутся у пира, который
+// сейчас стоит на сервере (device_peers.peer_pub), и складываются по устройству этого ключа, а
+// не по ключу пира: peer_pub меняется при перевыпуске и смене PSK, привязка к devices.id это
+// переживает. Сервер не в сети или не ответил — в сумму идёт его последнее известное значение
+// (master_server_usage): обрыв не обнуляет уже израсходованное, и трафик доступных серверов
+// продолжает учитываться. complete=false — ответили не все; квоту это не откладывает
+// (см. enforceMasters), но used_bytes тогда неполный, и панель это показывает.
 func (s *Sub) masterUsage(m *masterRow) (rx, tx int64, complete bool) {
 	servers := s.serverIDsOf(s.a.db, m.ID)
 	if len(servers) == 0 {
+		s.setUsageSnapshot(m.ID, nil, false)
 		return 0, 0, false
 	}
 	links := map[int][]string{} // сервер → ключи, которые там стоят (по device_peers)
 	rows, err := s.a.db.Query(`SELECT l.server_id, l.peer_pub FROM device_peers l JOIN devices d ON d.id = l.device_id
         WHERE d.master_id = ? AND l.peer_pub IS NOT NULL`, m.ID)
 	if err != nil {
+		s.setUsageSnapshot(m.ID, nil, false)
 		return 0, 0, false
 	}
 	for rows.Next() {
@@ -925,42 +990,56 @@ func (s *Sub) masterUsage(m *masterRow) (rx, tx int64, complete bool) {
 	}
 	rows.Close()
 
-	complete = true
+	last := s.serverUsage(m.ID)
+	unreachable := []int{}
 	for _, id := range servers {
 		if !s.a.nodes.IsOnline(id) {
-			complete = false
+			unreachable = append(unreachable, id)
+			rx += last[id][0]
+			tx += last[id][1]
 			continue
 		}
 		peers, err := s.peersOf(id)
 		if err != nil {
-			complete = false
+			unreachable = append(unreachable, id)
+			rx += last[id][0]
+			tx += last[id][1]
 			continue
 		}
-		stat := map[string][2]float64{}
+		stat := map[string][2]int64{}
 		for _, p := range peers {
 			pub, ok := field(p, "pub_key").(string)
 			if !ok {
 				continue
 			}
-			stat[pub] = [2]float64{numOr(field(p, "rx"), 0), numOr(field(p, "tx"), 0)}
+			stat[pub] = [2]int64{int64(numOr(field(p, "rx"), 0)), int64(numOr(field(p, "tx"), 0))}
 		}
+		var srx, stx int64
 		for _, pub := range links[id] {
 			if st, ok := stat[pub]; ok {
-				rx += int64(st[0])
-				tx += int64(st[1])
+				srx += st[0]
+				stx += st[1]
 			}
 		}
+		rx += srx
+		tx += stx
+		s.setServerUsage(m.ID, id, srx, stx)
 	}
+	sort.Ints(unreachable)
+	complete = len(unreachable) == 0
+	s.setUsageSnapshot(m.ID, unreachable, complete)
 	return rx, tx, complete
 }
 
-// enforceMasters — тик ограничений мастер-ключей: просрочка и квота трафика. Просрочка —
-// по часам и применяется всегда; квота — только по полным данным (сервер не в сети → решение
-// откладывается этим тиком). Учтённый трафик только растёт: счётчики awg-ctrl обнуляются при
-// пересоздании пира, а заблокированный ключ пиров не имеет — иначе блокировка снималась бы
-// сама собой на первом же тике. Сброс расхода (resetMasterUsage) сдвигает начало отсчёта:
-// показания awg-ctrl уменьшаются на usageBase, поэтому прежний трафик не возвращается.
-// Ручную блокировку тик не трогает.
+// enforceMasters — тик ограничений мастер-ключей: просрочка и квота трафика. Просрочка — по
+// часам и применяется всегда. Квота — по известному: сумма доступных серверов плюс последнее
+// известное недоступных. Дошла до лимита — блокируем, даже если часть серверов не ответила;
+// ниже — не блокируем и не выдаём неполный расход за точный (флаг partial в masterOut).
+// Учтённый трафик только растёт: счётчики awg-ctrl обнуляются при пересоздании пира, а
+// заблокированный ключ пиров не имеет — иначе блокировка снималась бы сама собой на первом же
+// тике. Сброс расхода (resetMasterUsage) сдвигает начало отсчёта: показания awg-ctrl
+// уменьшаются на usageBase, поэтому прежний трафик не возвращается. Ручную блокировку тик не
+// трогает.
 func (s *Sub) enforceMasters() {
 	rows, err := s.a.db.Query("SELECT " + masterCols + " FROM master_keys m WHERE m.revoked_at IS NULL ORDER BY id")
 	if err != nil {
@@ -977,17 +1056,26 @@ func (s *Sub) enforceMasters() {
 	t := now()
 	for _, m := range list {
 		rx, tx, complete := s.masterUsage(m)
+		brx, btx := s.usageBase(m.ID)
 		if complete {
 			// Счётчики awg-ctrl уменьшились (перезапуск интерфейса, пересоздание пира) —
 			// поправка устарела: считаем заново с текущих показаний, как usage.accrue.
-			brx, btx := s.usageBase(m.ID)
 			if rx < brx || tx < btx {
 				brx, btx = rx, tx
 				s.setUsageBase(m.ID, brx, btx)
 			}
-			rx, tx = rx-brx, tx-btx
+		} else {
+			// Неполные данные: поправку не двигаем — вернувшийся сервер дал бы скачок, — но
+			// и отрицательного расхода не бывает: ниже поправки не опускаемся.
+			if rx < brx {
+				rx = brx
+			}
+			if tx < btx {
+				tx = btx
+			}
 		}
-		if complete && rx+tx > m.usedTotal() {
+		rx, tx = rx-brx, tx-btx
+		if rx+tx > m.usedTotal() {
 			m.UsedRx, m.UsedTx = rx, tx
 			s.a.db.Exec("UPDATE master_keys SET used_rx = ?, used_tx = ? WHERE id = ?", rx, tx, m.ID)
 		}
@@ -997,7 +1085,7 @@ func (s *Sub) enforceMasters() {
 		want := ""
 		if m.expired(t) {
 			want = blockExpired
-		} else if m.TrafficLimit.Valid && complete && m.usedTotal() >= m.TrafficLimit.Int64 {
+		} else if m.TrafficLimit.Valid && m.usedTotal() >= m.TrafficLimit.Int64 {
 			want = blockTraffic
 		}
 		cur := ""
@@ -1430,6 +1518,7 @@ func (s *Sub) beforeServerDelete(id int, force bool) *deleteVeto {
 
 func (s *Sub) afterServerDelete(id int) {
 	s.a.db.Exec("DELETE FROM master_servers WHERE server_id = ?", id)
+	s.a.db.Exec("DELETE FROM master_server_usage WHERE server_id = ?", id)
 	s.a.db.Exec("DELETE FROM master_keys WHERE revoked_at IS NOT NULL AND id NOT IN (SELECT master_id FROM master_servers)")
 }
 
@@ -1456,6 +1545,7 @@ func (s *Sub) healDeadServers() {
 	inList := strings.Join(ids, ",")
 	for _, q := range []string{
 		"DELETE FROM master_servers WHERE server_id NOT IN (" + inList + ")",
+		"DELETE FROM master_server_usage WHERE server_id NOT IN (" + inList + ")",
 		"DELETE FROM device_peers WHERE server_id NOT IN (" + inList + ")",
 		"DELETE FROM peer_tombstones WHERE server_id NOT IN (" + inList + ")",
 		"DELETE FROM server_profiles WHERE server_id NOT IN (" + inList + ")",

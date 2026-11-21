@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.8";
+const MOCK_VERSION = "0.5.9";
 const GB = 1024 ** 3, TB = 1024 ** 4;
 
 // ── лимиты времени и трафика: одно состояние на пользователя и на мастер-ключ ──
@@ -103,7 +103,7 @@ const mnodes: MNode[] = [
     { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
     { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
-    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.5.9" },   // новее панели — жёлтый чип
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.6.0" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
@@ -632,9 +632,13 @@ const userOf = (q: express.Request) => U_(q).find(x => x.name === q.params.name)
 app.put("/api/users/:name/limits", (q, r) => {
     const u = userOf(q);
     if (!u) return r.status(404).json({ error: "Пользователь не найден" });
-    const { errors, expires, traffic } = parseLimits(q.body ?? {});
+    // Как bodyLimitInt в awg-ctrl: отсутствующее поле не трогаем (панель после
+    // «Сохранить» шлёт только изменённые), null снимает ограничение.
+    const body = q.body ?? {};
+    const { errors } = parseLimits(body);
     if (Object.keys(errors).length) return r.status(400).json({ error: "Проверьте поля лимитов", errors });
-    u.expires_at = expires; u.traffic_limit_bytes = traffic;
+    const merged = parseLimits({ expires_at: u.expires_at ?? null, traffic_limit_bytes: u.traffic_limit_bytes ?? null, ...body });
+    u.expires_at = merged.expires; u.traffic_limit_bytes = merged.traffic;
     r.json(userOut(u));
 });
 app.post("/api/users/:name/block", (q, r) => {

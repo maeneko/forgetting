@@ -241,6 +241,12 @@ type Sub struct {
 	peersMu   sync.Mutex
 	peerCalls map[int]*peersCall // последний GET /api/peers по серверу, см. peersOf
 
+	// usageMu/usageSnap — последний замер трафика по ключам (masterUsage): какие серверы не
+	// ответили и был ли замер полным. Панель отдаёт это в masterOut, не дёргая серверы на
+	// каждый список.
+	usageMu   sync.Mutex
+	usageSnap map[int64]usageSnapshot
+
 	sigMu    sync.Mutex
 	seenSigs map[string]time.Time // подпись → когда забыть
 
@@ -395,6 +401,16 @@ func (s *Sub) initSchema() error {
         CREATE TABLE IF NOT EXISTS sub_meta (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        -- Последнее известное показание awg-ctrl по ключу на сервере (сырые счётчики его пиров,
+        -- до поправки usageBase). Сервер без связи трафик не отдаёт, но терять его последнее
+        -- значение нельзя: иначе обрыв выглядел бы как нулевой расход и квота бы не сработала.
+        CREATE TABLE IF NOT EXISTS master_server_usage (
+            master_id INTEGER NOT NULL REFERENCES master_keys(id) ON DELETE CASCADE,
+            server_id INTEGER NOT NULL,
+            rx        INTEGER NOT NULL DEFAULT 0,
+            tx        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (master_id, server_id)
         );
     `, defaultLimit)); err != nil {
 		return err

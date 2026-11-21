@@ -3,10 +3,10 @@
 // LICENSE file in the root directory of this source tree.
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import {
-    apiFetch, copyText, bytes, timeAgo, getServerId, cmpVersion,
+    apiFetch, copyText, bytes, timeAgo, getServerId, cmpVersion, classifyApiError,
     limitBytes, limitDate, limitDay, timeLeft, inputDate, parseInputDate, blockText,
     LIMIT_UNITS, limitAmount, limitUnit, parseLimitAmount, TB, type LimitUnit, type BlockReason,
-    type NodeInfo, type PageProps, type Priority,
+    type NodeInfo, type PageProps, type Priority, type ApiFailure,
 } from '../../lib/shared';
 import { qrDataUrl } from '../../lib/qr';
 import { IcoPlus, IcoTrash, IcoCopy, IcoQR, IcoKey, IcoRefresh, IcoSettings, IcoMore, IcoClose } from '../../components/icons';
@@ -15,6 +15,7 @@ import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
 import BulkServersModal from './BulkServersModal';
 import './masterkeys.css';
+import '../users/load-state.css';
 
 // Вкладка «Мастер-ключи»: sen://-подписки для SenAWG. Мастер-ключ — это ссылка
 // плюс лимит устройств; устройства регистрируются сами (приватный ключ остаётся
@@ -147,6 +148,10 @@ const ipPick = (d: Device): { ip: string; serverId?: number; other: boolean } =>
 export default function MasterKeysPage({ token, showMsg }: PageProps) {
     const compactLimits = useCompactLimits();
     const [keys, setKeys]       = useState<MasterKey[]>([]);
+    // Почему список не загрузился: панель без локального VPN / сервер не на связи / ошибка.
+    // Пустой список и «сервер не настроен или недоступен» — разные вещи, и говорить
+    // «Нет мастер-ключей» во втором случае нельзя.
+    const [fail, setFail]       = useState<ApiFailure | null>(null);
     const [enabled, setEnabled] = useState(true);
     const [tls, setTls]         = useState(false);
     const [nodes, setNodes]     = useState<NodeInfo[]>([]);   // серверы, которые можно включить в ключ
@@ -190,6 +195,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
             const d = await apiFetch('GET', '/ui/masterkeys', token);
             const list: MasterKey[] = d.keys ?? [];
             if (seq !== loadSeq.current) return;
+            setFail(null);
             setKeys(list); setEnabled(!!d.enabled); setTls(!!d.tls); setDefaults(d.defaults ?? null);
             apiFetch('GET', '/ui/nodes', token).then(r => setNodes(r.nodes ?? [])).catch(() => {});
             // Каждый ключ грузится сам по себе: сбой одного не должен прятать устройства остальных.
@@ -210,7 +216,13 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
             setDevs(prev => Object.fromEntries(live.flatMap(k =>
                 fresh[k.id] ? [[k.id, fresh[k.id]]] : prev[k.id] ? [[k.id, prev[k.id]]] : [])));
             setFailed(bad); setDown(unreachable);
-        } catch { if (seq === loadSeq.current) showMsg('Ошибка загрузки мастер-ключей'); }
+        } catch (e) {
+            // Сервер без локального VPN и недоступную ноду показываем блоком на месте списка,
+            // а тост оставляем только настоящей ошибке. Загруженный ранее список не трогаем.
+            const why = classifyApiError(e);
+            if (seq === loadSeq.current) setFail(why);
+            if (why === 'error') showMsg('Ошибка загрузки мастер-ключей');
+        }
     }, [token, showMsg]);
 
     // Действие над ключом/устройством: выполнить, показать сообщение, обновить данные.
@@ -846,6 +858,15 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
         );
     };
 
+    // Причина сбоя словами: одни и те же формулировки, что во вкладке «Пользователи».
+    const failTitle = fail === 'no-core' ? 'На этом сервере нет VPN (панель без awg-ctrl).'
+        : fail === 'offline' ? 'Сервер не на связи'
+        : 'Не удалось загрузить список';
+    const failText = fail === 'no-core'
+        ? 'Мастер-ключи живут на нодах. Выберите сервер в шапке — ничего не сломано: локальный awg-ctrl на этой панели просто не запущен.'
+        : fail === 'offline' ? 'Список мастер-ключей сейчас недоступен — сервер не отвечает.'
+        : 'Сервер ответил ошибкой — можно попробовать ещё раз.';
+
     return (
         <>
             {!enabled && (
@@ -881,6 +902,19 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                 </div>
             </div>
 
+            {/* Нет списка и известна причина: вместо пустой таблицы — объяснение. «Нет
+                мастер-ключей» остаётся честным только когда сервер правда ответил пустым. */}
+            {fail && keys.length === 0 && (
+                <div className={`load-state${fail === 'offline' ? ' load-state--warm' : ''}`} role="status">
+                    <p className="load-state-title">{failTitle}</p>
+                    <p className="load-state-text">{failText}</p>
+                    {fail !== 'no-core' && (
+                        <button className="btn btn--tonal" onClick={load}><IcoRefresh /> Повторить</button>
+                    )}
+                </div>
+            )}
+
+            {(!fail || keys.length > 0) && (<>
             {/* Десктоп: таблица из четырёх колонок. IP, платформа и трафик переехали
                 в подписи под именем — иначе таблица не помещалась и листалась вбок. */}
             <div className="table-card mk-table-card">
@@ -1001,6 +1035,7 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                     })}
                 </ul>
             )}
+            </>)}
 
             {menu && (() => {
                 const run = (f: () => void) => () => { setMenu(null); f(); };

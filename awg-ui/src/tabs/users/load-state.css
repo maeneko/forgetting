@@ -1,0 +1,49 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Состояние загрузки списка — общее для «Пользователей» и «Мастер-ключей»:
+   «здесь нет VPN» (панель без awg-ctrl), «сервер не на связи», обычная ошибка.
+   Блок занимает место списка: пустая таблица с «Нет …» здесь не должна появляться,
+   иначе «нет VPN», «нет связи» и «правда ноль» читаются одинаково. */
+
+.load-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    background: var(--surface-container);
+    border-radius: var(--shape-extra-large);
+    padding: 16px 20px;
+}
+
+.load-state-title {
+    font-size: var(--title-small-size); line-height: var(--title-small-line);
+    font-weight: var(--weight-medium);
+    color: var(--on-surface);
+}
+
+.load-state-text {
+    font-size: var(--body-medium-size); line-height: var(--body-medium-line);
+    color: var(--neutral-text);
+}
+
+.load-state .btn { margin-top: 6px; }
+
+/* «Сервер не на связи» — тёплый акцент, но не красная ошибка: данные могут вернуться,
+   и последний список остаётся на экране. */
+.load-state--warm { background: var(--tertiary-container); }
+.load-state--warm .load-state-title,
+.load-state--warm .load-state-text { color: var(--on-tertiary-container); }
+
+/* Тихая пометка под тулбаром (список рабочий, статистика нет) — без тоста. */
+.load-note {
+    font-size: var(--body-small-size); line-height: var(--body-small-line);
+    color: var(--neutral-text);
+}
+
+@media (max-width: 599px) {
+    .load-state { padding: 14px 16px; }
+    .load-state .btn { align-self: stretch; justify-content: center; }
+}

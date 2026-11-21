@@ -174,54 +174,6 @@ func TestMasterUsageAcrossServers(t *testing.T) {
 	}
 }
 
-// ── Квота и обрыв связи ─────────────────────────────────────────────────────
-
-// Сервер не в сети — данных о трафике нет: квоту в этом тике не решаем (обрыв не должен
-// выглядеть как «трафика не было» или блокировать по половине). Просрочка — по часам, всегда.
-func TestQuotaNeedsAllServers(t *testing.T) {
-	a, s, fake := newLimitsTest(t, 2)
-	fixClock(t, 1700000000)
-	chain(t, a, 2, "WG")
-	execLimits(t, a, "UPDATE master_keys SET traffic_limit_bytes = 100 WHERE id = 1")
-	fake.setPeers(0, peer("WG", 60, 0))
-	fake.setPeers(1, peer("WG", 60, 0))
-	fake.setDown(1)
-
-	s.enforceMasters()
-	m := s.masterRowByID(a.db, 1)
-	if m.BlockedReason.Valid {
-		t.Fatalf("заблокирован %q по неполным данным", m.BlockedReason.String)
-	}
-	if m.usedTotal() != 0 {
-		t.Fatalf("частичный трафик записан как полный: %d", m.usedTotal())
-	}
-
-	// Срок вышел — блокировка обязательна, хотя один сервер так и не ответил.
-	execLimits(t, a, fmt.Sprintf("UPDATE master_keys SET expires_at = %d WHERE id = 1", now()-10))
-	s.enforceMasters()
-	m = s.masterRowByID(a.db, 1)
-	if m.BlockedReason.String != blockExpired {
-		t.Fatalf("просроченный ключ: %v (%q)", m.BlockedReason, m.BlockedReason.String)
-	}
-	out := s.masterOut(m)
-	if field(out, "blocked") != true || field(out, "blockReason") != blockExpired || field(out, "expired") != true {
-		t.Fatalf("masterOut просроченного: %v", out)
-	}
-
-	// Сервер вернулся и трафик превысил лимит — тик ставит уже traffic.
-	fake.mu.Lock()
-	delete(fake.down, 1)
-	fake.mu.Unlock()
-	s.peersMu.Lock()
-	delete(s.peerCalls, 1) // кэш peersOf не должен прятать вернувшийся сервер
-	s.peersMu.Unlock()
-	execLimits(t, a, "UPDATE master_keys SET expires_at = NULL WHERE id = 1")
-	s.enforceMasters()
-	if m = s.masterRowByID(a.db, 1); m.BlockedReason.String != blockTraffic {
-		t.Fatalf("после возврата сервера: %v (%q), ожидали traffic", m.BlockedReason, m.BlockedReason.String)
-	}
-}
-
 // ── keepOf: пиры снимаются ──────────────────────────────────────────────────
 
 // Заблокированный и просроченный ключи не отдают пиров в keep — sync снимает их с серверов,

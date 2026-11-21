@@ -52,6 +52,26 @@ func bodyLimitInt(c *rctx, key string) (val *int64, present bool, err error) {
 	return &n, true, nil
 }
 
+// limitView — поля лимитов для ответа списка. nil → null: «ограничения нет» и «остатка
+// нет» — разные вещи, поэтому отсутствие лимита никогда не превращается в 0.
+// Одна функция на /api/users и /api/users/stats, чтобы списки не расходились полями.
+func limitView(expires, limit, blockedAt sql.NullInt64, blockReason sql.NullString, used, now int64) ob {
+	var expiresAt, limitBytes, remaining, reason any
+	if expires.Valid {
+		expiresAt = expires.Int64
+	}
+	if limit.Valid {
+		limitBytes = limit.Int64
+		remaining = max(int64(0), limit.Int64-used)
+	}
+	if blockReason.Valid {
+		reason = blockReason.String
+	}
+	return ob{{"expiresAt", expiresAt}, {"trafficLimitBytes", limitBytes},
+		{"usedBytes", used}, {"remainingBytes", remaining}, {"blocked", blockedAt.Valid},
+		{"blockReason", reason}, {"expired", expires.Valid && expires.Int64 <= now}}
+}
+
 // userResult — пользователь для ответа или 404.
 func (s *Server) userResult(name string) (result, error) {
 	u, err := s.userGet(name)
@@ -107,23 +127,32 @@ func (s *Server) routes() []route {
 			return created(u)
 		}),
 
+		// Лимиты — те же поля, что у /api/users/stats (общий limitView): вкладка берёт
+		// список отсюда, а статистика дорисовывает только сетевую активность.
 		R("GET", "/api/users", true, a, func(c *rctx) (result, error) {
-			rows, err := s.db.Query("SELECT name, ip, pub_key, vpn_key, key_gen, blocked_at FROM users WHERE vpn_key != ''")
+			rows, err := s.db.Query("SELECT name, ip, pub_key, vpn_key, key_gen, expires_at, traffic_limit_bytes, " +
+				"used_rx, used_tx, blocked_at, blocked_reason FROM users WHERE vpn_key != ''")
 			if err != nil {
 				return result{}, err
 			}
 			stats := s.getPeersData()
+			now := time.Now().Unix()
 			list := []any{}
 			for rows.Next() {
 				var n, ip, pub, vk, kg string
-				var blockedAt sql.NullInt64
-				if err := rows.Scan(&n, &ip, &pub, &vk, &kg, &blockedAt); err != nil {
+				var usedRx, usedTx int64
+				var expires, limit, blockedAt sql.NullInt64
+				var blockReason sql.NullString
+				if err := rows.Scan(&n, &ip, &pub, &vk, &kg, &expires, &limit,
+					&usedRx, &usedTx, &blockedAt, &blockReason); err != nil {
 					rows.Close()
 					return result{}, err
 				}
 				ps := stats[pub]
-				list = append(list, ob{{"name", n}, {"ip", ip}, {"pub_key", pub}, {"vpn_key", vk}, {"key_gen", kg},
-					{"online", ps.Online}, {"lastHandshake", ps.LastHandshake}, {"blocked", blockedAt.Valid}})
+				row := ob{{"name", n}, {"ip", ip}, {"pub_key", pub}, {"vpn_key", vk}, {"key_gen", kg},
+					{"online", ps.Online}, {"lastHandshake", ps.LastHandshake}}
+				row = append(row, limitView(expires, limit, blockedAt, blockReason, usedRx+usedTx, now)...)
+				list = append(list, row)
 			}
 			rows.Close()
 			return ok(ob{{"users", list}})
@@ -150,24 +179,11 @@ func (s *Server) routes() []route {
 					return result{}, err
 				}
 				ps := stats[pub]
-				// nil → null: «ограничения нет» и «остатка нет» — разные вещи.
-				var expiresAt, limitBytes, remaining, reason any
-				if expires.Valid {
-					expiresAt = expires.Int64
-				}
-				used := usedRx + usedTx
-				if limit.Valid {
-					limitBytes = limit.Int64
-					remaining = max(int64(0), limit.Int64-used)
-				}
-				if blockReason.Valid {
-					reason = blockReason.String
-				}
-				list = append(list, ob{{"name", n}, {"ip", ip}, {"key_gen", kg}, {"online", ps.Online},
+				row := ob{{"name", n}, {"ip", ip}, {"key_gen", kg}, {"online", ps.Online},
 					{"lastHandshake", ps.LastHandshake}, {"rx", ps.Rx}, {"tx", ps.Tx}, {"priority", s.shaping.PriorityOf(ip)},
-					{"torrent", torrent[ip]}, {"expiresAt", expiresAt}, {"trafficLimitBytes", limitBytes},
-					{"usedBytes", used}, {"remainingBytes", remaining}, {"blocked", blockedAt.Valid},
-					{"blockReason", reason}, {"expired", expires.Valid && expires.Int64 <= now}})
+					{"torrent", torrent[ip]}}
+				row = append(row, limitView(expires, limit, blockedAt, blockReason, usedRx+usedTx, now)...)
+				list = append(list, row)
 			}
 			rows.Close()
 			return ok(ob{{"users", list}})

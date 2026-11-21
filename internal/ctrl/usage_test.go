@@ -465,6 +465,71 @@ func TestStatsLimitsFields(t *testing.T) {
 	}
 }
 
+// Список /api/users несёт те же поля лимитов, что /api/users/stats: вкладка берёт
+// строки отсюда, а статистика только дорисовывает сетевую активность. Расхождение
+// раньше оставляло в интерфейсе «без лимитов» при сохранённых лимитах.
+func TestUsersListLimitFields(t *testing.T) {
+	s, tok := apiTestServer(t)
+	addTestUser(t, s, "ivan", "10.9.0.2", "PK1")
+	addTestUser(t, s, "petr", "10.9.0.3", "PK2")
+	now := time.Now().Unix()
+	if _, err := s.db.Exec("UPDATE users SET traffic_limit_bytes = 1000, used_rx = 300, used_tx = 200, expires_at = ? WHERE name = 'ivan'", now+3600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, resp := apiDo(t, s, tok, "GET", "/api/users", "")
+	if code != 200 {
+		t.Fatalf("GET /api/users: код %d", code)
+	}
+	ivan := findUser(t, resp, "ivan")
+	for k, want := range map[string]any{
+		"expiresAt":         float64(now + 3600),
+		"trafficLimitBytes": float64(1000),
+		"usedBytes":         float64(500),
+		"remainingBytes":    float64(500),
+		"blocked":           false,
+		"blockReason":       nil,
+		"expired":           false,
+	} {
+		if got := ivan.Get2(k); got != want {
+			t.Errorf("ivan.%s = %v, ждём %v", k, got, want)
+		}
+	}
+
+	// Без лимита — null, а не ноль; расход остаётся числом.
+	petr := findUser(t, resp, "petr")
+	for _, k := range []string{"expiresAt", "trafficLimitBytes", "remainingBytes", "blockReason"} {
+		if got := petr.Get2(k); got != nil {
+			t.Errorf("petr.%s = %v, ждём null", k, got)
+		}
+	}
+	if petr.Get2("usedBytes") != float64(0) {
+		t.Errorf("petr.usedBytes = %v, ждём 0", petr.Get2("usedBytes"))
+	}
+
+	// Побайтная сверка со /stats: списки не должны расходиться.
+	_, statsResp := apiDo(t, s, tok, "GET", "/api/users/stats", "")
+	statsIvan := findUser(t, statsResp, "ivan")
+	for _, k := range []string{"expiresAt", "trafficLimitBytes", "usedBytes", "remainingBytes", "blocked", "blockReason", "expired"} {
+		if got, want := ivan.Get2(k), statsIvan.Get2(k); got != want {
+			t.Errorf("%s: /api/users %v, /api/users/stats %v", k, got, want)
+		}
+	}
+
+	// Заблокированный пользователь отдаёт причину и в списке, лимиты при этом целы.
+	if err := s.blockUser("ivan", "manual"); err != nil {
+		t.Fatal(err)
+	}
+	_, resp = apiDo(t, s, tok, "GET", "/api/users", "")
+	ivan = findUser(t, resp, "ivan")
+	if ivan.Get2("blocked") != true || ivan.Get2("blockReason") != "manual" {
+		t.Errorf("blocked/blockReason после блокировки: %s", string(jsjson.MustMarshal(ivan)))
+	}
+	if ivan.Get2("trafficLimitBytes") != float64(1000) || ivan.Get2("usedBytes") != float64(500) {
+		t.Errorf("лимиты потерялись при блокировке: %s", string(jsjson.MustMarshal(ivan)))
+	}
+}
+
 // Старая users.db (без колонок лимитов) должна открыться как есть: у существующих строк
 // срок/лимит NULL, расход 0, блокировки нет.
 func TestUsageMigrationOldDB(t *testing.T) {

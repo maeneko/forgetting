@@ -5,8 +5,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     apiFetch, vpnKeyToConf, downloadFile, copyText, bytes, timeAgo, genLabel,
     limitBytes, limitDate, limitDay, timeLeft, inputDate, parseInputDate, blockText,
-    LIMIT_UNITS, limitAmount, limitUnit, parseLimitAmount, TB, type LimitUnit,
-    type BlockReason, type User, type PageProps, type AwgGen,
+    LIMIT_UNITS, limitAmount, limitUnit, parseLimitAmount, TB, classifyApiError,
+    type LimitUnit, type BlockReason, type User, type PageProps, type AwgGen, type ApiFailure,
 } from '../../lib/shared';
 import { qrDataUrl } from '../../lib/qr';
 import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe, IcoHistory, IcoPower } from '../../components/icons';
@@ -14,9 +14,16 @@ import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
 import DateField from './DateField';
 import './users.css';
+import './load-state.css';
 
 interface LimErrors { date?: string; amount?: string; general?: string }
-interface LimEdit { name: string; date: string; amount: string; unit: LimitUnit }
+// orig — значения, которые были в строке на момент открытия диалога. «Сохранить» без
+// правок не должен ничего отправлять: раньше он затирал лимиты, которых не было в
+// списке из-за merge-бага.
+interface LimEdit {
+    name: string; date: string; amount: string; unit: LimitUnit;
+    orig: { expiresAt: number | null; trafficLimitBytes: number | null };
+}
 
 // Проверки до запроса: пусто — «без ограничения», остальное должно быть числом в разумных пределах.
 const checkLimits = (e: LimEdit): LimErrors => {
@@ -48,6 +55,29 @@ const trafficHint = (v: string, unit: LimitUnit): { text: string } => {
     if (b < 1024 ** 2) return { text: 'Минимум 1 МБ' };
     return { text: `= ${limitBytes(b)}` };
 };
+
+// Поля, которые приходят из /api/users/stats: лимиты, приоритет, счётчики. undefined в ответе
+// значит «неизвестно», а не «снято», поэтому такие поля не затираем — ни при слиянии списка,
+// ни при обновлении статистики.
+const STAT_FIELDS = [
+    'priority', 'torrent', 'expiresAt', 'trafficLimitBytes', 'usedBytes',
+    'remainingBytes', 'blockReason', 'expired', 'blocked',
+] as const;
+
+// Свежий список из /api/users поверх прежнего: известные значения статистики доживают до
+// следующего удачного /stats. Иначе перезагрузка при сбое статистики стирала бы лимиты.
+function keepStats(fresh: User[], prev: User[]): User[] {
+    const old = new Map(prev.map(u => [u.name, u]));
+    return fresh.map(u => {
+        const p = old.get(u.name);
+        if (!p) return u;
+        const out: User = { ...u };
+        for (const k of STAT_FIELDS) {
+            if (u[k] === undefined && p[k] !== undefined) (out as any)[k] = p[k];
+        }
+        return out;
+    });
+}
 
 // Доступ закрыт: непустая причина, флаг blocked или истёкший срок. expired проверяем
 // отдельно — бэкенд может не выставить blocked и оставить blockReason пустым, а ключ
@@ -126,6 +156,13 @@ function WhenChip({ u }: { u: User }) {
 // + модалка QR. Сервер-бар сверху рендерит App. Свой стейт и поллинг — здесь.
 export default function UsersPage({ token, showMsg }: PageProps) {
     const [users, setUsers]     = useState<User[]>([]);
+    // Почему списка нет: 'no-core' — здесь нет VPN, 'offline' — сервер не на связи,
+    // 'error' — настоящая ошибка. null — всё в порядке. Без этого «пусто» от «нет VPN»
+    // не отличить и вкладка врёт «Нет пользователей».
+    const [fail, setFail]             = useState<ApiFailure | null>(null);
+    const [loadedOnce, setLoadedOnce] = useState(false);
+    const [loadedAt, setLoadedAt]     = useState(0);
+    const [statsDown, setStatsDown]   = useState(false);
     const [newName, setNewName] = useState('');
     const [qrModal, setQrModal] = useState<{ name: string; dataUrl: string; vpnKey: string } | null>(null);
     // Диалог «Лимиты…»: поля хранятся строками (пусто — без ограничения), состояние
@@ -141,28 +178,55 @@ export default function UsersPage({ token, showMsg }: PageProps) {
     const [upgrading, setUpgrading]  = useState(false);
     const statsRef              = useRef<ReturnType<typeof setInterval> | null>(null);
     const stale                 = users.filter(u => u.key_gen !== serverGen);
+    const noCore                = fail === 'no-core';
+    // Список показываем, только когда он действительно загружен: при «сервер не на связи»
+    // остаётся последний удачный, при «здесь нет VPN» — ничего.
+    const showList              = !noCore && (loadedOnce || fail === null);
 
     const loadStats = useCallback(async (tok: string) => {
         try {
             const data = await apiFetch('GET', '/api/users/stats', tok);
+            setStatsDown(false);
             setUsers(prev => prev.map(u => {
                 const s = (data.users as User[] ?? []).find(x => x.name === u.name);
-                return s ? { ...u, online: s.online, lastHandshake: s.lastHandshake, rx: s.rx, tx: s.tx, priority: s.priority, torrent: s.torrent } : u;
+                if (!s) return u;
+                // Лимиты живут только в /stats (старый /api/users их не отдаёт вовсе), поэтому
+                // переносим их целиком — но лишь те, что пришли: undefined не должен стереть
+                // известное значение, иначе строка навсегда «без лимитов».
+                const out: User = {
+                    ...u,
+                    online: s.online, lastHandshake: s.lastHandshake, rx: s.rx, tx: s.tx,
+                };
+                for (const k of STAT_FIELDS) {
+                    if (s[k] !== undefined) (out as any)[k] = s[k];
+                }
+                return out;
             }));
-        } catch { /* silent */ }
+        } catch { setStatsDown(true); }
     }, []);
 
     const loadUsers = useCallback(async (tok: string) => {
         try {
-            const [data, health] = await Promise.all([
-                apiFetch('GET', '/api/users', tok),
-                apiFetch('GET', '/health', tok),
-            ]);
-            setUsers(data.users ?? []);
-            setServerGen(health.gen ?? '2');
+            const data = await apiFetch('GET', '/api/users', tok);
+            setUsers(prev => keepStats(data.users ?? [], prev));
+            setFail(null);
+            setLoadedOnce(true);
+            setLoadedAt(Date.now());
+            // /health нужен только для пометки устаревших ключей: его сбой не должен
+            // прятать уже загруженный список.
+            try {
+                const health = await apiFetch('GET', '/health', tok);
+                setServerGen(health.gen ?? '2');
+            } catch { /* не критично */ }
             await loadStats(tok);
-        } catch {
-            showMsg('Ошибка загрузки');
+        } catch (e) {
+            const why = classifyApiError(e);
+            setFail(why);
+            // Панель без локального VPN: пользователей здесь нет в принципе. Список с другой
+            // ноды (если был) не показываем — он к этому серверу не относится.
+            if (why === 'no-core') setUsers([]);
+            // «Нет связи» и «нет VPN» объясняет блок на месте списка, тост — только у настоящей ошибки.
+            if (why === 'error') showMsg('Ошибка загрузки');
         }
     }, [loadStats, showMsg]);
 
@@ -234,7 +298,13 @@ export default function UsersPage({ token, showMsg }: PageProps) {
 
     // ── Лимиты: диалог, быстрые действия ──
     const openLimits = useCallback((u: User) => {
-        setLim({ name: u.name, date: inputDate(u.expiresAt), amount: limitAmount(u.trafficLimitBytes), unit: limitUnit(u.trafficLimitBytes) });
+        const date = inputDate(u.expiresAt), amount = limitAmount(u.trafficLimitBytes), unit = limitUnit(u.trafficLimitBytes);
+        setLim({
+            name: u.name, date, amount, unit,
+            // Снимок того, что уйдёт на сервер при нетронутых полях: сравниваем «до/после»
+            // по одним и тем же преобразованиям, поэтому «Сохранить» без правок — no-op.
+            orig: { expiresAt: parseInputDate(date), trafficLimitBytes: parseLimitAmount(amount, unit) },
+        });
         setLimErr({});
         setDateOpen(false);
     }, []);
@@ -244,12 +314,18 @@ export default function UsersPage({ token, showMsg }: PageProps) {
         if (!lim) return;
         const errs = checkLimits(lim);
         if (errs.date || errs.amount) { setLimErr(errs); return; }
+        // Шлём только изменившиеся поля: PUT трактует null как «снять ограничение», и
+        // лишний ключ стёр бы то, чего оператор не касался (в т.ч. лимит, не доехавший
+        // до списка). Ничего не изменилось — закрываем без запроса и без тоста.
+        const expiresAt = parseInputDate(lim.date);
+        const trafficLimitBytes = parseLimitAmount(lim.amount, lim.unit);
+        const body: Record<string, number | null> = {};
+        if (expiresAt !== lim.orig.expiresAt) body.expires_at = expiresAt;
+        if (trafficLimitBytes !== lim.orig.trafficLimitBytes) body.traffic_limit_bytes = trafficLimitBytes;
+        if (!('expires_at' in body) && !('traffic_limit_bytes' in body)) { closeLimits(); return; }
         setLimBusy(true); setLimErr({});
         try {
-            await apiFetch('PUT', `/api/users/${encodeURIComponent(lim.name)}/limits`, token, {
-                expires_at: parseInputDate(lim.date),
-                traffic_limit_bytes: parseLimitAmount(lim.amount, lim.unit),
-            });
+            await apiFetch('PUT', `/api/users/${encodeURIComponent(lim.name)}/limits`, token, body);
             showMsg('Лимиты сохранены');
             closeLimits();
             await loadUsers(token);
@@ -306,22 +382,23 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                     className="field"
                     placeholder="Имя пользователя"
                     value={newName}
+                    disabled={noCore}
                     onChange={e => setNewName(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && createUser()}
                 />
                 <div className="toolbar-btns">
-                    <button className="btn btn--primary" onClick={createUser}>
+                    <button className="btn btn--primary" onClick={createUser} disabled={noCore}>
                         <IcoPlus /> Создать
                     </button>
                     <button className="btn btn--tonal" onClick={() => loadUsers(token)}>
                         <IcoRefresh /> Обновить
                     </button>
-                    {serverGen !== '3.1' && (
+                    {!noCore && serverGen !== '3.1' && (
                         <button className="btn btn--danger" onClick={upgradeGen} disabled={upgrading}>
                             <IcoRefresh /> {upgrading ? 'Переход…' : 'Перейти на AWG 3.1'}
                         </button>
                     )}
-                    {stale.length > 0 && (
+                    {!noCore && stale.length > 0 && (
                         <button className="btn btn--danger" onClick={reissueKeys}>
                             <IcoRefresh /> Перевыпустить ключи ({stale.length})
                         </button>
@@ -329,6 +406,48 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                 </div>
             </div>
 
+            {/* Состояние вместо списка: «здесь нет VPN», «сервер не на связи», сбой загрузки.
+                «Нет пользователей» говорим, только когда сервер правда ответил пустым списком. */}
+            {fail === 'no-core' && (
+                <div className="load-state" role="status">
+                    <p className="load-state-title">На этом сервере нет VPN (панель без awg-ctrl).</p>
+                    <p className="load-state-text">
+                        Выберите сервер в шапке — пользователи живут на нодах. Ничего не сломано:
+                        локальный awg-ctrl на этой панели просто не запущен.
+                    </p>
+                </div>
+            )}
+            {fail === 'offline' && (
+                <div className="load-state load-state--warm" role="status">
+                    <p className="load-state-title">Сервер не на связи</p>
+                    <p className="load-state-text">
+                        {users.length
+                            ? `Показан последний загруженный список${loadedAt && Date.now() - loadedAt >= 60_000 ? ` — ${timeAgo(Math.floor(loadedAt / 1000))} назад` : ''}.`
+                            : 'Список пользователей сейчас недоступен — сервер не отвечает.'}
+                    </p>
+                    <button className="btn btn--tonal" onClick={() => loadUsers(token)}>
+                        <IcoRefresh /> Повторить
+                    </button>
+                </div>
+            )}
+            {fail === 'error' && !loadedOnce && (
+                <div className="load-state" role="status">
+                    <p className="load-state-title">Не удалось загрузить список</p>
+                    <p className="load-state-text">Сервер ответил ошибкой — можно попробовать ещё раз.</p>
+                    <button className="btn btn--tonal" onClick={() => loadUsers(token)}>
+                        <IcoRefresh /> Повторить
+                    </button>
+                </div>
+            )}
+            {fail === 'error' && loadedOnce && (
+                <p className="load-note" role="status">Список не обновился — показан последний загруженный.</p>
+            )}
+            {/* Статистика не пришла, а список рабочий: тихая пометка, без тоста и без потери строк. */}
+            {statsDown && users.length > 0 && (
+                <p className="load-note" role="status">Счётчики трафика недоступны</p>
+            )}
+
+            {showList && (<>
             <div className="table-card">
                 <table className="users-table">
                     <thead>
@@ -456,6 +575,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                     </div>
                 ))}
             </div>
+            </>)}
 
             {qrModal && (
                 <div className="qr-backdrop" onClick={() => setQrModal(null)}>

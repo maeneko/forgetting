@@ -196,6 +196,21 @@ export async function apiFetch(method: string, path: string, token: string, body
     return r.data;
 }
 
+// Почему запрос к серверу не удался — три разных случая, которые нельзя показывать одинаково:
+//   no-core  — панель без локального awg-ctrl (404 «Локальный сервер не настроен»): тут просто нет VPN;
+//   offline  — 502/504 или «Сервер недоступен»: сервер (нода) не на связи, данные могут вернуться;
+//   error    — всё остальное: настоящая ошибка, обычно с тостом.
+// Без этого «пусто» от «здесь нет VPN» не отличить, и вкладка врёт «Нет пользователей».
+export type ApiFailure = 'no-core' | 'offline' | 'error';
+
+export function classifyApiError(e: unknown): ApiFailure {
+    const status = (e as any)?.response?.status;
+    const msg = String((e as any)?.response?.data?.error ?? '').toLowerCase();
+    if (status === 404 && msg.includes('локальный сервер не настроен')) return 'no-core';
+    if (status === 502 || status === 504 || msg.includes('сервер недоступен') || msg.includes('сервер не ответил')) return 'offline';
+    return 'error';
+}
+
 export async function vpnKeyToConf(vpnKey: string): Promise<string> {
     const b64    = vpnKey.replace('vpn://', '').replace(/-/g, '+').replace(/_/g, '/');
     const raw    = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
