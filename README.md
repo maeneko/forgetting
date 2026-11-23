@@ -463,7 +463,7 @@ TOKEN=$(curl -s -X POST http://HOST:PORT/login \
 
 | Метод | Ответ |
 |---|---|
-| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.5.9" }` — имя и версия панели для вордмарка; за авторизацией, чтобы сканер не опознал панель |
+| `GET /ui/brand` | `{ "brand": "Forgetting", "channel": "Beta", "version": "0.6.0" }` — имя и версия панели для вордмарка; за авторизацией, чтобы сканер не опознал панель |
 | `GET /health` | `{ "status", "server", "ip", "gen", "awg": { "status", "peers", "module", "tools" } }`. `200`, если интерфейс поднят, иначе `503` и `status: "degraded"` |
 | `GET /awg/status` | `{ "up": true, "peers": 3, "publicKey": "…" }` |
 

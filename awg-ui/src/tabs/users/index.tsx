@@ -9,7 +9,7 @@ import {
     type LimitUnit, type BlockReason, type User, type PageProps, type AwgGen, type ApiFailure,
 } from '../../lib/shared';
 import { qrDataUrl } from '../../lib/qr';
-import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe, IcoHistory, IcoPower } from '../../components/icons';
+import { IcoPlus, IcoRefresh, IcoQR, IcoTrash, IcoGlobe, IcoSettings, IcoPower } from '../../components/icons';
 import PriorityChip from '../../components/PriorityChip';
 import TorrentChip from '../../components/TorrentChip';
 import DateField from './DateField';
@@ -500,7 +500,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                             title="Лимиты…"
                                             aria-label="Лимиты"
                                             onClick={() => openLimits(u)}
-                                        ><IcoHistory /></button>
+                                        ><IcoSettings /></button>
                                         <button
                                             className="btn-icon"
                                             title="QR-код vpn://"
@@ -565,7 +565,7 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                             <button
                                 className="btn btn--outline"
                                 onClick={() => openLimits(u)}
-                            ><IcoHistory /> Лимиты</button>
+                            ><IcoSettings /> Лимиты</button>
                             <button
                                 className="btn btn--danger btn--sq"
                                 aria-label="Удалить"

@@ -1,0 +1,169 @@
+/*
+Copyright (c) 2026 Ivan Vasilev
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*/
+/* Стили раздела «Вкладки» (Настройки → Вкладки). Карточки и строки — общие .st-* из
+   ../settings.css; здесь только группы, иконки строк и переключатель MD3.
+   Размеры на шаг меньше общего списка настроек: это короткий список из шести пунктов,
+   и он должен помещаться на экран целиком, без прокрутки.
+   settings.css подключается после этого файла, поэтому переопределения общих классов
+   записаны двойным селектором (.st-row.tabs-row): иначе побеждает .st-row из общего файла. */
+
+/* Колонка раздела: подводка и карточки с шагом плотнее общего (.st-view — 20px) */
+.tabs-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.st-lead.tabs-lead { margin: 0; max-width: 68ch; }
+
+/* Заголовок группы внутри карточки: тихая подпись, как у групп меню в сайдбаре */
+.tabs-group-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px 16px;
+    padding: 0 0 2px;
+}
+.tabs-group-name { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+.tabs-group-note { font-size: var(--body-small-size); line-height: var(--body-small-line); color: var(--neutral-text); }
+
+/* Карточка компактнее общей .st-section: меньше поля, строки — по 6 px */
+.st-section.tabs-group { padding: 8px 14px 6px; }
+
+/* Строка: иконка, текст, переключатель в одну линию. Общего .st-row переноса здесь нет —
+   описание переносится само, а переключатель всегда остаётся справа, в том числе на 390. */
+.st-row.tabs-row { flex-wrap: nowrap; align-items: center; gap: 10px; padding: 6px 0; }
+.st-row.tabs-row .st-row-text { flex: 1 1 auto; gap: 0; }
+.st-row.tabs-row .st-row-ctl { flex: 0 0 auto; width: auto; }
+.st-row.tabs-row .st-row-name { font-size: var(--body-medium-size); line-height: var(--body-medium-line); }
+.tabs-group-head + .st-row.tabs-row { padding-top: 2px; }
+.st-row.tabs-row:last-child { padding-bottom: 2px; }
+
+.tabs-row-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--shape-extra-small);
+    background: var(--surface-container-highest);
+    color: var(--on-surface-variant);
+}
+/* Базовые строки тише: иконка без плашки, название не спорит с тем, что можно включить */
+.tabs-row--base .tabs-row-icon { background: transparent; color: var(--neutral-text); }
+.tabs-row--base .st-row-name { color: var(--on-surface-variant); }
+
+/* «Всегда» вместо тумблера у базовой строки: пометка, а не орган управления */
+.tabs-base-tip { padding: 4px 0; }
+.tabs-base-mark {
+    font-size: var(--body-small-size);
+    line-height: var(--body-small-line);
+    color: var(--neutral-text);
+    white-space: nowrap;
+}
+
+/* ── Переключатель (MD3 switch, компактный) ──
+   Кнопка 44×32 — тач-цель с запасом по ширине; на тач-устройствах 48×44 (≥ 44 px).
+   Рисуется внутри: дорожка 40×24 и бегунок.
+   Выключен: surface-container-highest, рамка outline, бегунок 12px цвета on-surface-variant.
+   Включён: заливка primary, бегунок 18px цвета on-primary. */
+.tabs-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 52px;
+    height: 36px;
+    padding: 0;
+    border: none;
+    border-radius: var(--shape-full);
+    background: none;
+    color: var(--on-surface);       /* цвет слоя состояния */
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.tabs-switch[aria-checked="true"] { color: var(--primary); }
+/* слой состояния MD3: по дорожке, а не по всей тач-цели */
+.tabs-switch::before {
+    content: '';
+    position: absolute;
+    inset: 6px 4px;
+    border-radius: var(--shape-full);
+    background: currentColor;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-short2) var(--ease-standard);
+}
+@media (hover: hover) {
+    .tabs-switch:hover:not(:disabled)::before { opacity: var(--state-hover); }
+}
+.tabs-switch:active:not(:disabled)::before { opacity: var(--state-pressed); }
+
+.tabs-track {
+    position: relative;
+    display: block;
+    box-sizing: border-box;
+    width: 44px;
+    height: 24px;
+    border: 2px solid var(--outline);
+    border-radius: var(--shape-full);
+    background: var(--surface-container-highest);
+    transition: background var(--duration-short3) var(--ease-standard),
+                border-color var(--duration-short3) var(--ease-standard);
+}
+.tabs-switch[aria-checked="true"] .tabs-track {
+    border-color: transparent;      /* рамка остаётся 2px — бегунок не дёргается */
+    background: var(--primary);
+}
+.tabs-thumb {
+    position: absolute;
+    top: 50%;
+    left: 4px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--on-surface-variant);
+    transform: translate(0, -50%);
+    transition: transform var(--duration-short3) var(--ease-standard),
+                background var(--duration-short3) var(--ease-standard);
+}
+/* Классический тумблер: бегунок постоянного размера, поля по 4 px с обеих сторон
+   (44 px внутри рамки − 20 px бегунка − 2×4 px полей = 16 px хода). */
+.tabs-switch[aria-checked="true"] .tabs-thumb {
+    background: var(--on-primary);
+    transform: translate(16px, -50%);
+}
+
+/* Загрузка списка: переключатель недоступен — цвета недоступного, без слоёв состояния */
+.tabs-switch:disabled { cursor: default; }
+.tabs-switch:disabled .tabs-track { border-color: transparent; background: var(--disabled-container); }
+.tabs-switch:disabled .tabs-thumb { background: var(--disabled-content); }
+
+/* Тач: та же дорожка, но цель не меньше 44 px */
+@media (pointer: coarse) {
+    .tabs-switch { width: 52px; height: 44px; }
+    .tabs-switch::before { inset: 10px 4px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tabs-switch::before,
+    .tabs-track,
+    .tabs-thumb { transition: none; }
+}
+
+/* Не сохранилось: одна тихая строка внизу группы — что случилось и «Повторить» */
+.tabs-error {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 2px 8px;
+    padding: 6px 0 2px;
+    border-top: 1px solid var(--outline-variant);
+    color: var(--error);
+    font-size: var(--body-small-size);
+    line-height: var(--body-small-line);
+}
+.tabs-error-text { flex: 0 1 auto; overflow-wrap: anywhere; }
+.tabs-error .btn { color: var(--error); }

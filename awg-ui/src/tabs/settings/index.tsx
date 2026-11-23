@@ -10,12 +10,15 @@ import AuditPage from './audit';
 import MigratePage from './migrate';
 import PrometheusInstall from './prometheus';
 import ServerSettings from './server';
+import TabsSection from './tabs';
 import SenSpec from './about/SenSpec';
 import './settings.css';
 
 // Вкладка «Настройки»: настройки самой панели, не конкретного сервера (те — в меню серверов).
 // Разделы — по вкладкам MD3 (primary tabs) сверху, виден один:
 //   Оформление — тема (хранится в браузере, lib/theme).
+//   Вкладки — какие вкладки показывать в меню: база (Пользователи, Мастер-ключи, Настройки, Журнал)
+//     есть всегда, дополнительный функционал (Релеи, Монитор, Прокси) отключается (./tabs).
 //   Сервер — деление канала и блокировка торрентов сервера из шапки (./server; туда ведёт и шестерёнка
 //     в меню серверов). Telegram-прокси раньше был здесь, теперь — вкладка «Прокси» (группа «Доп»).
 //   API-ключи, Аудит, Перенос — бывшие отдельные вкладки меню; живут в подпапках и
@@ -33,6 +36,7 @@ interface MetricsToken {
 
 const SECTIONS = [
     { id: 'look',    label: 'Оформление' },
+    { id: 'tabs',    label: 'Вкладки' },
     { id: 'server',  label: 'Сервер' },
     { id: 'apikeys', label: 'API-ключи' },
     { id: 'prom',    label: 'Prometheus' },
@@ -212,6 +216,8 @@ export default function SettingsPage({ token, showMsg }: PageProps) {
                 </div>
             </section>
             )}
+
+            {section === 'tabs' && <TabsSection token={token} />}
 
             {section === 'prom' && <PrometheusInstall token={token} showMsg={showMsg} />}
 

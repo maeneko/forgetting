@@ -1119,6 +1119,9 @@ func (a *App) routes() *Router {
 	app.Post("/ui/apikeys", auth, a.apiKeysCreate)
 	app.Patch("/ui/apikeys/:id", auth, a.apiKeysPatch)
 	app.Delete("/ui/apikeys/:id", auth, a.apiKeysDelete)
+	// Необязательные вкладки меню («Релеи», «Монитор», «Прокси»): какие показывать.
+	app.Get("/ui/tabs", auth, a.tabsGet)
+	app.Put("/ui/tabs", auth, a.tabsPut)
 
 	// ВАЖНО: /api/v1 — до JWT-прокси на /api, иначе прокси потребует JWT вместо ключа.
 	app.Use("/api/v1", a.requireAPIKey)

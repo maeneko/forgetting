@@ -188,7 +188,7 @@ trap 'exec >&- 2>&-; wait "$LOG_PID" 2>/dev/null || true; exec 3>&-
 # ⚠️ Дублирует .env из репозитория: установщик собирает URL релиза и печатает
 # баннер ДО того, как архив с .env скачан, поэтому взять их оттуда не может.
 # При бампе версии правь оба места.
-VERSION="0.5.9"
+VERSION="0.6.0"
 CHANNEL="${CHANNEL:-Beta}"
 
 # Откуда брать архив и как называется продукт. По умолчанию — релизы на GitHub; источник
@@ -354,6 +354,7 @@ uninstall_all() {
     local role="$PREV_ROLE" conf="$AWG_CONF" net_iface="" p
     local awg_port ports=()
     local unit="/etc/systemd/system/awg-control.service"
+    local agent_unit="/etc/systemd/system/awg-agent.service"
 
     step "Удаление ${BRAND}"
     echo -e "    ${DIM}Будут удалены сервисы, $PROJECT, $AMNEZIA_DIR (пользователи, ключи, базы),${NC}"
@@ -410,6 +411,9 @@ uninstall_all() {
     if command -v systemctl &>/dev/null && [[ -f "$unit" ]]; then
         run systemctl disable --now awg-control.service || true
     fi
+    if command -v systemctl &>/dev/null && [[ -f "$agent_unit" ]]; then
+        run systemctl disable --now awg-agent.service || true
+    fi
     # MTProto-прокси из панели: юнит и порт ставил awg-ctrl, при удалении тоже снимаем.
     if [[ -f /etc/systemd/system/awg-mtproto.service ]]; then
         run systemctl disable --now awg-mtproto.service || true
@@ -455,8 +459,8 @@ uninstall_all() {
         fi
     fi
 
-    if [[ -f /etc/systemd/system/awg-control.service ]]; then
-        rm -f /etc/systemd/system/awg-control.service
+    if [[ -f /etc/systemd/system/awg-control.service || -f "$agent_unit" ]]; then
+        rm -f /etc/systemd/system/awg-control.service "$agent_unit"
         command -v systemctl &>/dev/null && { run systemctl daemon-reload || true; }
     fi
     rm -f /etc/systemd/system/awg-mtproto.service
@@ -728,15 +732,16 @@ install_command() {
 # start/stop. awg-ctrl падает, если awg1 не поднят, а на загрузке awg-quick up
 # вручную не выполняется — поднимаем интерфейс в ExecStartPre (если ещё не поднят).
 SERVICE_UNIT="/etc/systemd/system/awg-control.service"
+AGENT_UNIT="/etc/systemd/system/awg-agent.service"
 setup_service() {
     # sbin в PATH юнита: awg-quick зовёт iptables/ip/sysctl.
-    local pre="" what
+    local pre="" what agent=""
     # Панели без VPN (core) интерфейс не нужен — ExecStartPre только там, где есть awg-ctrl.
     [[ "$HAS_VPN" == 1 ]] && pre="ExecStartPre=/bin/sh -c 'awg show ${IFACE} >/dev/null 2>&1 || awg-quick up ${IFACE}'"
     case "$ROLE" in
         core)  what="awg-ui" ;;
-        node)  what="awg-ctrl + awg-agent" ;;
-        relay) what="awg-relay + awg-agent" ;;
+        node)  what="awg-ctrl + awg-agent"; agent=1 ;;
+        relay) what="awg-relay + awg-agent"; agent=1 ;;
         *)     what="awg-ctrl + awg-ui" ;;
     esac
     cat > "$SERVICE_UNIT" <<UNIT
@@ -752,14 +757,88 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ${pre}
 ExecStart=/usr/local/bin/awg-ctrl start all
 ExecStop=/usr/local/bin/awg-ctrl stop all
+Restart=on-failure
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 UNIT
+    # Агент — отдельным юнитом: CLI запускает его детачем и пишет PID-файл, поэтому Type=forking.
+    # Без этого юнита агент стартовал один раз на загрузке и после падения не поднимался.
+    # Restart=on-failure: упал/убит — поднимется; штатный `stop` (SIGTERM, код 0) — нет.
+    if [[ -n "$agent" ]]; then
+        cat > "$AGENT_UNIT" <<UNIT
+[Unit]
+Description=${BRAND} node agent
+After=network-online.target awg-control.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/tmp/awg-agent.pid
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PID-файл от прошлой загрузки: живой оставляем (агента мог поднять start all — юнит его
+# усыновит по PIDFile), мёртвый убираем, чтобы systemd не взял чужой PID.
+ExecStartPre=-/bin/sh -c 'p=\$(cat /tmp/awg-agent.pid 2>/dev/null); [ -n "\$p" ] && kill -0 "\$p" 2>/dev/null || rm -f /tmp/awg-agent.pid'
+ExecStart=/usr/local/bin/awg-ctrl start agent
+ExecStop=/usr/local/bin/awg-ctrl stop agent
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    elif [[ -f "$AGENT_UNIT" ]]; then
+        # Роль без агента (после unjoin/migrate): юнит прежней роли не должен остаться включённым.
+        run systemctl disable --now awg-agent.service || true
+        rm -f "$AGENT_UNIT"
+    fi
     run systemctl daemon-reload
     run systemctl enable awg-control.service \
         || warn "systemctl enable awg-control не удался — автозапуск не настроен"
+    if [[ -n "$agent" ]]; then
+        run systemctl enable awg-agent.service \
+            || warn "systemctl enable awg-agent не удался — перезапуск агента не настроен"
+        ok "systemd-юнит awg-agent установлен (автозапуск и перезапуск при падении)"
+    fi
     ok "systemd-юнит awg-control установлен (автозапуск на загрузке)"
+}
+
+# Модуль под запущенное ядро. Обновление ядра без пересборки DKMS — самая частая причина
+# «после перезагрузки нет VPN»: awg-quick не создаёт интерфейс, awg-ctrl падает. Обновление
+# файлов это не лечит, но обязано сказать прямо и попробовать пересобрать.
+MODULE_MISSING=""
+check_awg_module() {
+    MODULE_MISSING=""
+    [[ "$HAS_VPN" == 1 ]] || return 0
+    modinfo -k "$KERNEL" amneziawg &>/dev/null && return 0
+
+    warn "Для запущенного ядра $KERNEL модуль amneziawg не собран — VPN сейчас не поднимется."
+    if command -v dkms &>/dev/null && [[ -d /var/lib/dkms/amneziawg ]]; then
+        info "пробуем пересобрать: dkms autoinstall -k $KERNEL"
+        run dkms autoinstall -k "$KERNEL" || true
+        if modinfo -k "$KERNEL" amneziawg &>/dev/null; then
+            ok "Модуль amneziawg собран для $KERNEL"
+            return 0
+        fi
+    fi
+
+    MODULE_MISSING=1
+    local mklog k
+    mklog=$(ls -1t /var/lib/dkms/amneziawg/*/build/make.log 2>/dev/null | head -1 || true)
+    if [[ -n "$mklog" && -f "$mklog" ]]; then
+        info "$mklog — последние 20 строк"
+        tail -n 20 "$mklog" | logblock
+    fi
+    # Ближайшее установленное ядро, для которого модуль уже собран, — путь возврата.
+    for k in $(ls -1 /lib/modules 2>/dev/null | sort -rV); do
+        [[ "$k" == "$KERNEL" ]] && continue
+        if modinfo -k "$k" amneziawg &>/dev/null; then
+            warn "Модуль есть для $k — можно загрузиться в него (GRUB → Advanced options)."
+            break
+        fi
+    done
+    warn "Обновление продолжится, но VPN не заработает, пока модуль не собран для $KERNEL."
 }
 
 # Запуск/перезапуск сервисов + статус. Через systemd, если он есть (тогда
@@ -767,8 +846,20 @@ UNIT
 start_and_status() {
     if command -v systemctl >/dev/null 2>&1; then
         setup_service
-        run systemctl restart awg-control.service \
-            || fail "systemctl restart awg-control завершился ошибкой"
+        if [[ -n "${MODULE_MISSING:-}" ]]; then
+            # Причина известна и показана выше: не валим обновление из-за неё.
+            run systemctl restart awg-control.service \
+                || warn "awg-control не стартовал: для ядра $KERNEL нет модуля amneziawg (см. выше)"
+        else
+            run systemctl restart awg-control.service \
+                || fail "systemctl restart awg-control завершился ошибкой"
+        fi
+        # Агент — своим юнитом: нужен и на первом запуске, и чтобы после обновления он
+        # перечитал cli.env (start all его больше не запускает).
+        if [[ -f "$AGENT_UNIT" ]]; then
+            run systemctl restart awg-agent.service \
+                || warn "systemctl restart awg-agent завершился ошибкой — см. journalctl -u awg-agent"
+        fi
     else
         warn "systemd не найден — запускаю напрямую через CLI (без автозапуска)"
         run "$BIN" start all
@@ -1255,6 +1346,8 @@ NET_IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
 if [[ "$INSTALL_MODE" == "update" ]]; then
     step "Обновление до версии ${VERSION} ($ROLE_LABEL)"
 
+    check_awg_module
+
     info "останавливаем и убиваем все процессы awg-control"
     kill_related
 
@@ -1290,6 +1383,10 @@ if [[ "$INSTALL_MODE" == "update" ]]; then
     echo
     card_line "$GRN"
     card_line "$GRN" "${GRN}${BLD}✓ Обновлено до ${VERSION}${NC}   ${DIM}${BRAND} · ${ROLE_LABEL}${NC}"
+    if [[ -n "${MODULE_MISSING:-}" ]]; then
+        card_line "$GRN" "${YLW}⚠ VPN не поднят: для ядра ${KERNEL} нет модуля amneziawg${NC}"
+        card_line "$GRN" "${DIM}  dkms autoinstall -k ${KERNEL} · лог: /var/lib/dkms/amneziawg/*/build/make.log${NC}"
+    fi
     card_line "$GRN"
     if [[ "$HAS_PANEL" == 1 ]]; then
         HOST="$(prev_val SUB_HOST)"; HOST="${HOST:-$(prev_val SERVER_IP)}"

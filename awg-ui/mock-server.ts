@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.9";
+const MOCK_VERSION = "0.6.0";
 const GB = 1024 ** 3, TB = 1024 ** 4;
 
 // ── лимиты времени и трафика: одно состояние на пользователя и на мастер-ключ ──
@@ -103,7 +103,7 @@ const mnodes: MNode[] = [
     { id: 1, name: "Frankfurt", ip: "198.51.100.4", gen: "2", online: true, pending: false, version: "0.5.0" },
     { id: 2, name: "Tokyo", ip: "", gen: "2", online: false, pending: true, version: null },
     { id: 3, name: "Amsterdam", ip: "192.0.2.10", gen: "3.1", online: false, pending: false, version: "0.4.5" },  // старше 0.5.0: хаб не подключает
-    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.6.0" },   // новее панели — жёлтый чип
+    { id: 4, name: "Helsinki", ip: "192.0.2.44", gen: "3.1", online: true, pending: false, version: "0.7.0" },   // новее панели — жёлтый чип
 ];
 let nodeId = 3;
 const joinStr = (id: number) => "awgjoin://" + Buffer.from(JSON.stringify({ v: 1, h: "localhost", p: 8443, pin: crypto.randomBytes(32).toString("base64url"), n: id, s: crypto.randomBytes(16).toString("base64url") })).toString("base64url");
@@ -198,6 +198,22 @@ const nodeView = () => [
         health: n.online ? { server: n.name, ip: n.ip, gen: n.gen, peers: (usersOf[n.id] ?? []).length, awg_up: true, module: "3.0.1", tools: "1.0.0" } : null })),
 ];
 app.get("/ui/nodes", (_q, r) => r.json({ hub: true, local: true, version: MOCK_VERSION, nodes: nodeView() }));
+
+// ── вкладки панели ──
+// База (Пользователи, Мастер-ключи, Настройки) не отключается; эти четыре — дополнительный
+// функционал, его можно выключить в «Настройки → Вкладки». Как на сервере: по умолчанию включены все,
+// неизвестный id — 400 с тем же текстом, порядок ответа — всегда один и тот же.
+const OPTIONAL_TABS = ["connlog", "relays", "monitor", "proxy"] as const;
+let enabledTabs: string[] = [...OPTIONAL_TABS];
+app.get("/ui/tabs", (_q, r) => r.json({ enabled: enabledTabs }));
+app.put("/ui/tabs", (q, r) => {
+    const list = q.body?.enabled;
+    if (!Array.isArray(list) || list.some(x => !OPTIONAL_TABS.includes(x)))
+        return r.status(400).json({ error: "enabled: connlog, relays, monitor, proxy" });
+    enabledTabs = OPTIONAL_TABS.filter(x => list.includes(x));
+    r.json({ enabled: enabledTabs });
+});
+
 app.get("/ui/relays", (_q, r) => r.json({ hub: true, relays: mrelays.map(({ id, name, online, pending, last_seen, version, binds }) => ({ id, name, online, pending, last_seen, version, binds })) }));
 app.post("/ui/relays", (q, r) => {
     const name = String(q.body.name ?? "");
@@ -264,7 +280,10 @@ const monJobs: Record<number, MonJob> = {
     1: { action: "install", start: now() * 1000 - 86400e3, exit: 100, lines: ["1/4  установка пакета prometheus", "Reading package lists…",
         "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1873 (unattended-upgr)", "E: Unable to acquire the dpkg frontend lock, is another process using it?"] },
 };
-let monReady = false;
+// Prometheus «стоит» по умолчанию: иначе вкладки «Монитор» нет в меню (requires: prometheus) и
+// проверить её выключение в «Настройки → Вкладки» не на чем. MOCK_PROM=0 — чистый сервер без него,
+// со сценариями установки и сломанной установки на Frankfurt.
+let monReady = process.env.MOCK_PROM !== "0";
 let monHost = 0;   // где стоит (для панели без VPN — нода; у панели с VPN всегда 0, «этот сервер»)
 const monHostOf = (id: number) => ({ id, name: nodeView().find(n => n.id === id)?.name ?? `#${id}` });
 const MON_MS = 6000;

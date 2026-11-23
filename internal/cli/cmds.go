@@ -146,6 +146,7 @@ func (c *CLI) joinCore(link string, hasLink bool, flag string, hasFlag bool) {
 		content = updateEnvVar(content, "RELAY", relay)
 	}
 	c.writeEnvFile(content)
+	c.ensureAgentUnit()
 
 	// Панель останавливается, а пиры её устройств остаются на awg-ctrl — управлять ими больше
 	// некому. Решает оператор; спрашиваем до остановки, снимаем после (иначе панель вернёт их).
@@ -229,6 +230,7 @@ func (c *CLI) joinRelay(j jsjson.Object) {
 	}
 	content = removeEnvVar(content, "CORE_ENDPOINT") // адрес прежней панели к новой не относится
 	c.writeEnvFile(content)
+	c.ensureAgentUnit()
 	fmt.Printf("\n  %s Релей настроен: core %s:%d, релей #%d\n", green("✓"), h, port, id)
 	fmt.Println("  " + dim("Привязки серверов агент получит от панели после подключения"))
 	c.restartFresh()
@@ -332,6 +334,7 @@ func (c *CLI) unjoinCore() {
 		return
 	}
 	c.stop("agent")
+	c.removeAgentUnit()
 	if !c.isRelay {
 		c.stop("relay")
 	}

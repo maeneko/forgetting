@@ -375,22 +375,23 @@ func (c *CLI) isRunning(name string) bool {
 	return pid != 0 && isAlive(pid) && c.pidMatches(name, pid)
 }
 
-func (c *CLI) start(name string) {
+// start запускает сервис; false — он не поднялся (нужно для кода выхода и Restart= systemd).
+func (c *CLI) start(name string) bool {
 	s := c.svc[name]
 	if c.isRunning(name) {
 		fmt.Printf("  %s: already running  pid=%d\n", s.label, c.readPid(name))
-		return
+		return true
 	}
 	if name == "awgctrl" {
 		if f := c.svcEnv("awgctrl", "INTERNAL_AUTH_PUB_FILE"); !exists(f) {
 			errorf("  awgctrl: публичный ключ внутренней авторизации не найден: %s", f)
-			os.Exit(1)
+			return false
 		}
 	}
 	logF, err := os.OpenFile(s.logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		errorf("  %s: не удалось запустить — %v", s.label, err)
-		return
+		return false
 	}
 	defer logF.Close() // дескриптор унаследован ребёнком — родителю не нужен
 	cmd := exec.Command(c.exe, s.name)
@@ -407,11 +408,12 @@ func (c *CLI) start(name string) {
 	if err := cmd.Start(); err != nil {
 		errorf("  %s: не удалось запустить — %v", s.label, err)
 		os.Remove(s.pidFile)
-		return
+		return false
 	}
 	go cmd.Wait() // пока CLI жив (меню), не оставляем зомби
 	os.WriteFile(s.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
 	fmt.Printf("  %s %s: started  pid=%d\n", green("▶"), s.label, cmd.Process.Pid)
+	return true
 }
 
 func (c *CLI) stop(name string) {
@@ -556,10 +558,11 @@ func probe(url string) bool {
 	return true
 }
 
-// waitForHealth — ждём, пока awg-ctrl начнёт отвечать; умер — сразу выходим.
+// waitForHealth — ждём, пока awg-ctrl начнёт отвечать; умер — сразу выходим. 30 с: на загрузке
+// awg-quick up и awg-ctrl поднимаются не мгновенно, а прежние 3 с давали ложный «не отвечает».
 func (c *CLI) waitForHealth() bool {
 	url := "http://127.0.0.1:" + c.envOf("awgctrl") + "/health"
-	for range 10 {
+	for range 100 {
 		if !c.isRunning("awgctrl") {
 			return false
 		}
@@ -571,44 +574,159 @@ func (c *CLI) waitForHealth() bool {
 	return false
 }
 
-func (c *CLI) startAll() {
+// systemdInvoked — процесс запущен юнитом systemd (ExecStart/ExecStop). Отличает загрузку и
+// остановку через awg-control от ручного `awg-ctrl start|stop`.
+func systemdInvoked() bool { return os.Getenv("INVOCATION_ID") != "" }
+
+// agentManagedBySystemd — агент живёт отдельным юнитом awg-agent.service (его ставит install.sh
+// для нод и релеев). Тогда его поднимает и перезапускает systemd, а не агрегатный юнит.
+func (c *CLI) agentManagedBySystemd() bool {
+	if !exists("/run/systemd/system") {
+		return false
+	}
+	for _, dir := range []string{"/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"} {
+		if exists(filepath.Join(dir, "awg-agent.service")) {
+			return true
+		}
+	}
+	return false
+}
+
+// systemctl выполняет команду systemctl; вывод — в консоль вызывающего.
+func (c *CLI) systemctl(args ...string) bool {
+	cmd := exec.Command("systemctl", args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		errorf("  systemctl %s: %v", strings.Join(args, " "), err)
+		return false
+	}
+	return true
+}
+
+func (c *CLI) startAll() bool {
+	// Агент под systemd — отдельным юнитом. На загрузке его поднимает systemd (мы только не
+	// мешаем: юнит идёт After=awg-control.service), при ручном запуске — делегируем systemctl.
+	managed := c.agentManagedBySystemd()
+	ok := true
+	startOne := func(n string) {
+		if n == "agent" && managed {
+			if !systemdInvoked() && !c.systemctl("start", "awg-agent.service") {
+				ok = false
+			}
+			return
+		}
+		if !c.start(n) {
+			ok = false
+		}
+	}
+
 	// Панель без своего VPN: awg-ctrl рядом нет, health-gate не нужен.
 	if !contains(c.all, "awgctrl") {
 		for _, n := range c.all {
-			c.start(n)
+			startOne(n)
 		}
-		return
+		return ok
 	}
 	// Ретранслятор от awg-ctrl не зависит: подписка и панель через него не должны ждать VPN.
 	if contains(c.all, "relay") {
-		c.start("relay")
+		if !c.start("relay") {
+			ok = false
+		}
 	}
-	c.start("awgctrl")
+	// Агент не зависит от локального awg-ctrl: поднимаем его до health-gate. Иначе при лежащем
+	// awg1 (частый случай после обновления ядра) агент остаётся выключенным, хотя core его ждёт.
+	if contains(c.all, "agent") {
+		startOne("agent")
+	}
+	if !c.start("awgctrl") {
+		ok = false
+	}
 	var rest, labels []string
 	for _, n := range c.all {
-		if n != "awgctrl" && n != "relay" {
+		if n != "awgctrl" && n != "relay" && n != "agent" {
 			rest = append(rest, n)
 			labels = append(labels, c.svc[n].label)
 		}
 	}
 	if !c.isRunning("awgctrl") || !c.waitForHealth() {
 		errorf("  %s awg-ctrl не отвечает — %s не запущен (см. %s)", grey("■"), strings.Join(labels, ", "), c.svc["awgctrl"].logFile)
-		return
+		return false
 	}
 	for _, n := range rest {
-		c.start(n)
+		startOne(n)
 	}
+	return ok
 }
 
 func (c *CLI) stopAll() {
+	managed := c.agentManagedBySystemd()
 	for _, n := range c.all {
+		if n == "agent" && managed {
+			// При остановке awg-control агент гасит systemd; при ручном stop — делегируем.
+			if !systemdInvoked() {
+				c.systemctl("stop", "awg-agent.service")
+			}
+			continue
+		}
 		c.stop(n)
 	}
 }
 
-func (c *CLI) restartAll() {
+func (c *CLI) restartAll() bool {
 	c.stopAll()
-	c.startAll()
+	return c.startAll()
+}
+
+// startCmd/stopCmd/restartCmd — выборочное управление сервисом. Юнит awg-agent.service сам
+// вызывает `awg-ctrl start|stop agent`, поэтому внутри юнита (INVOCATION_ID) — только прямой
+// старт, без делегации в systemctl.
+func (c *CLI) startCmd(name string, has bool) bool {
+	if !has || name == "all" {
+		return c.startAll()
+	}
+	if !contains(c.all, name) {
+		c.unknownService(name)
+		return false
+	}
+	if name == "agent" && c.agentManagedBySystemd() && !systemdInvoked() {
+		return c.systemctl("start", "awg-agent.service")
+	}
+	return c.start(name)
+}
+
+func (c *CLI) stopCmd(name string, has bool) bool {
+	if !has || name == "all" {
+		c.stopAll()
+		return true
+	}
+	if !contains(c.all, name) {
+		c.unknownService(name)
+		return false
+	}
+	if name == "agent" && c.agentManagedBySystemd() && !systemdInvoked() {
+		return c.systemctl("stop", "awg-agent.service")
+	}
+	c.stop(name)
+	return true
+}
+
+func (c *CLI) restartCmd(name string, has bool) bool {
+	if !has || name == "all" {
+		return c.restartAll()
+	}
+	if !contains(c.all, name) {
+		c.unknownService(name)
+		return false
+	}
+	if name == "agent" && c.agentManagedBySystemd() && !systemdInvoked() {
+		return c.systemctl("restart", "awg-agent.service")
+	}
+	c.stop(name)
+	return c.start(name)
+}
+
+func (c *CLI) unknownService(name string) {
+	errorf("  Неизвестный сервис: %s (доступны: %s)", name, strings.Join(c.all, ", "))
 }
 
 func contains(s []string, v string) bool {
@@ -640,7 +758,16 @@ func (c *CLI) writeEnvFile(content string) error {
 // перезапуск — свежим процессом с исходным окружением (без значений из старого cli.env).
 func (c *CLI) restartFresh() {
 	cmd := exec.Command(c.exe, "restart")
-	cmd.Env = c.origEnv
+	// Без INVOCATION_ID: это ручной перезапуск, и агент под systemd тоже должен перечитать
+	// cli.env (иначе при смене CORE_* он остался бы с прежним окружением).
+	env := make([]string, 0, len(c.origEnv))
+	for _, kv := range c.origEnv {
+		if strings.HasPrefix(kv, "INVOCATION_ID=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Run()
 }
@@ -683,11 +810,17 @@ func Main(args []string) {
 	a2, hasA2 := arg(2)
 	switch args[0] {
 	case "start":
-		c.startAll()
+		if !c.startCmd(sub, hasSub) {
+			os.Exit(1)
+		}
 	case "stop":
-		c.stopAll()
+		if !c.stopCmd(sub, hasSub) {
+			os.Exit(1)
+		}
 	case "restart":
-		c.restartAll()
+		if !c.restartCmd(sub, hasSub) {
+			os.Exit(1)
+		}
 	case "status":
 		c.status()
 	case "credentials":

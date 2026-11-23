@@ -6,7 +6,7 @@ import { apiFetch, bytes, timeAgo, type PageProps } from '../../lib/shared';
 import { IcoCheck, IcoRefresh } from '../../components/icons';
 import './connlog.css';
 
-// Вкладка «Подключения»: журнал VPN выбранного сервера. Ведёт его awg-ctrl (internal/ctrl/connlog.go)
+// Вкладка «Журнал»: журнал VPN выбранного сервера. Ведёт его awg-ctrl (internal/ctrl/connlog.go)
 // по handshake и счётчикам WireGuard раз в 30 с, панель подставляет имена ключей и устройств sen://
 // (/ui/connlog). Время отключения — последняя активность, точность около 30 с.
 interface Who { pub_key: string; name: string; owner: string; ip: string; key?: string | null; device?: string | null; foreign?: boolean }

@@ -1,6 +1,6 @@
 {
   "id": "connlog",
-  "label": "Подключения",
+  "label": "Журнал",
   "icon": "history",
   "group": "main",
   "order": 1.5

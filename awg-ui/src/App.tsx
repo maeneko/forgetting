@@ -7,7 +7,8 @@ import './tokens.css';
 import './App.css';
 import {
     TOKEN_KEY, SERVER_KEY, BRAND_FALLBACK, apiFetch, setServerId, getServerId, serversLabel, openTab, MIN_NODE_VERSION,
-    type NodeInfo, type Brand,
+    fetchEnabledTabs, isOptionalTabId, resetTabsCache, OPTIONAL_TAB_IDS,
+    type NodeInfo, type Brand, type OptionalTabId,
 } from './lib/shared';
 import { IcoMenu, IcoLogout, IcoSun, IcoMoon, IcoRefresh, IcoChevronDown } from './components/icons';
 import ServerBar from './components/ServerBar';
@@ -34,6 +35,9 @@ export default function App() {
     const [serversOpen, setServersOpen] = useState(false);   // выпадающий список серверов
     const serverSelectRef = useRef<HTMLDivElement>(null);
     const [activeTab, setActiveTab]   = useState(TABS[0].id);
+    // Дополнительные вкладки (Релеи / Монитор / Прокси): какие из них показывать, решает оператор в
+    // «Настройки → Вкладки». null — ещё не знаем: показываем всё, чтобы меню не мигало.
+    const [enabledTabs, setEnabledTabs] = useState<OptionalTabId[] | null>(null);
     // Встроенный Prometheus: null — ещё не знаем; fresh — только что поставили (пункт «Монитор» въезжает в меню);
     // leaving — только что удалили (пункт ещё в меню, пока доигрывает уход)
     const [prom, setProm]             = useState<{ ready: boolean; fresh: boolean; leaving: boolean } | null>(null);
@@ -105,6 +109,8 @@ export default function App() {
         setNodes([]);
         setServerId(null);
         setServerIdState(null);
+        setEnabledTabs(null);
+        resetTabsCache();
         setDrawerOpen(false);
     }, [token]);
 
@@ -266,17 +272,43 @@ export default function App() {
         window.addEventListener('awg:prometheus', h);
         return () => { clearInterval(t); window.removeEventListener('awg:prometheus', h); };
     }, [token, notePrometheus]);
-    // tabVisible — вкладка доступна; в меню она ещё и на время ухода
-    const tabVisible = (t: { requires?: 'prometheus' }) => t.requires !== 'prometheus' || !!prom?.ready;
-    const tabLeaving = (t: { requires?: 'prometheus' }) => t.requires === 'prometheus' && !!prom?.leaving;
+    // Список дополнительных вкладок: спрашиваем при входе и при возврате в окно (за это время его мог
+    // поменять другой оператор). Раздел «Настройки → Вкладки» сообщает об изменении событием awg:tabs.
+    // Сервер не ответил — показываем всё: меню не должно ломаться из-за настройки.
+    useEffect(() => {
+        if (!token) { setEnabledTabs(null); return; }
+        const load = (fresh = false) => {
+            fetchEnabledTabs(token, fresh)
+                .then(setEnabledTabs)
+                .catch(() => setEnabledTabs([...OPTIONAL_TAB_IDS]));
+        };
+        load();
+        const h = (e: Event) => setEnabledTabs((e as CustomEvent<OptionalTabId[]>).detail);
+        const focus = () => load(true);
+        window.addEventListener('awg:tabs', h);
+        window.addEventListener('focus', focus);
+        return () => { window.removeEventListener('awg:tabs', h); window.removeEventListener('focus', focus); };
+    }, [token]);
+
+    // tabEnabled — вкладку включил оператор (базовые включены всегда); tabVisible — она ещё и доступна
+    // (Монитору нужен Prometheus). Настройка важнее условия requires: выключенная вкладка спрятана,
+    // даже если Prometheus стоит. tabLeaving — пункт доигрывает уход из меню после удаления Prometheus.
+    const tabEnabled = (t: { id: string }) => !isOptionalTabId(t.id) || !enabledTabs || enabledTabs.includes(t.id);
+    const tabVisible = (t: { id: string; requires?: 'prometheus' }) =>
+        tabEnabled(t) && (t.requires !== 'prometheus' || !!prom?.ready);
+    const tabLeaving = (t: { id: string; requires?: 'prometheus' }) =>
+        tabEnabled(t) && t.requires === 'prometheus' && !!prom?.leaving;
     const navGroups = TABS_BY_GROUP
         .map(g => ({ ...g, tabs: g.tabs.filter(t => tabVisible(t) || tabLeaving(t)) }))
         .filter(g => g.tabs.length > 0);
+    // Первая доступная вкладка — куда уходим, если открытая пропала из меню
+    const navTabs = navGroups.flatMap(g => g.tabs);
+    const firstTab = navTabs.find(t => tabVisible(t)) ?? TABS[0];
 
-    // Активная вкладка пропала из меню (Prometheus удалили) — на первую
+    // Открытая вкладка исчезла (её выключили в настройках или удалили Prometheus) — на первую доступную,
+    // чтобы не осталось пустой страницы. tabVisible уже учитывает и настройку, и requires.
     useEffect(() => {
-        const t = TABS.find(x => x.id === activeTab);
-        if (t && !tabVisible(t)) setActiveTab(TABS[0].id);
+        if (!navTabs.some(t => t.id === activeTab && tabVisible(t))) setActiveTab(firstTab.id);
     });
 
     // Переход на другую вкладку из самой вкладки (openTab в lib/shared)
@@ -298,14 +330,16 @@ export default function App() {
     }, [drawerOpen]);
 
         const statusLabel = statusText.replace(/^(online|offline):/, '');
-    const tab = TABS.find(t => t.id === activeTab) ?? TABS[0];
+    // Открытая вкладка могла только что исчезнуть из меню — до эффекта выше показываем первую доступную,
+    // а не пустую страницу.
+    const tab = navTabs.find(t => t.id === activeTab && tabVisible(t)) ?? firstTab;
     // Хром вкладки (сервер-бар + перезапуск). Любой флаг по умолчанию включён.
     const chrome = tab.chrome ?? {};
     const showServerBar = chrome.serverBar !== false;
     const showRestart   = chrome.restart   !== false;
     const current = nodes.find(n => n.id === serverId) ?? null;
     // Позиция вкладки в меню (по группам) — направление прокрутки заголовка-барабана
-    const tabOrder = navGroups.flatMap(g => g.tabs).findIndex(t => t.id === tab.id);
+    const tabOrder = navTabs.findIndex(t => t.id === tab.id);
 
     const themeToggle = (
         <button
@@ -386,10 +420,25 @@ export default function App() {
                                 <IcoMenu />
                             </button>
                             <div className="sidebar-logo">
-                                <span className="logo-name">{brand.brand}</span>
-                                <span className="sidebar-version">
-                                    {[brand.channel, brand.version].filter(Boolean).join(' ')}
-                                </span>
+                                <div className="logo-row">
+                                    <span className="logo-name" title={brand.brand}>{brand.brand}</span>
+                                    {brand.channel && (
+                                        <span
+                                            className="brand-channel"
+                                            title={`Канал сборки: ${brand.channel}`}
+                                            aria-label={`Канал сборки: ${brand.channel}`}
+                                        >
+                                            {/* «Beta» с греческой бетой вместо латинской B: βeta */}
+                                            <span className="brand-channel-word" aria-hidden="true">
+                                                <span className="brand-channel-beta">β</span>
+                                                {brand.channel.replace(/^[Bb]/, '')}
+                                            </span>
+                                        </span>
+                                    )}
+                                </div>
+                                {brand.version && (
+                                    <span className="sidebar-version">{brand.version}</span>
+                                )}
                             </div>
                             <hr className="drawer-divider" />
                             {navGroups.map(g => (

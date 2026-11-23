@@ -84,6 +84,50 @@ export function openTab(id: string, section?: string) {
     window.dispatchEvent(new CustomEvent('awg:open-tab', { detail: id }));
 }
 
+// ── Какие вкладки показывать (Настройки → Вкладки) ──
+// База — «Пользователи», «Мастер-ключи» и «Настройки» — есть всегда. Журнал, Релеи, Монитор и
+// Прокси — дополнительный функционал: оператор выключает его в настройках, и вкладка исчезает из
+// меню (сайдбар и мобильный drawer). Список хранит сервер: GET/PUT /ui/tabs.
+export const OPTIONAL_TAB_IDS = ['connlog', 'relays', 'monitor', 'proxy'] as const;
+export type OptionalTabId = typeof OPTIONAL_TAB_IDS[number];
+export const isOptionalTabId = (id: string): id is OptionalTabId =>
+    (OPTIONAL_TAB_IDS as readonly string[]).includes(id);
+
+// Ответ сервера → список в порядке OPTIONAL_TAB_IDS. Поля enabled нет (сервер старше этой
+// настройки) — считаем, что включено всё: непонятый ответ не должен прятать вкладки.
+const tabList = (raw: unknown): OptionalTabId[] => {
+    if (!Array.isArray(raw)) return [...OPTIONAL_TAB_IDS];
+    const ids = raw.filter((x): x is string => typeof x === 'string');
+    return OPTIONAL_TAB_IDS.filter(id => ids.includes(id));
+};
+
+// Кэш на одну загрузку панели: App спрашивает список при входе, раздел «Вкладки» — при открытии.
+// Запрос общий; ошибка кэш сбрасывает, чтобы «Повторить» действительно сходил на сервер.
+let tabsRequest: Promise<OptionalTabId[]> | null = null;
+export function resetTabsCache() { tabsRequest = null; }
+
+// fresh — перечитать с сервера (возврат в окно: список мог поменять другой оператор).
+export function fetchEnabledTabs(token: string, fresh = false): Promise<OptionalTabId[]> {
+    if (fresh) tabsRequest = null;
+    if (!tabsRequest) {
+        tabsRequest = apiFetch('GET', '/ui/tabs', token)
+            .then(d => tabList(d?.enabled))
+            .catch(e => { tabsRequest = null; throw e; });
+    }
+    return tabsRequest;
+}
+
+export async function saveEnabledTabs(token: string, enabled: OptionalTabId[]): Promise<OptionalTabId[]> {
+    const d = await apiFetch('PUT', '/ui/tabs', token, { enabled });
+    const saved = tabList(d?.enabled);
+    tabsRequest = Promise.resolve(saved);   // следующий читатель получит уже применённое
+    return saved;
+}
+
+// Список изменился (раздел «Вкладки»): App сразу перестраивает меню, не дожидаясь ответа сервера.
+export const announceTabs = (enabled: OptionalTabId[]) =>
+    window.dispatchEvent(new CustomEvent('awg:tabs', { detail: enabled }));
+
 // Сервер (core или нода) в списке ServerBar: то, что отдаёт GET /ui/nodes.
 export interface NodeInfo {
     id:        number;

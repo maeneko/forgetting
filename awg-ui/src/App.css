@@ -336,6 +336,58 @@ body {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
+}
+/* Название и капсула канала — одной строкой; длинное название усекается, капсулу не выдавливает */
+.logo-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.logo-row .logo-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.brand-channel {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    height: 20px;
+    line-height: 1;
+    /* Центр капсулы — по середине x-height слова бренда, а не по его
+       line-box: у «Forgetting» есть выносной «g», из-за которого
+       геометрический центр строки оптически выше текста. */
+    transform: translateY(2px);
+    padding: 0 8px;
+    border-radius: var(--shape-full);
+    background: var(--secondary-container);
+    color: var(--on-secondary-container);
+    font-size: var(--label-medium-size);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+}
+.brand-channel-word {
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    line-height: 1;
+}
+/* Греческая бета в слове «βeta»: в системном sans она мельче латиницы,
+   поэтому задаём свой размер; вес наследуем от капсулы — буква не должна
+   выглядеть жирнее соседних «eta». */
+.brand-channel-beta {
+    display: inline-flex;
+    align-items: center;
+    height: 1em;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1;
+    font-weight: inherit;
+    transform: none;
 }
 .drawer-divider {
     border: none;
@@ -822,30 +874,38 @@ tbody td:last-child  { padding-right: 20px; }
 
 /* Открытый API-ключ → tabs/apikeys/apikeys.css */
 
-/* ───── Снэкбар (MD3): inverse-surface, 4px, минимум 48px, по центру снизу; на телефоне —
-   во всю ширину с полями 16px. Появляется снизу вверх. ───── */
+/* ───── Уведомление о действии: боковая карточка ─────
+   Не снэкбар по центру, а карточка в правом нижнем углу (24px) шириной до 360px —
+   центр экрана остаётся свободным. Слева — акцентная полоса во всю высоту:
+   это border-left, а не псевдоэлемент, поэтому она не «плывёт» и не обрывается
+   при переносе строк. Фон — surface-container-high, так что в светлой теме карточка
+   светлая, в тёмной — тёмная, а полоса читается в обеих. Появление — мягкий выезд
+   справа с растворением; на телефоне — во всю ширину, полоса сохраняется. ───── */
 .snack {
     position: fixed;
+    right: 24px;
     bottom: 24px;
-    left: 50%;
-    translate: -50% 0;
     display: flex;
     align-items: center;
+    width: min(360px, calc(100vw - 32px));
     min-height: 48px;
-    max-width: min(560px, calc(100vw - 32px));
-    padding: 14px 16px;
-    background: var(--inverse-surface);
-    color: var(--inverse-on-surface);
+    padding: 12px 16px 12px 14px;   /* + 3px полосы слева = 17px до текста */
+    border-left: 3px solid var(--primary);
+    /* Углы острые: карточка-уведомление не «таблетка», полоса слева задаёт форму. */
+    border-radius: 0;
+    background: var(--surface-container-high);
+    color: var(--on-surface);
     font-size: var(--body-medium-size); line-height: var(--body-medium-line);
-    border-radius: var(--shape-extra-small);
+    text-align: left;
+    overflow-wrap: anywhere;
     z-index: 500;
     pointer-events: none;
-    box-shadow: var(--elevation-3);
-    animation: snack-in var(--duration-medium1) var(--ease-emphasized-decelerate);
+    box-shadow: var(--elevation-2);
+    animation: snack-in var(--duration-short4) var(--ease-standard);
 }
 @keyframes snack-in {
-    from { opacity: 0; transform: translateY(16px); }
-    to   { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; transform: translateX(16px); }
+    to   { opacity: 1; transform: translateX(0); }
 }
 @media (prefers-reduced-motion: reduce) {
     .snack, .node-modal, .qr-card, .node-scrim, .qr-backdrop { animation: none; }
@@ -950,8 +1010,11 @@ tbody td:last-child  { padding-right: 20px; }
         width: calc(100vw - 32px);
         max-width: 360px;
     }
-    /* снэкбар — во всю ширину с полями 16px */
-    .snack { left: 16px; right: 16px; bottom: 16px; translate: none; max-width: none; }
+    /* уведомление — во всю ширину с полями 12px, акцентная полоса слева остаётся */
+    .snack {
+        left: 12px; right: 12px; bottom: 12px;
+        width: auto; max-width: none;
+    }
     .qr-img { width: 100%; height: auto; aspect-ratio: 1; }
 }
 
