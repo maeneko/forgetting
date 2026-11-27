@@ -15,7 +15,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const rnd = (n: number) => Math.floor(Math.random() * n);
 const b64 = (n: number) => crypto.randomBytes(n).toString("base64");
 const GEN = "3.1";
-const MOCK_VERSION = "0.5.9";
+const MOCK_VERSION = "0.5.9.1";
 const GB = 1024 ** 3, TB = 1024 ** 4;
 
 // ── лимиты времени и трафика: одно состояние на пользователя и на мастер-ключ ──
