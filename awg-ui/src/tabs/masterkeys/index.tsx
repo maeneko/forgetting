@@ -560,13 +560,11 @@ export default function MasterKeysPage({ token, showMsg }: PageProps) {
                         <span className="mk-setting-hint">{mkOver(k) ? blockText(mkReason(k)) : 'открыт'}</span>
                     </div>
                     <div className="mk-setting-ctl">
-                        {mkReason(k) === 'manual' ? (
+                        {mkOver(k) ? (
                             <button className="btn btn--tonal" onClick={() =>
                                 modalAct(() => apiFetch('POST', `/ui/masterkeys/${k.id}/unblock`, token), 'Ключ разблокирован')}>
                                 Разблокировать
                             </button>
-                        ) : mkOver(k) ? (
-                            <span className="mk-lim-hint">Закрыт по {mkReason(k) === 'traffic' ? 'трафику' : 'сроку'}</span>
                         ) : (
                             <button className="btn btn--danger" onClick={() =>
                                 modalAct(() => apiFetch('POST', `/ui/masterkeys/${k.id}/block`, token), 'Ключ заблокирован')}>

@@ -667,14 +667,12 @@ export default function UsersPage({ token, showMsg }: PageProps) {
                                 <button className="btn btn--outline" onClick={() => limAct('usage/reset', 'Счётчик сброшен')} disabled={limBusy}>
                                     <IcoRefresh /> Сбросить счётчик
                                 </button>
-                                {limReason === 'manual' ? (
+                                {/* Кнопка есть при любой причине: разблокировка снимает и api-блокировку,
+                                    а подпись причины уже стоит строкой выше (blockText). */}
+                                {limBusyNow ? (
                                     <button className="btn btn--tonal" onClick={() => limAct('unblock', 'Доступ открыт')} disabled={limBusy}>
                                         <IcoPower /> Разблокировать
                                     </button>
-                                ) : limBusyNow ? (
-                                    <span className="lim-note">
-                                        Закрыт по {limReason === 'traffic' ? 'трафику' : 'сроку'} — сбросьте счётчик или снимите ограничение
-                                    </span>
                                 ) : (
                                     <button className="btn btn--danger" onClick={() => limAct('block', 'Пользователь заблокирован')} disabled={limBusy}>
                                         <IcoPower /> Заблокировать
